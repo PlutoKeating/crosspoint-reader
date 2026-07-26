@@ -12,13 +12,56 @@
 #include "MappedInputManager.h"
 #include "activities/network/WifiSelectionActivity.h"
 #include "components/UITheme.h"
+#include "components/icons/project_stick_icons.h"
 #include "fontIds.h"
+#include "ProjectStickCore.h"
 
 namespace {
 constexpr int BLOCK_GAP = 10;
 constexpr int BODY_LINE_GAP = 4;
 constexpr int DIAGNOSTICS_VERTICAL_PADDING = 6;
-constexpr int X3_SIDE_HINT_BOTTOM = 235;
+constexpr int SIDE_BUTTON_MARGIN = 4;
+constexpr int SIDE_BUTTON_WIDTH = 30;
+constexpr int SIDE_BUTTON_HEIGHT = 80;
+constexpr int SIDE_BUTTON_Y = 155;
+constexpr int SIDE_CONTENT_GAP = 8;
+
+void drawFeedbackIcon(const GfxRenderer& renderer, int x, int y, bool flipVertical) {
+  constexpr int size = 24;
+  constexpr int rowBytes = (size + 7) / 8;
+  for (int row = 0; row < size; ++row) {
+    for (int col = 0; col < size; ++col) {
+      const uint8_t byte = ProjectStickFeedback24Icon.bits[row * rowBytes + (col >> 3)];
+      const bool ink = ((byte >> (7 - (col & 7))) & 1) == 0;
+      if (ink) {
+        const int screenY = flipVertical ? y + size - 1 - col : y + col;
+        renderer.drawPixel(x + size - 1 - row, screenY, true);
+      }
+    }
+  }
+}
+
+void drawFeedbackHints(const GfxRenderer& renderer) {
+  const int width = renderer.getScreenWidth();
+  const int iconOffsetX = (SIDE_BUTTON_WIDTH - ProjectStickFeedback24Icon.w) / 2;
+  const int iconOffsetY = (SIDE_BUTTON_HEIGHT - ProjectStickFeedback24Icon.h) / 2;
+  const int leftX = SIDE_BUTTON_MARGIN;
+  const int rightX = width - SIDE_BUTTON_MARGIN - SIDE_BUTTON_WIDTH;
+
+  renderer.drawRoundedRect(leftX, SIDE_BUTTON_Y, SIDE_BUTTON_WIDTH, SIDE_BUTTON_HEIGHT, 1, 8, true);
+  renderer.drawRoundedRect(rightX, SIDE_BUTTON_Y, SIDE_BUTTON_WIDTH, SIDE_BUTTON_HEIGHT, 1, 8, true);
+  drawFeedbackIcon(renderer, leftX + iconOffsetX, SIDE_BUTTON_Y + iconOffsetY, true);
+  drawFeedbackIcon(renderer, rightX + iconOffsetX, SIDE_BUTTON_Y + iconOffsetY, false);
+}
+
+const char* scenarioDisplayName(const std::string& scenario) {
+  if (scenario == "pre_open") return tr(STR_PROJECT_STICK_SCENARIO_PRE_OPEN);
+  if (scenario == "midday_reset") return tr(STR_PROJECT_STICK_SCENARIO_MIDDAY_RESET);
+  if (scenario == "post_close") return tr(STR_PROJECT_STICK_SCENARIO_POST_CLOSE);
+  if (scenario == "volatility_alert") return tr(STR_PROJECT_STICK_SCENARIO_VOLATILITY_ALERT);
+  if (scenario == "manual_refresh") return tr(STR_PROJECT_STICK_SCENARIO_MANUAL_REFRESH);
+  return scenario.c_str();
+}
 }  // namespace
 
 void ProjectStickActivity::onEnter() {
@@ -179,50 +222,42 @@ void ProjectStickActivity::render(RenderLock&&) {
   const int diagnosticsLineHeight = renderer.getLineHeight(SMALL_FONT_ID);
   const int diagnosticsHeight = diagnosticsLineHeight + DIAGNOSTICS_VERTICAL_PADDING * 2;
   const int diagnosticsTop = hintTop - diagnosticsHeight;
-  const int contentInset = metrics.contentSidePadding;
+  const int contentInset =
+      std::max(metrics.contentSidePadding, SIDE_BUTTON_MARGIN + SIDE_BUTTON_WIDTH + SIDE_CONTENT_GAP);
   const Rect contentBounds{contentInset, metrics.topPadding + metrics.headerHeight + metrics.verticalSpacing,
                            width - contentInset * 2,
                            diagnosticsTop - (metrics.topPadding + metrics.headerHeight + metrics.verticalSpacing)};
 
   if (!display.text.empty()) {
+    const std::string bodyText = project_stick::stripWrappingQuotes(display.text);
+    const char* scenarioName = scenarioDisplayName(display.scenario);
     const int scenarioHeight =
-        display.scenario.empty()
+        scenarioName[0] == '\0'
             ? 0
-            : renderer.getTextLineHeight(UI_10_FONT_ID, display.scenario.c_str(), EpdFontFamily::BOLD);
-    const int toneHeight =
-        display.tone.empty() ? 0 : renderer.getTextLineHeight(SMALL_FONT_ID, display.tone.c_str());
+            : renderer.getTextLineHeight(UI_10_FONT_ID, scenarioName, EpdFontFamily::BOLD);
     const int scenarioReserve = scenarioHeight > 0 ? scenarioHeight + BLOCK_GAP : 0;
-    const int toneReserve = toneHeight > 0 ? toneHeight + BLOCK_GAP : 0;
     const int bodyLineHeight =
-        renderer.getTextLineHeight(UI_12_FONT_ID, display.text.c_str(), EpdFontFamily::BOLD);
+        renderer.getTextLineHeight(NOTOSANSSC_13_FONT_ID, bodyText.c_str());
     const int bodyLineStep = bodyLineHeight + BODY_LINE_GAP;
-    const int safeContentTop = std::max(contentBounds.y, X3_SIDE_HINT_BOTTOM + BLOCK_GAP);
-    const int safeContentHeight = contentBounds.y + contentBounds.height - safeContentTop;
     const int maxBodyLines =
-        std::max(1, (safeContentHeight - scenarioReserve - toneReserve + BODY_LINE_GAP) / bodyLineStep);
-    const auto lines = renderer.wrappedCjkText(UI_12_FONT_ID, display.text.c_str(), contentBounds.width, maxBodyLines,
-                                               EpdFontFamily::BOLD);
+        std::max(1, (contentBounds.height - scenarioReserve + BODY_LINE_GAP) / bodyLineStep);
+    const auto lines =
+        renderer.wrappedCjkText(NOTOSANSSC_13_FONT_ID, bodyText.c_str(), contentBounds.width, maxBodyLines);
     const int bodyHeight =
         lines.empty() ? 0 : static_cast<int>(lines.size()) * bodyLineStep - BODY_LINE_GAP;
     const int centeredBodyY = contentBounds.y + (contentBounds.height - bodyHeight) / 2;
-    const int minBodyY = safeContentTop + scenarioReserve;
-    const int maxBodyY = contentBounds.y + contentBounds.height - toneReserve - bodyHeight;
+    const int minBodyY = contentBounds.y + scenarioReserve;
+    const int maxBodyY = contentBounds.y + contentBounds.height - bodyHeight;
     const int bodyY = std::clamp(centeredBodyY, minBodyY, std::max(minBodyY, maxBodyY));
 
-    if (!display.scenario.empty()) {
+    if (scenarioName[0] != '\0') {
       UITheme::drawCenteredText(renderer, contentBounds, UI_10_FONT_ID, bodyY - scenarioReserve,
-                                display.scenario.c_str(), true,
-                                EpdFontFamily::BOLD);
+                                scenarioName, true, EpdFontFamily::BOLD);
     }
     int y = bodyY;
     for (const auto& line : lines) {
-      UITheme::drawCenteredText(renderer, contentBounds, UI_12_FONT_ID, y, line.c_str(), true,
-                                EpdFontFamily::BOLD);
+      UITheme::drawCenteredText(renderer, contentBounds, NOTOSANSSC_13_FONT_ID, y, line.c_str(), true);
       y += bodyLineStep;
-    }
-    if (!display.tone.empty()) {
-      UITheme::drawCenteredText(renderer, contentBounds, SMALL_FONT_ID, bodyY + bodyHeight + BLOCK_GAP,
-                                display.tone.c_str());
     }
   } else {
     UITheme::drawCenteredWrappedText(renderer, contentBounds, UI_12_FONT_ID, statusLine, 4, true,
@@ -239,7 +274,7 @@ void ProjectStickActivity::render(RenderLock&&) {
   renderer.drawCenteredText(SMALL_FONT_ID, diagnosticsTop + DIAGNOSTICS_VERTICAL_PADDING,
                             fittedDiagnostics.c_str());
 
-  GUI.drawSideButtonHints(renderer, tr(STR_PROJECT_STICK_NOT_USEFUL), tr(STR_PROJECT_STICK_USEFUL));
+  drawFeedbackHints(renderer);
   GUI.drawButtonHints(renderer, tr(STR_BACK), tr(STR_PROJECT_STICK_REFRESH), "", "");
   renderer.displayBuffer();
 }

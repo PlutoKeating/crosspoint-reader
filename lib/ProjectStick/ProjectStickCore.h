@@ -38,5 +38,6 @@ const ScheduleWindow* selectSchedule(const std::vector<ScheduleWindow>& windows,
 const ContentCopy* selectCopy(const std::vector<ContentCopy>& copies, const std::vector<int64_t>& usedIds,
                               uint32_t randomValue);
 bool isSafeReleasePath(const std::string& path);
+std::string stripWrappingQuotes(const std::string& text);
 
 }  // namespace project_stick

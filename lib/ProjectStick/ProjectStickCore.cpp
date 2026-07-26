@@ -202,4 +202,29 @@ bool isSafeReleasePath(const std::string& path) {
   return true;
 }
 
+std::string stripWrappingQuotes(const std::string& text) {
+  const size_t first = text.find_first_not_of(" \t\r\n");
+  if (first == std::string::npos) return {};
+  const size_t last = text.find_last_not_of(" \t\r\n");
+  std::string result = text.substr(first, last - first + 1);
+
+  struct QuotePair {
+    const char* opening;
+    const char* closing;
+  };
+  constexpr QuotePair PAIRS[] = {
+      {"\"", "\""},
+      {"\xE2\x80\x9C", "\xE2\x80\x9D"},  // “ ”
+  };
+  for (const auto& pair : PAIRS) {
+    const size_t openingLength = std::char_traits<char>::length(pair.opening);
+    const size_t closingLength = std::char_traits<char>::length(pair.closing);
+    if (result.size() >= openingLength + closingLength && result.compare(0, openingLength, pair.opening) == 0 &&
+        result.compare(result.size() - closingLength, closingLength, pair.closing) == 0) {
+      return result.substr(openingLength, result.size() - openingLength - closingLength);
+    }
+  }
+  return result;
+}
+
 }  // namespace project_stick

@@ -1,6 +1,6 @@
 #include <EpdFont.h>
 #include <Utf8.h>
-#include <builtinFonts/notosanssc_12_regular.h>
+#include <builtinFonts/notosanssc_13_regular.h>
 #include <gtest/gtest.h>
 
 namespace {
@@ -16,12 +16,13 @@ void expectTextCovered(const EpdFont& font, const char* text) {
 }  // namespace
 
 TEST(BuiltinCjk, CoversProjectStickContentWithoutSdFont) {
-  const EpdFont font(&notosanssc_12_regular);
+  const EpdFont font(&notosanssc_13_regular);
   expectTextCovered(font, "今天交易结束。新配置还是云，先别急着说利润。");
   expectTextCovered(font, "把过程记录下来，下次就能少猜价格的表现。");
+  expectTextCovered(font, "盘前准备 午间复盘 收盘复盘 波动提醒 手动刷新");
 }
 
 TEST(BuiltinCjk, CoversMixedLatinAndChineseText) {
-  const EpdFont font(&notosanssc_12_regular);
+  const EpdFont font(&notosanssc_13_regular);
   expectTextCovered(font, "Project.Stick 已同步 v2 不好用");
 }

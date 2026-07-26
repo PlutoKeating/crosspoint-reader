@@ -66,3 +66,11 @@ TEST(ProjectStickCore, RejectsManifestPathTraversal) {
   EXPECT_FALSE(isSafeReleasePath("/absolute.json"));
   EXPECT_FALSE(isSafeReleasePath("content/a b.json"));
 }
+
+TEST(ProjectStickCore, RemovesMatchingWrappingQuotesFromDisplayCopy) {
+  EXPECT_EQ(stripWrappingQuotes("\"市场永远在那里\""), "市场永远在那里");
+  EXPECT_EQ(stripWrappingQuotes("“市场永远在那里”"), "市场永远在那里");
+  EXPECT_EQ(stripWrappingQuotes("  “市场永远在那里”  "), "市场永远在那里");
+  EXPECT_EQ(stripWrappingQuotes("市场“永远”在那里"), "市场“永远”在那里");
+  EXPECT_EQ(stripWrappingQuotes("\"未闭合"), "\"未闭合");
+}
