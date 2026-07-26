@@ -26,6 +26,8 @@ class HalClock {
   // Get current hour (0-23) and minute (0-59).
   // Returns false if RTC is not available.
   bool getTime(uint8_t& hour, uint8_t& minute) const;
+  // Get the raw UTC calendar value maintained by the RTC.
+  bool getDateTime(uint16_t& year, uint8_t& month, uint8_t& day, uint8_t& hour, uint8_t& minute) const;
 
   // Format time into a caller-provided buffer.
   // 24h mode produces "HH:MM" (needs >=6 bytes); 12h mode produces "H:MM AM"/"HH:MM PM" (needs >=9 bytes).

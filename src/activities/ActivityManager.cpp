@@ -2,6 +2,7 @@
 
 #include <FontCacheManager.h>
 #include <HalPowerManager.h>
+#include <Memory.h>
 
 #include <algorithm>
 
@@ -14,6 +15,7 @@
 #include "home/HomeActivity.h"
 #include "home/RecentBooksActivity.h"
 #include "network/CrossPointWebServerActivity.h"
+#include "project_stick/ProjectStickActivity.h"
 #include "reader/ReaderActivity.h"
 #include "settings/OpdsServerListActivity.h"
 #include "settings/SettingsActivity.h"
@@ -188,6 +190,11 @@ void ActivityManager::goToFileTransfer() {
   replaceActivity(std::make_unique<CrossPointWebServerActivity>(renderer, mappedInput));
 }
 
+void ActivityManager::goToProjectStick() {
+  auto activity = makeUniqueNoThrow<ProjectStickActivity>(renderer, mappedInput);
+  if (activity) replaceActivity(std::move(activity));
+}
+
 void ActivityManager::goToSettings() { replaceActivity(std::make_unique<SettingsActivity>(renderer, mappedInput)); }
 
 void ActivityManager::goToFileBrowser(std::string path) {
@@ -226,7 +233,9 @@ void ActivityManager::goToFullScreenMessage(std::string message, EpdFontFamily::
 void ActivityManager::goHome(HomeMenuItem initialMenuItem) {
   if (initialMenuItem == HomeMenuItem::NONE && currentActivity) {
     const auto& activityName = currentActivity->name;
-    if (activityName == "FileBrowser") {
+    if (activityName == "ProjectStick") {
+      initialMenuItem = HomeMenuItem::PROJECT_STICK;
+    } else if (activityName == "FileBrowser") {
       initialMenuItem = HomeMenuItem::FILE_BROWSER;
     } else if (activityName == "RecentBooks") {
       initialMenuItem = HomeMenuItem::RECENTS;
