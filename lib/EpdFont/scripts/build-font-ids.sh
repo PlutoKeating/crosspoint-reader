@@ -99,3 +99,9 @@ ruby -rdigest -e 'puts [
   "./notosans_8_regular.h",
 ].map{|f| Digest::SHA256.hexdigest(File.read(f)).to_i(16) }.sum % (2 ** 32) - (2 ** 31)'
 ))"
+
+echo "#define NOTOSANSSC_12_FONT_ID ($(
+ruby -rdigest -e 'puts [
+  "./notosanssc_12_regular.h",
+].map{|f| Digest::SHA256.hexdigest(File.read(f)).to_i(16) }.sum % (2 ** 32) - (2 ** 31)'
+))"

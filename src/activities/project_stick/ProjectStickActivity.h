@@ -20,7 +20,6 @@ class ProjectStickActivity final : public Activity {
   ProjectStickService service;
   State state = State::Connecting;
   bool workPending = false;
-  bool longPressFired = false;
   uint32_t lastManifestPollMs = 0;
   uint32_t lastAlertPollMs = 0;
   uint32_t lastScheduleCheckMs = 0;

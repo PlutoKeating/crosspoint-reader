@@ -108,6 +108,11 @@ EpdFont ui12RegularFont(&ubuntu_12_regular);
 EpdFont ui12BoldFont(&ubuntu_12_bold);
 EpdFontFamily ui12FontFamily(&ui12RegularFont, &ui12BoldFont);
 
+// Compact flash-resident Simplified Chinese UI fallback. One 12 pt face is
+// shared by all UI slots to keep the X3 OTA image within its app partition.
+EpdFont builtinChineseFont(&notosanssc_12_regular);
+EpdFontFamily builtinChineseFontFamily(&builtinChineseFont);
+
 // measurement of power button press duration calibration value
 unsigned long t1 = 0;
 unsigned long t2 = 0;
@@ -253,6 +258,10 @@ void setupDisplayAndFonts(bool seamless = false) {
   renderer.insertFont(UI_10_FONT_ID, ui10FontFamily);
   renderer.insertFont(UI_12_FONT_ID, ui12FontFamily);
   renderer.insertFont(SMALL_FONT_ID, smallFontFamily);
+  renderer.insertFont(NOTOSANSSC_12_FONT_ID, builtinChineseFontFamily);
+  renderer.setDefaultFallbackFont(SMALL_FONT_ID, NOTOSANSSC_12_FONT_ID);
+  renderer.setDefaultFallbackFont(UI_10_FONT_ID, NOTOSANSSC_12_FONT_ID);
+  renderer.setDefaultFallbackFont(UI_12_FONT_ID, NOTOSANSSC_12_FONT_ID);
 
   // Discover and load SD card fonts
   sdFontSystem.begin(renderer);

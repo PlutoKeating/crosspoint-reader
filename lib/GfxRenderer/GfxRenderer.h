@@ -82,6 +82,9 @@ class GfxRenderer {
   // appears at the same point size as the surrounding UI text. Populated by the
   // app-level SD font setup when an SD family is loaded. See resolveTextFontId().
   std::map<int, int> fallbackFontMap_;
+  // Flash-resident fallbacks remain available when no SD font is selected.
+  // SD mappings temporarily override these entries; clearing restores them.
+  std::map<int, int> defaultFallbackFontMap_;
 
   // If `text` contains a CJK codepoint that `fontId` cannot render and `fontId`
   // has a registered fallback, returns the fallback id; otherwise returns
@@ -145,7 +148,11 @@ class GfxRenderer {
   // Register/clear size-matched CJK UI fallbacks (see fallbackFontMap_).
   // setFallbackFont maps a primary UI font id to an SD font id of the same size.
   void setFallbackFont(int primaryFontId, int fallbackFontId) { fallbackFontMap_[primaryFontId] = fallbackFontId; }
-  void clearFallbackFonts() { fallbackFontMap_.clear(); }
+  void setDefaultFallbackFont(int primaryFontId, int fallbackFontId) {
+    defaultFallbackFontMap_[primaryFontId] = fallbackFontId;
+    fallbackFontMap_[primaryFontId] = fallbackFontId;
+  }
+  void clearFallbackFonts() { fallbackFontMap_ = defaultFallbackFontMap_; }
   // Ensure SD card font glyph data is loaded for the given text. Called from layout code
   // (which holds a const GfxRenderer&) before measuring word widths. Safe to call on non-SD fonts (no-op).
   // styleMask: bitmask of styles to prepare (bit 0=regular, 1=bold, 2=italic, 3=bold-italic).
@@ -259,6 +266,8 @@ class GfxRenderer {
   int getFontAscenderSize(int fontId) const;
   int getLineHeight(int fontId) const;
   int getLineHeight(int fontId, float compression) const;
+  int getTextLineHeight(int fontId, const char* text,
+                        EpdFontFamily::Style style = EpdFontFamily::REGULAR) const;
   std::string truncatedText(int fontId, const char* text, int maxWidth,
                             EpdFontFamily::Style style = EpdFontFamily::REGULAR) const;
   /// Word-wrap \p text into at most \p maxLines lines, each no wider than
@@ -266,6 +275,10 @@ class GfxRenderer {
   /// truncated with an ellipsis (U+2026).
   std::vector<std::string> wrappedText(int fontId, const char* text, int maxWidth, int maxLines,
                                        EpdFontFamily::Style style = EpdFontFamily::REGULAR) const;
+  /// CJK-aware variant that wraps at UTF-8 codepoint boundaries. Width and
+  /// truncation use the resolved fallback font and requested style.
+  std::vector<std::string> wrappedCjkText(int fontId, const char* text, int maxWidth, int maxLines,
+                                          EpdFontFamily::Style style = EpdFontFamily::REGULAR) const;
 
   // Helper for drawing rotated text (90 degrees clockwise, for side buttons)
   void drawTextRotated90CW(int fontId, int x, int y, const char* text, bool black = true,

@@ -9,6 +9,7 @@
 #include <Utf8.h>
 
 #include <algorithm>
+#include <cstring>
 
 #include "FontCacheManager.h"
 
@@ -1674,6 +1675,40 @@ std::vector<std::string> GfxRenderer::wrappedText(const int fontId, const char* 
   return lines;
 }
 
+std::vector<std::string> GfxRenderer::wrappedCjkText(const int fontId, const char* text, const int maxWidth,
+                                                     const int maxLines, const EpdFontFamily::Style style) const {
+  std::vector<std::string> lines;
+  if (!text || maxWidth <= 0 || maxLines <= 0) return lines;
+
+  std::string currentLine;
+  currentLine.reserve(strlen(text));
+  const char* cursor = text;
+  while (*cursor) {
+    const char* codepointStart = cursor;
+    utf8NextCodepoint(reinterpret_cast<const uint8_t**>(&cursor));
+    const std::string codepoint(codepointStart, cursor - codepointStart);
+    const std::string candidate = currentLine + codepoint;
+    if (currentLine.empty() || getTextWidth(fontId, candidate.c_str(), style) <= maxWidth) {
+      currentLine = candidate;
+      continue;
+    }
+
+    if (static_cast<int>(lines.size()) >= maxLines - 1) {
+      currentLine += codepoint;
+      currentLine.append(cursor);
+      lines.push_back(truncatedText(fontId, currentLine.c_str(), maxWidth, style));
+      return lines;
+    }
+
+    lines.push_back(currentLine);
+    currentLine = codepoint == " " ? "" : codepoint;
+  }
+  if (!currentLine.empty() && static_cast<int>(lines.size()) < maxLines) {
+    lines.push_back(currentLine);
+  }
+  return lines;
+}
+
 // Note: Internal driver treats screen in command orientation; this library exposes a logical orientation
 int GfxRenderer::getScreenWidth() const {
   switch (orientation) {
@@ -1966,6 +2001,10 @@ int GfxRenderer::getLineHeight(const int fontId) const {
 
 int GfxRenderer::getLineHeight(const int fontId, const float compression) const {
   return static_cast<int>(getLineHeight(fontId) * compression + 0.5f);
+}
+
+int GfxRenderer::getTextLineHeight(const int fontId, const char* text, const EpdFontFamily::Style style) const {
+  return getLineHeight(resolveTextFontId(fontId, text, style));
 }
 
 int GfxRenderer::getTextHeight(const int fontId) const {
