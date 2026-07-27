@@ -26,7 +26,6 @@ class ProjectStickActivity final : public Activity {
   uint32_t lastRegisterMs = 0;
   char statusLine[96] = {0};
 
-  void launchWifiSelection();
   void runInitialSync();
   void updateState(ProjectStickService::SyncResult result);
   void setStatus(const char* text);

@@ -3,14 +3,12 @@
 #include <GfxRenderer.h>
 #include <HalGPIO.h>
 #include <I18n.h>
-#include <Memory.h>
 #include <WiFi.h>
 
 #include <algorithm>
 #include <cstdio>
 
 #include "MappedInputManager.h"
-#include "activities/network/WifiSelectionActivity.h"
 #include "components/UITheme.h"
 #include "components/icons/project_stick_icons.h"
 #include "fontIds.h"
@@ -26,7 +24,7 @@ constexpr int SIDE_BUTTON_HEIGHT = 80;
 constexpr int SIDE_BUTTON_Y = 155;
 constexpr int SIDE_CONTENT_GAP = 8;
 
-void drawFeedbackIcon(const GfxRenderer& renderer, int x, int y, bool flipVertical) {
+void drawFeedbackIcon(const GfxRenderer& renderer, int x, int y, bool thumbsUp) {
   constexpr int size = 24;
   constexpr int rowBytes = (size + 7) / 8;
   for (int row = 0; row < size; ++row) {
@@ -34,8 +32,8 @@ void drawFeedbackIcon(const GfxRenderer& renderer, int x, int y, bool flipVertic
       const uint8_t byte = ProjectStickFeedback24Icon.bits[row * rowBytes + (col >> 3)];
       const bool ink = ((byte >> (7 - (col & 7))) & 1) == 0;
       if (ink) {
-        const int screenY = flipVertical ? y + size - 1 - col : y + col;
-        renderer.drawPixel(x + size - 1 - row, screenY, true);
+        const int screenY = thumbsUp ? y + row : y + size - 1 - row;
+        renderer.drawPixel(x + col, screenY, true);
       }
     }
   }
@@ -50,8 +48,8 @@ void drawFeedbackHints(const GfxRenderer& renderer) {
 
   renderer.drawRoundedRect(leftX, SIDE_BUTTON_Y, SIDE_BUTTON_WIDTH, SIDE_BUTTON_HEIGHT, 1, 8, true);
   renderer.drawRoundedRect(rightX, SIDE_BUTTON_Y, SIDE_BUTTON_WIDTH, SIDE_BUTTON_HEIGHT, 1, 8, true);
-  drawFeedbackIcon(renderer, leftX + iconOffsetX, SIDE_BUTTON_Y + iconOffsetY, true);
-  drawFeedbackIcon(renderer, rightX + iconOffsetX, SIDE_BUTTON_Y + iconOffsetY, false);
+  drawFeedbackIcon(renderer, leftX + iconOffsetX, SIDE_BUTTON_Y + iconOffsetY, false);
+  drawFeedbackIcon(renderer, rightX + iconOffsetX, SIDE_BUTTON_Y + iconOffsetY, true);
 }
 
 const char* scenarioDisplayName(const std::string& scenario) {
@@ -67,34 +65,16 @@ const char* scenarioDisplayName(const std::string& scenario) {
 void ProjectStickActivity::onEnter() {
   Activity::onEnter();
   service.begin();
-  state = State::Connecting;
-  setStatus(tr(STR_PROJECT_STICK_CONNECTING));
-  requestUpdate();
   if (WiFi.status() == WL_CONNECTED) {
-    workPending = true;
-  } else {
-    launchWifiSelection();
-  }
-}
-
-void ProjectStickActivity::launchWifiSelection() {
-  auto wifi = makeUniqueNoThrow<WifiSelectionActivity>(renderer, mappedInput);
-  if (!wifi) {
-    state = State::Error;
-    setStatus(tr(STR_MEMORY_ERROR));
-    requestUpdate();
-    return;
-  }
-  startActivityForResult(std::move(wifi), [this](const ActivityResult& result) {
-    if (result.isCancelled) {
-      updateState(service.refreshScheduledContent() ? ProjectStickService::SyncResult::OfflineCache
-                                                    : ProjectStickService::SyncResult::Failed);
-      return;
-    }
     state = State::Connecting;
     setStatus(tr(STR_PROJECT_STICK_SYNCING));
     workPending = true;
-  });
+  } else {
+    service.refreshScheduledContent();
+    state = State::Offline;
+    setStatus(tr(STR_PROJECT_STICK_OFFLINE));
+  }
+  requestUpdate();
 }
 
 void ProjectStickActivity::runInitialSync() {
@@ -174,8 +154,14 @@ void ProjectStickActivity::loop() {
     setStatus(tr(STR_PROJECT_STICK_REFRESHING));
     requestUpdateAndWait();
     service.sendManualRefresh();
-    state = service.display().copyId == 0 ? State::Empty : State::Online;
-    setStatus(service.display().copyId == 0 ? tr(STR_PROJECT_STICK_NO_CONTENT) : tr(STR_PROJECT_STICK_ONLINE));
+    if (WiFi.status() == WL_CONNECTED) {
+      state = service.display().copyId == 0 ? State::Empty : State::Online;
+      setStatus(service.display().copyId == 0 ? tr(STR_PROJECT_STICK_NO_CONTENT)
+                                             : tr(STR_PROJECT_STICK_ONLINE));
+    } else {
+      state = State::Offline;
+      setStatus(tr(STR_PROJECT_STICK_OFFLINE));
+    }
     requestUpdate();
     return;
   }
