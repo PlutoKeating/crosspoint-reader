@@ -28,5 +28,6 @@ class ProjectStickActivity final : public Activity {
 
   void runInitialSync();
   void updateState(ProjectStickService::SyncResult result);
+  void launchWifiSelection();
   void setStatus(const char* text);
 };

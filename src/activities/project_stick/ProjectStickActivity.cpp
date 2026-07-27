@@ -9,6 +9,7 @@
 #include <cstdio>
 
 #include "MappedInputManager.h"
+#include "activities/network/WifiSelectionActivity.h"
 #include "components/UITheme.h"
 #include "components/icons/project_stick_icons.h"
 #include "fontIds.h"
@@ -23,6 +24,10 @@ constexpr int SIDE_BUTTON_WIDTH = 30;
 constexpr int SIDE_BUTTON_HEIGHT = 80;
 constexpr int SIDE_BUTTON_Y = 155;
 constexpr int SIDE_CONTENT_GAP = 8;
+constexpr int NETWORK_TAG_GAP = 6;
+constexpr int NETWORK_TAG_HORIZONTAL_PADDING = 9;
+constexpr int NETWORK_TAG_DOT_SIZE = 6;
+constexpr int NETWORK_TAG_DOT_GAP = 6;
 
 void drawFeedbackIcon(const GfxRenderer& renderer, int x, int y, bool thumbsUp) {
   constexpr int size = 24;
@@ -50,6 +55,29 @@ void drawFeedbackHints(const GfxRenderer& renderer) {
   renderer.drawRoundedRect(rightX, SIDE_BUTTON_Y, SIDE_BUTTON_WIDTH, SIDE_BUTTON_HEIGHT, 1, 8, true);
   drawFeedbackIcon(renderer, leftX + iconOffsetX, SIDE_BUTTON_Y + iconOffsetY, false);
   drawFeedbackIcon(renderer, rightX + iconOffsetX, SIDE_BUTTON_Y + iconOffsetY, true);
+}
+
+int drawNetworkStatusTag(const GfxRenderer& renderer, int headerBottom, int rightInset, bool connected) {
+  const char* label =
+      connected ? tr(STR_PROJECT_STICK_STATUS_ONLINE) : tr(STR_PROJECT_STICK_STATUS_OFFLINE);
+  const int textHeight = renderer.getLineHeight(SMALL_FONT_ID);
+  const int tagHeight = textHeight + 8;
+  const int tagWidth = NETWORK_TAG_HORIZONTAL_PADDING * 2 + NETWORK_TAG_DOT_SIZE +
+                       NETWORK_TAG_DOT_GAP + renderer.getTextWidth(SMALL_FONT_ID, label);
+  const int tagX = renderer.getScreenWidth() - rightInset - tagWidth;
+  const int tagY = headerBottom + NETWORK_TAG_GAP;
+  const int dotX = tagX + NETWORK_TAG_HORIZONTAL_PADDING;
+  const int dotY = tagY + (tagHeight - NETWORK_TAG_DOT_SIZE) / 2;
+
+  renderer.drawRoundedRect(tagX, tagY, tagWidth, tagHeight, 1, tagHeight / 2, true);
+  if (connected) {
+    renderer.fillRect(dotX, dotY, NETWORK_TAG_DOT_SIZE, NETWORK_TAG_DOT_SIZE);
+  } else {
+    renderer.drawRect(dotX, dotY, NETWORK_TAG_DOT_SIZE, NETWORK_TAG_DOT_SIZE);
+  }
+  renderer.drawText(SMALL_FONT_ID, dotX + NETWORK_TAG_DOT_SIZE + NETWORK_TAG_DOT_GAP, tagY + 4,
+                    label);
+  return tagY + tagHeight;
 }
 
 const char* scenarioDisplayName(const std::string& scenario) {
@@ -144,13 +172,17 @@ void ProjectStickActivity::loop() {
   }
 
   // Project.Stick intentionally uses fixed physical front-button positions:
-  // bottom-left pair = Back / Refresh; bottom-right pair = unassigned.
+  // Back / Wi-Fi / unassigned / Refresh.
   const int frontButton = mappedInput.getPressedFrontButton();
   if (frontButton == HalGPIO::BTN_BACK) {
     onGoHome(HomeMenuItem::PROJECT_STICK);
     return;
   }
   if (frontButton == HalGPIO::BTN_CONFIRM) {
+    launchWifiSelection();
+    return;
+  }
+  if (frontButton == HalGPIO::BTN_RIGHT) {
     setStatus(tr(STR_PROJECT_STICK_REFRESHING));
     requestUpdateAndWait();
     service.sendManualRefresh();
@@ -196,6 +228,22 @@ void ProjectStickActivity::loop() {
   }
 }
 
+void ProjectStickActivity::launchWifiSelection() {
+  startActivityForResult(
+      std::make_unique<WifiSelectionActivity>(renderer, mappedInput, false),
+      [this](const ActivityResult&) {
+        if (WiFi.status() == WL_CONNECTED) {
+          state = State::Connecting;
+          setStatus(tr(STR_PROJECT_STICK_SYNCING));
+          workPending = true;
+        } else {
+          service.refreshScheduledContent();
+          state = State::Offline;
+          setStatus(tr(STR_PROJECT_STICK_OFFLINE));
+        }
+      });
+}
+
 void ProjectStickActivity::render(RenderLock&&) {
   const auto& metrics = UITheme::getInstance().getMetrics();
   const int width = renderer.getScreenWidth();
@@ -210,9 +258,12 @@ void ProjectStickActivity::render(RenderLock&&) {
   const int diagnosticsTop = hintTop - diagnosticsHeight;
   const int contentInset =
       std::max(metrics.contentSidePadding, SIDE_BUTTON_MARGIN + SIDE_BUTTON_WIDTH + SIDE_CONTENT_GAP);
-  const Rect contentBounds{contentInset, metrics.topPadding + metrics.headerHeight + metrics.verticalSpacing,
-                           width - contentInset * 2,
-                           diagnosticsTop - (metrics.topPadding + metrics.headerHeight + metrics.verticalSpacing)};
+  const int tagBottom =
+      drawNetworkStatusTag(renderer, metrics.topPadding + metrics.headerHeight, metrics.contentSidePadding,
+                           WiFi.status() == WL_CONNECTED);
+  const int contentTop = tagBottom + metrics.verticalSpacing;
+  const Rect contentBounds{contentInset, contentTop, width - contentInset * 2,
+                           diagnosticsTop - contentTop};
 
   if (!display.text.empty()) {
     const std::string bodyText = project_stick::stripWrappingQuotes(display.text);
@@ -261,7 +312,8 @@ void ProjectStickActivity::render(RenderLock&&) {
                             fittedDiagnostics.c_str());
 
   drawFeedbackHints(renderer);
-  GUI.drawButtonHints(renderer, tr(STR_BACK), tr(STR_PROJECT_STICK_REFRESH), "", "");
+  GUI.drawButtonHints(renderer, tr(STR_BACK), tr(STR_PROJECT_STICK_CONNECT_WIFI), "",
+                      tr(STR_PROJECT_STICK_REFRESH));
   renderer.displayBuffer();
 }
 
