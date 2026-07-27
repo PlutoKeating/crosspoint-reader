@@ -6,6 +6,7 @@
 void ProjectStickStore::toJson(JsonDocument& doc) const {
   doc["device_id"] = deviceId;
   doc["active_version"] = activeVersion;
+  doc["previous_version"] = previousVersion;
   doc["poll_interval_seconds"] = pollIntervalSeconds;
   doc["alert_poll_interval_seconds"] = alertPollIntervalSeconds;
   doc["is_trading_day"] = tradingDay;
@@ -31,6 +32,7 @@ void ProjectStickStore::toJson(JsonDocument& doc) const {
 bool ProjectStickStore::fromJson(JsonVariantConst doc) {
   deviceId = doc["device_id"] | "";
   activeVersion = doc["active_version"] | 0;
+  previousVersion = doc["previous_version"] | 0;
   pollIntervalSeconds = std::clamp<uint32_t>(doc["poll_interval_seconds"] | 300, 30, 86400);
   alertPollIntervalSeconds = std::clamp<uint32_t>(doc["alert_poll_interval_seconds"] | 30, 10, 3600);
   tradingDay = doc["is_trading_day"] | false;

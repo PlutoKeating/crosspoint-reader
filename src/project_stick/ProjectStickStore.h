@@ -26,6 +26,7 @@ class ProjectStickStore : public PersistableStore<ProjectStickStore> {
 
   std::string deviceId;
   uint32_t activeVersion = 0;
+  uint32_t previousVersion = 0;
   uint32_t pollIntervalSeconds = 300;
   uint32_t alertPollIntervalSeconds = 30;
   bool tradingDay = false;

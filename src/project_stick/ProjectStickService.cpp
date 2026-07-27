@@ -25,7 +25,6 @@
 #endif
 
 namespace {
-constexpr size_t MAX_MANIFEST_FILES = 64;
 constexpr size_t MAX_RELEASE_FILE_SIZE = 512 * 1024;
 constexpr size_t MAX_MANIFEST_BYTES = 64 * 1024;
 constexpr size_t MAX_ALERT_BYTES = 32 * 1024;
@@ -33,6 +32,14 @@ constexpr size_t MAX_SCHEDULE_BYTES = 32 * 1024;
 constexpr size_t MAX_CONTENT_BYTES = 96 * 1024;
 constexpr size_t IO_CHUNK = 1024;
 constexpr uint32_t HTTP_TIMEOUT_MS = 5000;
+constexpr char DATA_ROOT[] = "/.crosspoint/project_stick";
+constexpr char OBJECT_ROOT[] = "/.crosspoint/project_stick/objects";
+constexpr char SNAPSHOT_ROOT[] = "/.crosspoint/project_stick/snapshots";
+constexpr char MANIFEST_TEMP[] = "/.crosspoint/project_stick/manifest.tmp";
+constexpr char SNAPSHOT_TEMP[] = "/.crosspoint/project_stick/snapshots/incoming.tmp";
+constexpr size_t MAX_RELEASE_PATH = 192;
+constexpr uint32_t PARSER_MIN_FREE_HEAP = 12 * 1024;
+constexpr uint32_t PARSER_MIN_MAX_BLOCK = 4 * 1024;
 
 bool equalsIgnoreCase(const std::string& left, const std::string& right) {
   if (left.size() != right.size()) return false;
@@ -41,6 +48,124 @@ bool equalsIgnoreCase(const std::string& left, const std::string& right) {
   }
   return true;
 }
+
+bool validSha256(const std::string& value) {
+  if (value.size() != 64) return false;
+  return std::all_of(value.begin(), value.end(), [](unsigned char c) { return std::isxdigit(c) != 0; });
+}
+
+bool hasParserHeap() {
+#ifdef SIMULATOR
+  return true;
+#else
+  const uint32_t freeHeap = ESP.getFreeHeap();
+  const uint32_t maxBlock = ESP.getMaxAllocHeap();
+  if (freeHeap >= PARSER_MIN_FREE_HEAP && maxBlock >= PARSER_MIN_MAX_BLOCK) return true;
+  LOG_ERR("STICK", "Parser heap guard: free=%u max=%u", (unsigned)freeHeap, (unsigned)maxBlock);
+  return false;
+#endif
+}
+
+bool readSnapshotEntry(HalFile& file, project_stick::ReleaseFileEntry& entry) {
+  entry = {};
+  uint8_t field = 0;
+  std::string sizeText;
+  while (file.available()) {
+    const int raw = file.read();
+    if (raw < 0) return false;
+    const char value = static_cast<char>(raw);
+    if (value == '\n') break;
+    if (value == '\t' && field < 2) {
+      ++field;
+      continue;
+    }
+    std::string* destination = field == 0 ? &entry.sha256 : (field == 1 ? &sizeText : &entry.path);
+    const size_t limit = field == 0 ? 64 : (field == 1 ? 20 : MAX_RELEASE_PATH);
+    if (destination->size() >= limit) return false;
+    destination->push_back(value);
+  }
+  if (field != 2 || !validSha256(entry.sha256) || sizeText.empty() ||
+      !project_stick::isSafeReleasePath(entry.path)) {
+    return false;
+  }
+  char* end = nullptr;
+  const unsigned long parsed = std::strtoul(sizeText.c_str(), &end, 10);
+  if (!end || *end != '\0' || parsed == 0) return false;
+  entry.size = static_cast<size_t>(parsed);
+  return true;
+}
+
+struct SnapshotWriter {
+  HalFile* file = nullptr;
+  bool hasSchedule = false;
+  bool hasConfig = false;
+  bool hasContent = false;
+};
+
+bool writeSnapshotEntry(void* context, const project_stick::ReleaseFileEntry& entry) {
+  auto* writer = static_cast<SnapshotWriter*>(context);
+  if (!writer || !writer->file || !project_stick::isSafeReleasePath(entry.path) ||
+      entry.path.size() > MAX_RELEASE_PATH || !validSha256(entry.sha256) || entry.size == 0 ||
+      entry.size > MAX_RELEASE_FILE_SIZE) {
+    return false;
+  }
+  writer->hasSchedule = writer->hasSchedule || entry.path == "schedule.json";
+  writer->hasConfig = writer->hasConfig || entry.path == "config.json";
+  writer->hasContent = writer->hasContent || entry.path.rfind("content/", 0) == 0;
+  char sizeText[24];
+  const int length = snprintf(sizeText, sizeof(sizeText), "%zu", entry.size);
+  if (length <= 0 || static_cast<size_t>(length) >= sizeof(sizeText)) return false;
+  const char tab = '\t';
+  const char newline = '\n';
+  return writer->file->write(entry.sha256.data(), entry.sha256.size()) == entry.sha256.size() &&
+         writer->file->write(&tab, 1) == 1 &&
+         writer->file->write(sizeText, static_cast<size_t>(length)) == static_cast<size_t>(length) &&
+         writer->file->write(&tab, 1) == 1 &&
+         writer->file->write(entry.path.data(), entry.path.size()) == entry.path.size() &&
+         writer->file->write(&newline, 1) == 1;
+}
+
+class JsonObjectValidator {
+ public:
+  JsonObjectValidator()
+      : callbacks{this, nullptr, nullptr, nullptr, nullptr, nullptr, onObjectStart, onContainerEnd,
+                  onArrayStart, onContainerEnd},
+        parser(callbacks) {}
+
+  void feed(const char* data, size_t length) { parser.feed(data, length); }
+  bool finish() const { return rootSeen && !invalid && !parser.hasError() && level == 0; }
+
+ private:
+  static void onObjectStart(void* context) {
+    auto* self = static_cast<JsonObjectValidator*>(context);
+    if (self->level == 0) {
+      if (self->rootSeen) self->invalid = true;
+      self->rootSeen = true;
+    }
+    ++self->level;
+  }
+
+  static void onArrayStart(void* context) {
+    auto* self = static_cast<JsonObjectValidator*>(context);
+    if (self->level == 0) self->invalid = true;
+    ++self->level;
+  }
+
+  static void onContainerEnd(void* context) {
+    auto* self = static_cast<JsonObjectValidator*>(context);
+    if (self->level == 0) {
+      self->invalid = true;
+    } else {
+      --self->level;
+    }
+  }
+
+  JsonCallbacks callbacks;
+  StreamingJsonParser parser;
+  uint8_t level = 0;
+  bool rootSeen = false;
+  bool invalid = false;
+};
 }  // namespace
 
 void ProjectStickService::begin() {
@@ -48,6 +173,7 @@ void ProjectStickService::begin() {
   while (!baseUrl.empty() && baseUrl.back() == '/') baseUrl.pop_back();
   PROJECT_STICK_STORE.loadFromFile();
   if (ensureIdentity()) PROJECT_STICK_STORE.saveToFile();
+  cleanupReleaseStorage();
 }
 
 bool ProjectStickService::ensureIdentity() {
@@ -103,134 +229,265 @@ bool ProjectStickService::registerDevice(int& status) {
 ProjectStickService::SyncResult ProjectStickService::syncManifest() {
   const std::string path = "/api/v1/device/manifest?device_id=" + PROJECT_STICK_STORE.deviceId +
                            "&current_version=" + std::to_string(PROJECT_STICK_STORE.activeVersion);
-  std::string response;
-  if (!fetchJson(baseUrl + path, response, MAX_MANIFEST_BYTES)) return SyncResult::OfflineCache;
+  if ((!Storage.mkdir(DATA_ROOT, true) && !Storage.exists(DATA_ROOT)) ||
+      (!Storage.mkdir(SNAPSHOT_ROOT, true) && !Storage.exists(SNAPSHOT_ROOT))) {
+    return SyncResult::Failed;
+  }
+  if (!fetchToFile(baseUrl + path, MANIFEST_TEMP, MAX_MANIFEST_BYTES)) return SyncResult::OfflineCache;
 
-  JsonDocument doc;
-  if (deserializeJson(doc, response)) return SyncResult::Failed;
-  parseServerTime(doc["server_time"] | "");
-  if (doc["unchanged"] | false) return SyncResult::Unchanged;
-
-  const uint32_t version = doc["version"] | 0;
-  if (version == 0) return SyncResult::NoContent;
-  JsonArrayConst fileArray = doc["files"].as<JsonArrayConst>();
-  if (fileArray.isNull() || fileArray.size() == 0 || fileArray.size() > MAX_MANIFEST_FILES) return SyncResult::Failed;
-
-  std::vector<ManifestFile> files;
-  files.reserve(fileArray.size());
-  for (JsonObjectConst item : fileArray) {
-    ManifestFile file;
-    file.path = item["path"] | "";
-    file.sha256 = item["sha256"] | "";
-    file.size = item["size"] | 0;
-    if (!project_stick::isSafeReleasePath(file.path) || file.sha256.size() != 64 || file.size == 0 ||
-        file.size > MAX_RELEASE_FILE_SIZE) {
-      LOG_ERR("STICK", "Rejected manifest entry: %s", file.path.c_str());
+  Storage.remove(SNAPSHOT_TEMP);
+  HalFile manifest;
+  HalFile snapshot;
+  if (!Storage.openFileForRead("STICK", MANIFEST_TEMP, manifest) ||
+      !Storage.openFileForWrite("STICK", SNAPSHOT_TEMP, snapshot)) {
+    Storage.remove(MANIFEST_TEMP);
+    return SyncResult::Failed;
+  }
+  SnapshotWriter writer{&snapshot};
+  if (!hasParserHeap()) {
+    manifest.close();
+    snapshot.close();
+    Storage.remove(MANIFEST_TEMP);
+    Storage.remove(SNAPSHOT_TEMP);
+    return SyncResult::Failed;
+  }
+  auto decoder =
+      makeUniqueNoThrow<project_stick::ReleaseManifestDecoder>(writeSnapshotEntry, &writer);
+  auto buffer = makeUniqueNoThrow<char[]>(512);
+  if (!decoder || !buffer) {
+    LOG_ERR("STICK", "OOM: manifest stream parser");
+    manifest.close();
+    snapshot.close();
+    Storage.remove(MANIFEST_TEMP);
+    Storage.remove(SNAPSHOT_TEMP);
+    return SyncResult::Failed;
+  }
+  while (manifest.available()) {
+    const int count = manifest.read(buffer.get(), 512);
+    if (count <= 0) break;
+    decoder->feed(buffer.get(), static_cast<size_t>(count));
+  }
+  snapshot.flush();
+  manifest.close();
+  snapshot.close();
+  Storage.remove(MANIFEST_TEMP);
+  if (!decoder->finish() ||
+      (!decoder->unchanged() && (!writer.hasSchedule || !writer.hasConfig || !writer.hasContent))) {
+    Storage.remove(SNAPSHOT_TEMP);
+    return SyncResult::Failed;
+  }
+  if (!decoder->serverTime().empty()) parseServerTime(decoder->serverTime().c_str());
+  if (decoder->pollIntervalSeconds() != 0) {
+    PROJECT_STICK_STORE.pollIntervalSeconds =
+        std::clamp<uint32_t>(decoder->pollIntervalSeconds(), 30, 86400);
+  }
+  if (decoder->alertPollIntervalSeconds() != 0) {
+    PROJECT_STICK_STORE.alertPollIntervalSeconds =
+        std::clamp<uint32_t>(decoder->alertPollIntervalSeconds(), 10, 3600);
+  }
+  const uint32_t version = decoder->version();
+  if (decoder->unchanged()) {
+    Storage.remove(SNAPSHOT_TEMP);
+    PROJECT_STICK_STORE.saveToFile();
+    return SyncResult::Unchanged;
+  }
+  if (version != PROJECT_STICK_STORE.activeVersion && PROJECT_STICK_STORE.previousVersion != 0) {
+    const uint32_t obsolete = PROJECT_STICK_STORE.previousVersion;
+    PROJECT_STICK_STORE.previousVersion = 0;
+    if (!PROJECT_STICK_STORE.saveToFile()) {
+      PROJECT_STICK_STORE.previousVersion = obsolete;
+      Storage.remove(SNAPSHOT_TEMP);
       return SyncResult::Failed;
     }
-    files.push_back(std::move(file));
+    Storage.removeDir(releaseRoot(obsolete).c_str());
+    cleanupReleaseStorage(true);
+  }
+  const std::string finalSnapshot = snapshotFile(version);
+  Storage.remove(finalSnapshot.c_str());
+  if (!Storage.rename(SNAPSHOT_TEMP, finalSnapshot.c_str())) {
+    Storage.remove(SNAPSHOT_TEMP);
+    return SyncResult::Failed;
   }
 
-  if (!materializeRelease(version, files)) return SyncResult::Failed;
-  PROJECT_STICK_STORE.activeVersion = version;
+  if (!materializeRelease(version) || !activateSnapshot(version)) return SyncResult::Failed;
   scheduleCache.clear();
-  if (!PROJECT_STICK_STORE.saveToFile()) return SyncResult::Failed;
+  cleanupReleaseStorage();
   queueEvent("sync_completed", "", 0);
   flushEvents();
   return SyncResult::Updated;
 }
 
-bool ProjectStickService::materializeRelease(uint32_t version, const std::vector<ManifestFile>& files) {
-  if (!Storage.mkdir(releaseRoot(version).c_str(), true) && !Storage.exists(releaseRoot(version).c_str())) return false;
-
-  for (const auto& file : files) {
-    const std::string destination = releaseFile(version, file.path);
-    if (!ensureParentDirectory(destination)) return false;
-
-    bool ready = false;
-    if (PROJECT_STICK_STORE.activeVersion != 0) {
-      const std::string previous = releaseFile(PROJECT_STICK_STORE.activeVersion, file.path);
-      std::string oldHash;
-      if (Storage.exists(previous.c_str()) && hashFile(previous, oldHash) && equalsIgnoreCase(oldHash, file.sha256)) {
-        ready = copyFile(previous, destination);
-      }
-    }
-
-    if (!ready) {
-      const std::string url = baseUrl + "/api/v1/device/releases/" + std::to_string(version) + "/" + file.path +
-                              "?device_id=" + PROJECT_STICK_STORE.deviceId;
-      for (uint8_t attempt = 0; attempt < 3 && !ready; ++attempt) {
-        ready = HttpDownloader::downloadToFile(url, destination) == HttpDownloader::OK;
-        if (!ready && attempt < 2) delay(250UL << attempt);
-      }
-      if (!ready) return false;
-    }
-
-    if (!fileWithinLimit(destination, file.size) || !fileWithinLimit(destination, MAX_RELEASE_FILE_SIZE)) {
-      LOG_ERR("STICK", "Downloaded file exceeds manifest size: %s", file.path.c_str());
-      Storage.remove(destination.c_str());
+bool ProjectStickService::materializeRelease(uint32_t version) {
+  if (!Storage.mkdir(OBJECT_ROOT, true) && !Storage.exists(OBJECT_ROOT)) return false;
+  HalFile snapshot;
+  if (!Storage.openFileForRead("STICK", snapshotFile(version), snapshot)) return false;
+  while (snapshot.available()) {
+    project_stick::ReleaseFileEntry entry;
+    if (!readSnapshotEntry(snapshot, entry) || entry.size > MAX_RELEASE_FILE_SIZE ||
+        !ensureObject(version, entry) || !validateObject(entry)) {
       return false;
     }
-    std::string downloadedHash;
-    if (!hashFile(destination, downloadedHash) || !equalsIgnoreCase(downloadedHash, file.sha256)) {
-      LOG_ERR("STICK", "SHA-256 mismatch: %s", file.path.c_str());
-      Storage.remove(destination.c_str());
+  }
+  snapshot.close();
+
+  project_stick::ReleaseFileEntry scheduleEntry;
+  if (!findSnapshotEntry(version, "schedule.json", scheduleEntry) || !hasParserHeap()) return false;
+  auto schedule = makeUniqueNoThrow<project_stick::ScheduleStreamDecoder>();
+  if (!schedule || !streamScheduleFile(objectFile(scheduleEntry.sha256), *schedule) || !schedule->finish()) {
+    return false;
+  }
+  for (const auto& window : schedule->windows()) {
+    if (!window.enabled) continue;
+    const std::string contentPath = "content/" + window.scenario + ".json";
+    project_stick::ReleaseFileEntry contentEntry;
+    if (!project_stick::isSafeReleasePath(contentPath) ||
+        !findSnapshotEntry(version, contentPath, contentEntry) ||
+        !Storage.exists(objectFile(contentEntry.sha256).c_str())) {
+      LOG_ERR("STICK", "Release missing scheduled content: %s", contentPath.c_str());
       return false;
     }
   }
   return true;
 }
 
-bool ProjectStickService::loadSchedule(std::vector<project_stick::ScheduleWindow>& windows) {
-  const std::string path = releaseFile(PROJECT_STICK_STORE.activeVersion, "schedule.json");
-  if (!fileWithinLimit(path, MAX_SCHEDULE_BYTES)) return false;
-  const String body = Storage.readFile(path.c_str());
-  if (body.isEmpty()) return false;
-  JsonDocument doc;
-  if (deserializeJson(doc, body)) return false;
-  JsonArrayConst array = doc["windows"].as<JsonArrayConst>();
-  windows.clear();
-  windows.reserve(std::min<size_t>(array.size(), 32));
-  for (JsonObjectConst item : array) {
-    if (windows.size() >= 32) break;
-    project_stick::ScheduleWindow window;
-    window.scenario = item["scenario"] | "";
-    window.tradingDayOnly = item["trading_day_only"] | false;
-    window.allDay = item["all_day"] | false;
-    window.enabled = item["enabled"] | true;
-    if (window.scenario.empty()) continue;
-    if (!window.allDay &&
-        (!project_stick::parseClockMinute(item["start"] | "", window.startMinute) ||
-         !project_stick::parseClockMinute(item["end"] | "", window.endMinute))) {
-      continue;
-    }
-    windows.push_back(std::move(window));
+bool ProjectStickService::ensureObject(uint32_t version, const project_stick::ReleaseFileEntry& file) {
+  const std::string destination = objectFile(file.sha256);
+  std::string existingHash;
+  if (fileWithinLimit(destination, file.size) && hashFile(destination, existingHash) &&
+      equalsIgnoreCase(existingHash, file.sha256)) {
+    return true;
   }
+  Storage.remove(destination.c_str());
+
+  const std::string legacy = releaseFile(PROJECT_STICK_STORE.activeVersion, file.path);
+  if (PROJECT_STICK_STORE.activeVersion != 0 && Storage.exists(legacy.c_str()) &&
+      fileWithinLimit(legacy, file.size) && hashFile(legacy, existingHash) &&
+      equalsIgnoreCase(existingHash, file.sha256)) {
+    const std::string temporary = destination + ".tmp";
+    Storage.remove(temporary.c_str());
+    if (copyFile(legacy, temporary) && Storage.rename(temporary.c_str(), destination.c_str())) return true;
+    Storage.remove(temporary.c_str());
+  }
+  return downloadObject(version, file);
+}
+
+bool ProjectStickService::downloadObject(uint32_t version, const project_stick::ReleaseFileEntry& file) {
+  const std::string destination = objectFile(file.sha256);
+  const std::string temporary = destination + ".tmp";
+  const std::string url = baseUrl + "/api/v1/device/releases/" + std::to_string(version) + "/" + file.path +
+                          "?device_id=" + PROJECT_STICK_STORE.deviceId;
+  for (uint8_t attempt = 0; attempt < 3; ++attempt) {
+    Storage.remove(temporary.c_str());
+    HalFile output;
+    if (!Storage.openFileForWrite("STICK", temporary, output)) return false;
+    size_t received = 0;
+    mbedtls_sha256_context context;
+    mbedtls_sha256_init(&context);
+    mbedtls_sha256_starts(&context, 0);
+    const bool fetched = HttpDownloader::fetchUrl(url, [&output, &received, &context, &file](
+                                                           const uint8_t* data, size_t length) {
+      if (received > file.size || length > file.size - received) return false;
+      if (output.write(data, length) != length) return false;
+      mbedtls_sha256_update(&context, data, length);
+      received += length;
+      return true;
+    });
+    output.flush();
+    output.close();
+    uint8_t digest[32];
+    mbedtls_sha256_finish(&context, digest);
+    mbedtls_sha256_free(&context);
+    char hex[65];
+    for (size_t i = 0; i < sizeof(digest); ++i) snprintf(hex + i * 2, 3, "%02x", digest[i]);
+    hex[64] = '\0';
+    if (fetched && received == file.size && equalsIgnoreCase(hex, file.sha256)) {
+      Storage.remove(destination.c_str());
+      if (Storage.rename(temporary.c_str(), destination.c_str())) return true;
+    }
+    Storage.remove(temporary.c_str());
+    if (attempt < 2) delay(250UL << attempt);
+  }
+  LOG_ERR("STICK", "Failed release object: %s", file.path.c_str());
+  return false;
+}
+
+bool ProjectStickService::validateObject(const project_stick::ReleaseFileEntry& file) {
+  const std::string path = objectFile(file.sha256);
+  if (!hasParserHeap()) return false;
+  if (file.path == "schedule.json") {
+    if (file.size > MAX_SCHEDULE_BYTES) return false;
+    auto decoder = makeUniqueNoThrow<project_stick::ScheduleStreamDecoder>();
+    return decoder && streamScheduleFile(path, *decoder) && decoder->finish();
+  }
+  if (file.path.rfind("content/", 0) == 0) {
+    if (file.size > MAX_CONTENT_BYTES) return false;
+    const std::vector<int64_t> noUsedIds;
+    auto decoder = makeUniqueNoThrow<project_stick::ContentStreamDecoder>(
+        project_stick::ContentPassMode::MEASURE, noUsedIds);
+    return decoder && streamContentFile(path, *decoder) && decoder->finish();
+  }
+
+  HalFile input;
+  if (!Storage.openFileForRead("STICK", path, input)) return false;
+  auto validator = makeUniqueNoThrow<JsonObjectValidator>();
+  auto buffer = makeUniqueNoThrow<char[]>(512);
+  if (!validator || !buffer) return false;
+  while (input.available()) {
+    const int count = input.read(buffer.get(), 512);
+    if (count <= 0) return false;
+    validator->feed(buffer.get(), static_cast<size_t>(count));
+  }
+  return validator->finish();
+}
+
+bool ProjectStickService::activateSnapshot(uint32_t version) {
+  const uint32_t oldActive = PROJECT_STICK_STORE.activeVersion;
+  const uint32_t oldPrevious = PROJECT_STICK_STORE.previousVersion;
+  PROJECT_STICK_STORE.previousVersion = oldActive == version ? oldPrevious : oldActive;
+  PROJECT_STICK_STORE.activeVersion = version;
+  if (PROJECT_STICK_STORE.saveToFile()) return true;
+  PROJECT_STICK_STORE.activeVersion = oldActive;
+  PROJECT_STICK_STORE.previousVersion = oldPrevious;
+  return false;
+}
+
+bool ProjectStickService::loadSchedule(std::vector<project_stick::ScheduleWindow>& windows) {
+  std::string path;
+  if (!resolveReleaseFile(PROJECT_STICK_STORE.activeVersion, "schedule.json", path) ||
+      !fileWithinLimit(path, MAX_SCHEDULE_BYTES)) {
+    return false;
+  }
+  if (!hasParserHeap()) return false;
+  auto decoder = makeUniqueNoThrow<project_stick::ScheduleStreamDecoder>();
+  if (!decoder || !streamScheduleFile(path, *decoder) || !decoder->finish()) return false;
+  windows = decoder->takeWindows();
   return !windows.empty();
 }
 
-bool ProjectStickService::loadContent(const std::string& scenario,
-                                      std::vector<project_stick::ContentCopy>& copies) {
-  if (!project_stick::isSafeReleasePath("content/" + scenario + ".json")) return false;
-  const std::string path = releaseFile(PROJECT_STICK_STORE.activeVersion, "content/" + scenario + ".json");
-  if (!fileWithinLimit(path, MAX_CONTENT_BYTES)) return false;
-  const String body = Storage.readFile(path.c_str());
-  if (body.isEmpty()) return false;
-  JsonDocument doc;
-  if (deserializeJson(doc, body)) return false;
-  JsonArrayConst array = doc["copies"].as<JsonArrayConst>();
-  copies.clear();
-  copies.reserve(std::min<size_t>(array.size(), 64));
-  for (JsonObjectConst item : array) {
-    if (copies.size() >= 64) break;
-    project_stick::ContentCopy copy;
-    copy.id = item["id"] | 0;
-    copy.text = item["text"] | "";
-    copy.tone = item["tone"] | "";
-    copy.weight = std::clamp<uint16_t>(item["weight"] | 1, 1, 1000);
-    if (copy.id != 0 && !copy.text.empty()) copies.push_back(std::move(copy));
+bool ProjectStickService::selectContent(const std::string& scenario, uint32_t randomValue,
+                                        project_stick::ContentCopy& selected) {
+  const std::string relative = "content/" + scenario + ".json";
+  if (!project_stick::isSafeReleasePath(relative)) return false;
+  std::string path;
+  if (!resolveReleaseFile(PROJECT_STICK_STORE.activeVersion, relative, path) ||
+      !fileWithinLimit(path, MAX_CONTENT_BYTES)) {
+    return false;
   }
-  return !copies.empty();
+  if (!hasParserHeap()) return false;
+  auto measure = makeUniqueNoThrow<project_stick::ContentStreamDecoder>(
+      project_stick::ContentPassMode::MEASURE, PROJECT_STICK_STORE.usedCopyIds);
+  if (!measure || !streamContentFile(path, *measure) || !measure->finish()) return false;
+  const bool useAll = measure->unusedWeight() == 0;
+  const uint32_t total = useAll ? measure->totalWeight() : measure->unusedWeight();
+  if (total == 0) return false;
+  measure.reset();
+
+  auto choose = makeUniqueNoThrow<project_stick::ContentStreamDecoder>(
+      useAll ? project_stick::ContentPassMode::SELECT_ALL : project_stick::ContentPassMode::SELECT_UNUSED,
+      PROJECT_STICK_STORE.usedCopyIds, randomValue % total);
+  if (!choose || !streamContentFile(path, *choose) || !choose->finish() || !choose->selected()) return false;
+  selected = choose->takeSelected();
+  return true;
 }
 
 bool ProjectStickService::refreshScheduledContent(const char* forcedScenario) {
@@ -248,7 +505,6 @@ bool ProjectStickService::refreshScheduledContent(const char* forcedScenario) {
     scenario = selected->scenario;
   }
 
-  if (!loadContent(scenario, contentCache)) return false;
   if (current.valid && current.day != PROJECT_STICK_STORE.usedDay) {
     PROJECT_STICK_STORE.usedDay = current.day;
     PROJECT_STICK_STORE.usedCopyIds.clear();
@@ -258,18 +514,24 @@ bool ProjectStickService::refreshScheduledContent(const char* forcedScenario) {
 #else
   const uint32_t randomValue = esp_random();
 #endif
-  const auto* selected = project_stick::selectCopy(contentCache, PROJECT_STICK_STORE.usedCopyIds, randomValue);
-  if (!selected) return false;
+  // The e-paper retains the previous pixels; release its backing text before
+  // streaming the next selection so only one full copy is resident at a time.
+  std::string().swap(currentDisplay.text);
+  std::string().swap(currentDisplay.tone);
+  currentDisplay.copyId = 0;
+  currentDisplay.alert = false;
+  project_stick::ContentCopy selected;
+  if (!selectContent(scenario, randomValue, selected)) return false;
 
   currentDisplay.scenario = scenario;
-  currentDisplay.text = selected->text;
-  currentDisplay.tone = selected->tone;
-  currentDisplay.copyId = selected->id;
+  currentDisplay.text = std::move(selected.text);
+  currentDisplay.tone = std::move(selected.tone);
+  currentDisplay.copyId = selected.id;
   currentDisplay.alert = forcedScenario && strcmp(forcedScenario, "volatility_alert") == 0;
-  PROJECT_STICK_STORE.markCopyUsed(current.valid ? current.day : PROJECT_STICK_STORE.usedDay, selected->id);
+  PROJECT_STICK_STORE.markCopyUsed(current.valid ? current.day : PROJECT_STICK_STORE.usedDay, selected.id);
   PROJECT_STICK_STORE.saveToFile();
-  queueEvent("trigger_fired", scenario, selected->id);
-  queueEvent("screen_view", scenario, selected->id);
+  queueEvent("trigger_fired", scenario, selected.id);
+  queueEvent("screen_view", scenario, selected.id);
   flushEvents();
   return true;
 }
@@ -405,6 +667,56 @@ bool ProjectStickService::fetchJson(const std::string& url, std::string& respons
   return false;
 }
 
+bool ProjectStickService::fetchToFile(const std::string& url, const std::string& path, size_t maxBytes) {
+  for (uint8_t attempt = 0; attempt < 3; ++attempt) {
+    Storage.remove(path.c_str());
+    HalFile output;
+    if (!Storage.openFileForWrite("STICK", path, output)) return false;
+    size_t received = 0;
+    const bool ok = HttpDownloader::fetchUrl(url, [&output, &received, maxBytes](const uint8_t* data,
+                                                                                size_t length) {
+      if (received > maxBytes || length > maxBytes - received) return false;
+      if (output.write(data, length) != length) return false;
+      received += length;
+      return true;
+    });
+    output.flush();
+    output.close();
+    if (ok && received != 0) return true;
+    Storage.remove(path.c_str());
+    if (attempt < 2) delay(250UL << attempt);
+  }
+  return false;
+}
+
+bool ProjectStickService::streamScheduleFile(const std::string& path,
+                                             project_stick::ScheduleStreamDecoder& decoder) {
+  HalFile input;
+  if (!Storage.openFileForRead("STICK", path, input)) return false;
+  auto buffer = makeUniqueNoThrow<char[]>(512);
+  if (!buffer) return false;
+  while (input.available()) {
+    const int count = input.read(buffer.get(), 512);
+    if (count <= 0) return false;
+    decoder.feed(buffer.get(), static_cast<size_t>(count));
+  }
+  return true;
+}
+
+bool ProjectStickService::streamContentFile(const std::string& path,
+                                            project_stick::ContentStreamDecoder& decoder) {
+  HalFile input;
+  if (!Storage.openFileForRead("STICK", path, input)) return false;
+  auto buffer = makeUniqueNoThrow<char[]>(512);
+  if (!buffer) return false;
+  while (input.available()) {
+    const int count = input.read(buffer.get(), 512);
+    if (count <= 0) return false;
+    decoder.feed(buffer.get(), static_cast<size_t>(count));
+  }
+  return true;
+}
+
 bool ProjectStickService::fileWithinLimit(const std::string& path, size_t maxBytes) {
   HalFile file;
   if (!Storage.openFileForRead("STICK", path, file)) return false;
@@ -432,13 +744,6 @@ project_stick::ShanghaiTime ProjectStickService::now() const {
   project_stick::ShanghaiTime rtcTime;
   project_stick::parseIso8601ToShanghai(utc, rtcTime);
   return rtcTime;
-}
-
-bool ProjectStickService::ensureParentDirectory(const std::string& path) {
-  const size_t slash = path.rfind('/');
-  if (slash == std::string::npos || slash == 0) return true;
-  const std::string parent = path.substr(0, slash);
-  return Storage.mkdir(parent.c_str(), true) || Storage.exists(parent.c_str());
 }
 
 bool ProjectStickService::copyFile(const std::string& source, const std::string& destination) {
@@ -488,6 +793,119 @@ bool ProjectStickService::hashFile(const std::string& path, std::string& result)
   hex[64] = '\0';
   result = hex;
   return true;
+}
+
+bool ProjectStickService::findSnapshotEntry(uint32_t version, const std::string& path,
+                                            project_stick::ReleaseFileEntry& result) {
+  HalFile snapshot;
+  if (version == 0 || !Storage.openFileForRead("STICK", snapshotFile(version), snapshot)) return false;
+  while (snapshot.available()) {
+    project_stick::ReleaseFileEntry entry;
+    if (!readSnapshotEntry(snapshot, entry)) return false;
+    if (entry.path == path) {
+      result = std::move(entry);
+      return true;
+    }
+  }
+  return false;
+}
+
+bool ProjectStickService::snapshotReferencesHash(uint32_t version, const std::string& sha256) {
+  HalFile snapshot;
+  if (version == 0 || !Storage.openFileForRead("STICK", snapshotFile(version), snapshot)) return false;
+  while (snapshot.available()) {
+    project_stick::ReleaseFileEntry entry;
+    if (!readSnapshotEntry(snapshot, entry)) return false;
+    if (equalsIgnoreCase(entry.sha256, sha256)) return true;
+  }
+  return false;
+}
+
+bool ProjectStickService::resolveReleaseFile(uint32_t version, const std::string& path, std::string& result) {
+  project_stick::ReleaseFileEntry entry;
+  if (findSnapshotEntry(version, path, entry)) {
+    const std::string object = objectFile(entry.sha256);
+    if (Storage.exists(object.c_str()) && fileWithinLimit(object, entry.size)) {
+      result = object;
+      return true;
+    }
+    return false;
+  }
+
+  // One-time compatibility with releases written by firmware before the
+  // content-addressed SD layout was introduced.
+  const std::string legacy = releaseFile(version, path);
+  if (Storage.exists(legacy.c_str())) {
+    result = legacy;
+    return true;
+  }
+  return false;
+}
+
+void ProjectStickService::cleanupReleaseStorage(bool keepIncoming) {
+  Storage.remove(MANIFEST_TEMP);
+  Storage.mkdir(SNAPSHOT_ROOT, true);
+  Storage.mkdir(OBJECT_ROOT, true);
+
+  HalFile snapshots = Storage.open(SNAPSHOT_ROOT);
+  if (snapshots && snapshots.isDirectory()) {
+    while (true) {
+      HalFile child = snapshots.openNextFile();
+      if (!child) break;
+      char name[128];
+      child.getName(name, sizeof(name));
+      const bool directory = child.isDirectory();
+      child.close();
+      if (directory) continue;
+      const char* base = strrchr(name, '/');
+      base = base ? base + 1 : name;
+      const std::string keepActive = std::to_string(PROJECT_STICK_STORE.activeVersion) + ".idx";
+      const std::string keepPrevious = std::to_string(PROJECT_STICK_STORE.previousVersion) + ".idx";
+      if (base != keepActive && base != keepPrevious && !(keepIncoming && strcmp(base, "incoming.tmp") == 0)) {
+        const std::string full = std::string(SNAPSHOT_ROOT) + "/" + base;
+        Storage.remove(full.c_str());
+      }
+    }
+  }
+
+  HalFile objects = Storage.open(OBJECT_ROOT);
+  if (objects && objects.isDirectory()) {
+    while (true) {
+      HalFile child = objects.openNextFile();
+      if (!child) break;
+      char name[128];
+      child.getName(name, sizeof(name));
+      const bool directory = child.isDirectory();
+      child.close();
+      if (directory) continue;
+      const char* base = strrchr(name, '/');
+      base = base ? base + 1 : name;
+      const std::string fileName(base);
+      const bool object = fileName.size() == 69 && fileName.compare(64, 5, ".json") == 0;
+      const std::string sha256 = object ? fileName.substr(0, 64) : "";
+      if (!object ||
+          (!snapshotReferencesHash(PROJECT_STICK_STORE.activeVersion, sha256) &&
+           !snapshotReferencesHash(PROJECT_STICK_STORE.previousVersion, sha256))) {
+        const std::string full = std::string(OBJECT_ROOT) + "/" + fileName;
+        Storage.remove(full.c_str());
+      }
+    }
+  }
+
+  // Keep the legacy directory only while it is the sole rollback copy.
+  if (Storage.exists(snapshotFile(PROJECT_STICK_STORE.activeVersion).c_str()) &&
+      (PROJECT_STICK_STORE.previousVersion == 0 ||
+       Storage.exists(snapshotFile(PROJECT_STICK_STORE.previousVersion).c_str()))) {
+    Storage.removeDir((std::string(DATA_ROOT) + "/releases").c_str());
+  }
+}
+
+std::string ProjectStickService::snapshotFile(uint32_t version) const {
+  return std::string(SNAPSHOT_ROOT) + "/" + std::to_string(version) + ".idx";
+}
+
+std::string ProjectStickService::objectFile(const std::string& sha256) const {
+  return std::string(OBJECT_ROOT) + "/" + sha256 + ".json";
 }
 
 std::string ProjectStickService::releaseRoot(uint32_t version) const {
