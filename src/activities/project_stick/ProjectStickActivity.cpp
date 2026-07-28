@@ -23,10 +23,11 @@ constexpr int SIDE_BUTTON_WIDTH = 30;
 constexpr int SIDE_BUTTON_HEIGHT = 80;
 constexpr int SIDE_BUTTON_Y = 155;
 constexpr int SIDE_CONTENT_GAP = 8;
-constexpr int NETWORK_TAG_GAP = 8;
+constexpr int NETWORK_TAG_BOTTOM_GAP = 12;
 constexpr int NETWORK_TAG_HORIZONTAL_PADDING = 8;
 constexpr int NETWORK_TAG_DOT_SIZE = 5;
 constexpr int NETWORK_TAG_DOT_GAP = 5;
+constexpr int COMPACT_HEADER_BATTERY_RESERVE = 90;
 
 void drawFeedbackIcon(const GfxRenderer& renderer, int x, int y, bool thumbsUp) {
   constexpr int size = 24;
@@ -56,15 +57,22 @@ void drawFeedbackHints(const GfxRenderer& renderer) {
   drawFeedbackIcon(renderer, rightX + iconOffsetX, SIDE_BUTTON_Y + iconOffsetY, true);
 }
 
-int drawNetworkStatusTag(const GfxRenderer& renderer, int headerBottom, int rightInset, bool connected) {
+void drawNetworkStatusTag(const GfxRenderer& renderer, const Rect& headerBounds, int rightInset,
+                          bool connected) {
   const char* label =
       connected ? tr(STR_PROJECT_STICK_STATUS_ONLINE) : tr(STR_PROJECT_STICK_STATUS_OFFLINE);
   const int textHeight = renderer.getLineHeight(SMALL_FONT_ID);
   const int tagHeight = textHeight + 4;
   const int tagWidth = NETWORK_TAG_HORIZONTAL_PADDING * 2 + NETWORK_TAG_DOT_SIZE +
                        NETWORK_TAG_DOT_GAP + renderer.getTextWidth(SMALL_FONT_ID, label);
-  const int tagX = renderer.getScreenWidth() - rightInset - tagWidth;
-  const int tagY = headerBottom + NETWORK_TAG_GAP;
+  const bool hasSecondHeaderRow = headerBounds.height >= 60;
+  const int safeRightInset =
+      hasSecondHeaderRow ? rightInset : std::max(rightInset, COMPACT_HEADER_BATTERY_RESERVE);
+  const int tagX = renderer.getScreenWidth() - safeRightInset - tagWidth;
+  const int tagY =
+      hasSecondHeaderRow
+          ? headerBounds.y + headerBounds.height - tagHeight - NETWORK_TAG_BOTTOM_GAP
+          : headerBounds.y + (headerBounds.height - tagHeight) / 2;
   const int dotX = tagX + NETWORK_TAG_HORIZONTAL_PADDING;
   const int dotY = tagY + (tagHeight - NETWORK_TAG_DOT_SIZE) / 2;
 
@@ -76,7 +84,6 @@ int drawNetworkStatusTag(const GfxRenderer& renderer, int headerBottom, int righ
   }
   renderer.drawText(SMALL_FONT_ID, dotX + NETWORK_TAG_DOT_SIZE + NETWORK_TAG_DOT_GAP, tagY + 2,
                     label);
-  return tagY + tagHeight;
 }
 
 const char* scenarioDisplayName(const std::string& scenario) {
@@ -248,16 +255,16 @@ void ProjectStickActivity::render(RenderLock&&) {
   const int width = renderer.getScreenWidth();
   const int height = renderer.getScreenHeight();
   renderer.clearScreen();
-  GUI.drawHeader(renderer, Rect{0, metrics.topPadding, width, metrics.headerHeight}, tr(STR_PROJECT_STICK));
+  const Rect headerBounds{0, metrics.topPadding, width, metrics.headerHeight};
+  GUI.drawHeader(renderer, headerBounds, tr(STR_PROJECT_STICK));
+  drawNetworkStatusTag(renderer, headerBounds, metrics.contentSidePadding,
+                       WiFi.status() == WL_CONNECTED);
 
   const auto& display = service.display();
   const int hintTop = height - metrics.buttonHintsHeight;
   const int contentInset =
       std::max(metrics.contentSidePadding, SIDE_BUTTON_MARGIN + SIDE_BUTTON_WIDTH + SIDE_CONTENT_GAP);
-  const int tagBottom =
-      drawNetworkStatusTag(renderer, metrics.topPadding + metrics.headerHeight, metrics.contentSidePadding,
-                           WiFi.status() == WL_CONNECTED);
-  const int contentTop = tagBottom + metrics.verticalSpacing;
+  const int contentTop = metrics.topPadding + metrics.headerHeight + metrics.verticalSpacing;
   const Rect contentBounds{contentInset, contentTop, width - contentInset * 2,
                            hintTop - metrics.verticalSpacing - contentTop};
 
