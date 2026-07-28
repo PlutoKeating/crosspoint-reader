@@ -357,7 +357,6 @@ void LyraTheme::drawButtonHints(GfxRenderer& renderer, const char* btn1, const c
 
   const int pageHeight = renderer.getScreenHeight();
   constexpr int buttonWidth = 80;
-  constexpr int smallButtonHeight = 15;
   constexpr int buttonHeight = LyraMetrics::values.buttonHintsHeight;
   constexpr int buttonY = LyraMetrics::values.buttonHintsHeight;  // Distance from bottom
   constexpr int textYOffset = 7;                                  // Distance from top of button to text baseline
@@ -374,15 +373,10 @@ void LyraTheme::drawButtonHints(GfxRenderer& renderer, const char* btn1, const c
       renderer.fillRoundedRect(x, pageHeight - buttonY, buttonWidth, buttonHeight, cornerRadius, Color::White);
       renderer.drawRoundedRect(x, pageHeight - buttonY, buttonWidth, buttonHeight, 1, cornerRadius, true, true, false,
                                false, true);
-      const int textWidth = renderer.getTextWidth(SMALL_FONT_ID, labels[i]);
+      const auto fittedLabel = renderer.truncatedText(SMALL_FONT_ID, labels[i], buttonWidth - 8);
+      const int textWidth = renderer.getTextWidth(SMALL_FONT_ID, fittedLabel.c_str());
       const int textX = x + (buttonWidth - 1 - textWidth) / 2;
-      renderer.drawText(SMALL_FONT_ID, textX, pageHeight - buttonY + textYOffset, labels[i]);
-    } else {
-      // Draw the filled background and border for a SMALL-sized button
-      renderer.fillRoundedRect(x, pageHeight - smallButtonHeight, buttonWidth, smallButtonHeight, cornerRadius,
-                               Color::White);
-      renderer.drawRoundedRect(x, pageHeight - smallButtonHeight, buttonWidth, smallButtonHeight, 1, cornerRadius, true,
-                               true, false, false, true);
+      renderer.drawText(SMALL_FONT_ID, textX, pageHeight - buttonY + textYOffset, fittedLabel.c_str());
     }
   }
 

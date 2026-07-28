@@ -18,16 +18,15 @@
 namespace {
 constexpr int BLOCK_GAP = 10;
 constexpr int BODY_LINE_GAP = 4;
-constexpr int DIAGNOSTICS_VERTICAL_PADDING = 6;
 constexpr int SIDE_BUTTON_MARGIN = 4;
 constexpr int SIDE_BUTTON_WIDTH = 30;
 constexpr int SIDE_BUTTON_HEIGHT = 80;
 constexpr int SIDE_BUTTON_Y = 155;
 constexpr int SIDE_CONTENT_GAP = 8;
-constexpr int NETWORK_TAG_GAP = 6;
-constexpr int NETWORK_TAG_HORIZONTAL_PADDING = 9;
-constexpr int NETWORK_TAG_DOT_SIZE = 6;
-constexpr int NETWORK_TAG_DOT_GAP = 6;
+constexpr int NETWORK_TAG_GAP = 8;
+constexpr int NETWORK_TAG_HORIZONTAL_PADDING = 8;
+constexpr int NETWORK_TAG_DOT_SIZE = 5;
+constexpr int NETWORK_TAG_DOT_GAP = 5;
 
 void drawFeedbackIcon(const GfxRenderer& renderer, int x, int y, bool thumbsUp) {
   constexpr int size = 24;
@@ -61,7 +60,7 @@ int drawNetworkStatusTag(const GfxRenderer& renderer, int headerBottom, int righ
   const char* label =
       connected ? tr(STR_PROJECT_STICK_STATUS_ONLINE) : tr(STR_PROJECT_STICK_STATUS_OFFLINE);
   const int textHeight = renderer.getLineHeight(SMALL_FONT_ID);
-  const int tagHeight = textHeight + 8;
+  const int tagHeight = textHeight + 4;
   const int tagWidth = NETWORK_TAG_HORIZONTAL_PADDING * 2 + NETWORK_TAG_DOT_SIZE +
                        NETWORK_TAG_DOT_GAP + renderer.getTextWidth(SMALL_FONT_ID, label);
   const int tagX = renderer.getScreenWidth() - rightInset - tagWidth;
@@ -75,7 +74,7 @@ int drawNetworkStatusTag(const GfxRenderer& renderer, int headerBottom, int righ
   } else {
     renderer.drawRect(dotX, dotY, NETWORK_TAG_DOT_SIZE, NETWORK_TAG_DOT_SIZE);
   }
-  renderer.drawText(SMALL_FONT_ID, dotX + NETWORK_TAG_DOT_SIZE + NETWORK_TAG_DOT_GAP, tagY + 4,
+  renderer.drawText(SMALL_FONT_ID, dotX + NETWORK_TAG_DOT_SIZE + NETWORK_TAG_DOT_GAP, tagY + 2,
                     label);
   return tagY + tagHeight;
 }
@@ -253,9 +252,6 @@ void ProjectStickActivity::render(RenderLock&&) {
 
   const auto& display = service.display();
   const int hintTop = height - metrics.buttonHintsHeight;
-  const int diagnosticsLineHeight = renderer.getLineHeight(SMALL_FONT_ID);
-  const int diagnosticsHeight = diagnosticsLineHeight + DIAGNOSTICS_VERTICAL_PADDING * 2;
-  const int diagnosticsTop = hintTop - diagnosticsHeight;
   const int contentInset =
       std::max(metrics.contentSidePadding, SIDE_BUTTON_MARGIN + SIDE_BUTTON_WIDTH + SIDE_CONTENT_GAP);
   const int tagBottom =
@@ -263,7 +259,7 @@ void ProjectStickActivity::render(RenderLock&&) {
                            WiFi.status() == WL_CONNECTED);
   const int contentTop = tagBottom + metrics.verticalSpacing;
   const Rect contentBounds{contentInset, contentTop, width - contentInset * 2,
-                           diagnosticsTop - contentTop};
+                           hintTop - metrics.verticalSpacing - contentTop};
 
   if (!display.text.empty()) {
     const std::string bodyText = project_stick::stripWrappingQuotes(display.text);
@@ -297,19 +293,25 @@ void ProjectStickActivity::render(RenderLock&&) {
       y += bodyLineStep;
     }
   } else {
-    UITheme::drawCenteredWrappedText(renderer, contentBounds, UI_12_FONT_ID, statusLine, 4, true,
-                                     EpdFontFamily::BOLD);
+    const bool showOfflineEmptyState = WiFi.status() != WL_CONNECTED && state == State::Offline;
+    if (showOfflineEmptyState) {
+      const char* title = tr(STR_PROJECT_STICK_NO_LOCAL_CONTENT);
+      const char* helper = tr(STR_PROJECT_STICK_CONNECT_TO_SYNC);
+      const int titleHeight =
+          renderer.getTextLineHeight(UI_12_FONT_ID, title, EpdFontFamily::BOLD);
+      const int helperHeight = renderer.getTextLineHeight(UI_10_FONT_ID, helper);
+      constexpr int emptyStateGap = 12;
+      const int groupHeight = titleHeight + emptyStateGap + helperHeight;
+      const int groupY = contentBounds.y + (contentBounds.height - groupHeight) / 2;
+      UITheme::drawCenteredText(renderer, contentBounds, UI_12_FONT_ID, groupY, title, true,
+                                EpdFontFamily::BOLD);
+      UITheme::drawCenteredText(renderer, contentBounds, UI_10_FONT_ID,
+                                groupY + titleHeight + emptyStateGap, helper, true);
+    } else {
+      UITheme::drawCenteredWrappedText(renderer, contentBounds, UI_12_FONT_ID, statusLine, 4, true,
+                                       EpdFontFamily::BOLD);
+    }
   }
-
-  char diagnostics[96];
-  snprintf(diagnostics, sizeof(diagnostics), "%.54s  v%lu  %s:%lu", statusLine,
-           static_cast<unsigned long>(service.activeVersion()), tr(STR_PROJECT_STICK_QUEUE),
-           static_cast<unsigned long>(service.pendingEventCount()));
-  renderer.drawLine(0, diagnosticsTop, width - 1, diagnosticsTop);
-  const auto fittedDiagnostics =
-      renderer.truncatedText(SMALL_FONT_ID, diagnostics, width - metrics.contentSidePadding * 2);
-  renderer.drawCenteredText(SMALL_FONT_ID, diagnosticsTop + DIAGNOSTICS_VERTICAL_PADDING,
-                            fittedDiagnostics.c_str());
 
   drawFeedbackHints(renderer);
   GUI.drawButtonHints(renderer, tr(STR_BACK), tr(STR_PROJECT_STICK_CONNECT_WIFI), "",
