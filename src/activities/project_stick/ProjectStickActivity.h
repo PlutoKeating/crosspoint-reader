@@ -29,6 +29,7 @@ class ProjectStickActivity final : public Activity {
   char statusLine[96] = {0};
 #ifdef SIMULATOR
   bool simulatorRecoveryPending = false;
+  bool simulatorAlertPollPending = false;
 #endif
 
   void runInitialSync();

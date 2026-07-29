@@ -1,0 +1,16 @@
+{
+  "server_time": "2026-07-29T10:30:00+08:00",
+  "is_trading_day": true,
+  "alerts": [
+    {
+      "id": 987654321,
+      "symbol": "TEST.X",
+      "name": "Simulator alert",
+      "pct_change": 3.2,
+      "direction": "up",
+      "triggered_at": "2026-07-29T10:29:00+08:00",
+      "active_until": "2026-07-29T11:00:00+08:00",
+      "scenario": "volatility_alert"
+    }
+  ]
+}

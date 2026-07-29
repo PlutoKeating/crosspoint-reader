@@ -123,6 +123,10 @@ void ProjectStickActivity::runInitialSync() {
   simulatorRecoveryPending =
       report.result == ProjectStickService::SyncResult::Failed &&
       std::getenv("CROSSPOINT_SIM_RECOVER_AFTER_FIRST_FAILURE") != nullptr;
+  simulatorAlertPollPending =
+      (report.result == ProjectStickService::SyncResult::Updated ||
+       report.result == ProjectStickService::SyncResult::Unchanged) &&
+      std::getenv("CROSSPOINT_SIM_POLL_ALERT_ONCE") != nullptr;
 #endif
   lastManifestAttemptMs = millis();
   lastAlertPollMs = millis();
@@ -198,6 +202,16 @@ void ProjectStickActivity::loop() {
     simulatorRecoveryPending = false;
     LOG_INF("STICK", "Simulator invoking the Project.Stick Refresh recovery path");
     runManualRefresh();
+    return;
+  }
+  if (simulatorAlertPollPending) {
+    simulatorAlertPollPending = false;
+    LOG_INF("STICK", "Simulator invoking one Project.Stick alert poll");
+    if (service.pollAlerts()) {
+      state = State::Online;
+      setStatus(tr(STR_PROJECT_STICK_ALERT));
+      requestUpdate();
+    }
     return;
   }
 #endif

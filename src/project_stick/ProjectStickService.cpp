@@ -610,9 +610,14 @@ bool ProjectStickService::refreshIfScheduleChanged() {
 
 bool ProjectStickService::pollAlerts() {
   const project_stick::ShanghaiTime current = now();
-  if (!PROJECT_STICK_STORE.tradingDay || !current.valid) return false;
+  bool eligible = PROJECT_STICK_STORE.tradingDay && current.valid;
   const uint16_t minute = current.minuteOfDay();
-  if (!((minute >= 570 && minute < 690) || (minute >= 780 && minute < 900))) return false;
+  eligible =
+      eligible && ((minute >= 570 && minute < 690) || (minute >= 780 && minute < 900));
+#ifdef SIMULATOR
+  eligible = eligible || std::getenv("CROSSPOINT_SIM_FORCE_ALERT_WINDOW") != nullptr;
+#endif
+  if (!eligible) return false;
 
   std::string response;
   const std::string url =
