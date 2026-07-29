@@ -212,7 +212,10 @@ ProjectStickService::SyncReport ProjectStickService::sync(bool registerFirst) {
       report.result == SyncResult::Updated || report.result == SyncResult::Unchanged;
   if (report.result == SyncResult::Updated ||
       (report.result == SyncResult::Unchanged && currentDisplay.copyId == 0)) {
-    if (!refreshScheduledContent()) report.result = SyncResult::NoContent;
+    if (!refreshScheduledContent()) {
+      report.result =
+          project_stick::contentSelectionFailureResult(PROJECT_STICK_STORE.activeVersion);
+    }
   } else if (report.result == SyncResult::OfflineCache && currentDisplay.copyId == 0 &&
              !refreshScheduledContent()) {
     // A failed manifest request with no usable cache is a connection/storage

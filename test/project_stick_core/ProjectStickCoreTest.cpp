@@ -65,6 +65,11 @@ TEST(ProjectStickSyncState, FailedRegistrationRemainsDueAtTheNextPoll) {
   EXPECT_TRUE(registrationDue(4UL * 60UL * 60UL * 1000UL + 1, 1));
 }
 
+TEST(ProjectStickSyncState, NoPublishedContentRequiresNoActiveRelease) {
+  EXPECT_EQ(contentSelectionFailureResult(0), SyncResult::NoContent);
+  EXPECT_EQ(contentSelectionFailureResult(2), SyncResult::Failed);
+}
+
 TEST(ProjectStickCore, ParsesProtocolTimesIntoShanghai) {
   ShanghaiTime time;
   ASSERT_TRUE(parseIso8601ToShanghai("2026-07-22T13:30:05+08:00", time));
