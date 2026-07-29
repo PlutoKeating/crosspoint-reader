@@ -33,7 +33,7 @@ working clock whenever the API returns `server_time`.
 The production service defaults to:
 
 ```text
-https://project-stockstick.williamhvollita.workers.dev
+https://stickstock.williamhvollita.dpdns.org
 ```
 
 Override it at build time without editing source:
