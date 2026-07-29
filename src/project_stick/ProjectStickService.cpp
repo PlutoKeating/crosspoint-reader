@@ -16,6 +16,9 @@
 #include <cstdio>
 #include <cstring>
 #include <cstdlib>
+#ifdef SIMULATOR
+#include <random>
+#endif
 #include <utility>
 
 #include "network/HttpDownloader.h"
@@ -998,7 +1001,8 @@ std::string ProjectStickService::releaseFile(uint32_t version, const std::string
 std::string ProjectStickService::makeUuid() {
   uint8_t bytes[16];
 #ifdef SIMULATOR
-  for (auto& byte : bytes) byte = static_cast<uint8_t>(std::rand());
+  static std::mt19937 random(std::random_device{}());
+  for (auto& byte : bytes) byte = static_cast<uint8_t>(random());
 #else
   esp_fill_random(bytes, sizeof(bytes));
 #endif
