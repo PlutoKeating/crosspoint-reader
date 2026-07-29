@@ -1,9 +1,63 @@
 #include <gtest/gtest.h>
 
 #include "ProjectStickCore.h"
+#include "ProjectStickSyncState.h"
 #include "ProjectStickStream.h"
 
 using namespace project_stick;
+
+TEST(ProjectStickSyncState, FailedFirstSyncRequiresFullCloudRecovery) {
+  const SyncReport failed{
+      .result = SyncResult::Failed,
+      .registerAttempted = true,
+      .registerSucceeded = false,
+  };
+
+  EXPECT_EQ(manualRefreshMode(true, 0, failed), ManualRefreshMode::FullCloudSync);
+  EXPECT_FALSE(shouldRecordRegisterSuccess(failed));
+  EXPECT_FALSE(shouldRecordManifestPoll(failed));
+}
+
+TEST(ProjectStickSyncState, SuccessfulSyncRecordsOnlyCompletedProtocolStages) {
+  const SyncReport updated{
+      .result = SyncResult::Updated,
+      .registerAttempted = true,
+      .registerSucceeded = true,
+      .manifestAttempted = true,
+      .manifestCompleted = true,
+  };
+
+  EXPECT_TRUE(shouldRecordRegisterSuccess(updated));
+  EXPECT_TRUE(shouldRecordManifestPoll(updated));
+  EXPECT_EQ(manualRefreshMode(true, 7, updated), ManualRefreshMode::LocalReselect);
+}
+
+TEST(ProjectStickSyncState, OnlineDeviceWithoutActiveReleaseRetriesCloud) {
+  const SyncReport noContent{
+      .result = SyncResult::NoContent,
+      .registerAttempted = true,
+      .registerSucceeded = true,
+      .manifestAttempted = true,
+      .manifestCompleted = true,
+  };
+
+  EXPECT_EQ(manualRefreshMode(true, 0, noContent), ManualRefreshMode::FullCloudSync);
+  EXPECT_EQ(manualRefreshMode(false, 0, noContent), ManualRefreshMode::LocalReselect);
+}
+
+TEST(ProjectStickSyncState, ManifestFailureDoesNotSuppressTheNextRecovery) {
+  const SyncReport failed{
+      .result = SyncResult::Failed,
+      .registerAttempted = true,
+      .registerSucceeded = true,
+      .manifestAttempted = true,
+      .manifestCompleted = false,
+  };
+
+  EXPECT_TRUE(shouldRecordRegisterSuccess(failed));
+  EXPECT_FALSE(shouldRecordManifestPoll(failed));
+  EXPECT_EQ(manualRefreshMode(true, 3, failed), ManualRefreshMode::FullCloudSync);
+}
 
 TEST(ProjectStickCore, ParsesProtocolTimesIntoShanghai) {
   ShanghaiTime time;
