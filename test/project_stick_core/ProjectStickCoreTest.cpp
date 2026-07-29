@@ -198,6 +198,7 @@ TEST(ProjectStickStream, RejectsContentWithoutDisplayableText) {
   ContentStreamDecoder decoder(ContentPassMode::MEASURE, usedIds);
   decoder.feed(json, sizeof(json) - 1);
   EXPECT_FALSE(decoder.finish());
+  EXPECT_FALSE(decoder.finishAllowEmpty());
 }
 
 TEST(ProjectStickStream, AcceptsEmptyOptionalContentForReleaseStorage) {

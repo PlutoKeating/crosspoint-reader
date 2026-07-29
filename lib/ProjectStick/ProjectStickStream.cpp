@@ -234,6 +234,12 @@ bool ContentStreamDecoder::finish() const {
   return !invalid && !parser.hasError() && level == 0 && !inCopy && copyCount != 0 && passResult;
 }
 
+bool ContentStreamDecoder::finishAllowEmpty() const {
+  if (passMode != ContentPassMode::MEASURE) return finish();
+  return !invalid && !parser.hasError() && level == 0 && !inCopy && copiesSeen &&
+         (copyCount == 0 || allWeight != 0);
+}
+
 void ContentStreamDecoder::onKey(void* ctx, const char* value, size_t length) {
   auto* self = static_cast<ContentStreamDecoder*>(ctx);
   self->currentKey.assign(value, length);
@@ -288,6 +294,7 @@ void ContentStreamDecoder::onArrayStart(void* ctx) {
   ++self->level;
   if (!self->inCopies && self->currentKey == "copies") {
     self->inCopies = true;
+    self->copiesSeen = true;
     self->copiesArrayLevel = self->level;
   }
 }

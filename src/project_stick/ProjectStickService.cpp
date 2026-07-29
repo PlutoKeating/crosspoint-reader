@@ -336,7 +336,9 @@ bool ProjectStickService::materializeRelease(uint32_t version) {
   if (!schedule || !streamScheduleFile(objectFile(scheduleEntry.sha256), *schedule) || !schedule->finish()) {
     return false;
   }
-  for (const auto& window : schedule->windows()) {
+  auto windows = schedule->takeWindows();
+  schedule.reset();
+  for (const auto& window : windows) {
     if (!window.enabled) continue;
     const std::string contentPath = "content/" + window.scenario + ".json";
     project_stick::ReleaseFileEntry contentEntry;
@@ -344,6 +346,13 @@ bool ProjectStickService::materializeRelease(uint32_t version) {
         !findSnapshotEntry(version, contentPath, contentEntry) ||
         !Storage.exists(objectFile(contentEntry.sha256).c_str())) {
       LOG_ERR("STICK", "Release missing scheduled content: %s", contentPath.c_str());
+      return false;
+    }
+    const std::vector<int64_t> noUsedIds;
+    auto content = makeUniqueNoThrow<project_stick::ContentStreamDecoder>(
+        project_stick::ContentPassMode::MEASURE, noUsedIds);
+    if (!content || !streamContentFile(objectFile(contentEntry.sha256), *content) || !content->finish()) {
+      LOG_ERR("STICK", "Release has no displayable scheduled content: %s", contentPath.c_str());
       return false;
     }
   }
@@ -424,7 +433,7 @@ bool ProjectStickService::validateObject(const project_stick::ReleaseFileEntry& 
     const std::vector<int64_t> noUsedIds;
     auto decoder = makeUniqueNoThrow<project_stick::ContentStreamDecoder>(
         project_stick::ContentPassMode::MEASURE, noUsedIds);
-    return decoder && streamContentFile(path, *decoder) && decoder->finish();
+    return decoder && streamContentFile(path, *decoder) && decoder->finishAllowEmpty();
   }
 
   HalFile input;

@@ -27,6 +27,7 @@ class ReleaseManifestDecoder {
 
   void feed(const char* data, size_t length);
   bool finish() const;
+  bool finishAllowEmpty() const;
 
   uint32_t version() const { return releaseVersion; }
   bool unchanged() const { return releaseUnchanged; }
@@ -152,6 +153,7 @@ class ContentStreamDecoder {
   uint8_t level = 0;
   uint8_t copiesArrayLevel = 0;
   bool inCopies = false;
+  bool copiesSeen = false;
   bool inCopy = false;
   bool currentHasText = false;
   bool hasSelection = false;
