@@ -7,6 +7,7 @@
 #include <Logging.h>
 #include <Memory.h>
 #include <SecureHttpClient.h>
+#include <WiFi.h>
 #include <esp_system.h>
 #include <mbedtls/sha256.h>
 
@@ -664,6 +665,7 @@ void ProjectStickService::queueEvent(const char* type, const std::string& scenar
 
 bool ProjectStickService::flushEvents() {
   if (PROJECT_STICK_STORE.pendingEvents.empty()) return true;
+  if (WiFi.status() != WL_CONNECTED) return false;
   JsonDocument request;
   request["device_id"] = PROJECT_STICK_STORE.deviceId;
   JsonArray events = request["events"].to<JsonArray>();
