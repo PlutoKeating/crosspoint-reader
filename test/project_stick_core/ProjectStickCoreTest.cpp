@@ -199,3 +199,22 @@ TEST(ProjectStickStream, RejectsContentWithoutDisplayableText) {
   decoder.feed(json, sizeof(json) - 1);
   EXPECT_FALSE(decoder.finish());
 }
+
+TEST(ProjectStickStream, AcceptsEmptyOptionalContentForReleaseStorage) {
+  constexpr char json[] = R"({"scenario":"manual_refresh","copies":[]})";
+  const std::vector<int64_t> usedIds;
+  ContentStreamDecoder decoder(ContentPassMode::MEASURE, usedIds);
+  decoder.feed(json, sizeof(json) - 1);
+
+  EXPECT_TRUE(decoder.finishAllowEmpty());
+  EXPECT_FALSE(decoder.finish());
+}
+
+TEST(ProjectStickStream, RejectsMissingCopiesArrayForReleaseStorage) {
+  constexpr char json[] = R"({"scenario":"manual_refresh"})";
+  const std::vector<int64_t> usedIds;
+  ContentStreamDecoder decoder(ContentPassMode::MEASURE, usedIds);
+  decoder.feed(json, sizeof(json) - 1);
+
+  EXPECT_FALSE(decoder.finishAllowEmpty());
+}
