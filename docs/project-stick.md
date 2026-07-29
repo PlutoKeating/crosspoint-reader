@@ -33,7 +33,7 @@ working clock whenever the API returns `server_time`.
 The production service defaults to:
 
 ```text
-https://stockstick.vercel.app
+https://project-stockstick.williamhvollita.workers.dev
 ```
 
 Override it at build time without editing source:
