@@ -102,22 +102,70 @@ const char* scenarioDisplayName(const std::string& scenario) {
 void ProjectStickActivity::onEnter() {
   Activity::onEnter();
   service.begin();
+  PROJECT_STICK_BACKGROUND_SYNC.begin();
+  backgroundResultSequence = PROJECT_STICK_BACKGROUND_SYNC.latestSequence();
+  const bool haveLocalContent = service.refreshScheduledContent();
   if (WiFi.status() == WL_CONNECTED) {
-    state = State::Connecting;
-    setStatus(tr(STR_PROJECT_STICK_SYNCING));
-    workPending = true;
+    state = haveLocalContent ? State::Online : State::Connecting;
+    setStatus(haveLocalContent ? tr(STR_PROJECT_STICK_ONLINE)
+                               : tr(STR_PROJECT_STICK_SYNCING));
+    requestCloudSync(true);
   } else {
-    service.refreshScheduledContent();
     state = State::Offline;
     setStatus(tr(STR_PROJECT_STICK_OFFLINE));
   }
   requestUpdate();
 }
 
-void ProjectStickActivity::runInitialSync() {
-  requestUpdateAndWait();
-  const auto report = service.sync();
+bool ProjectStickActivity::requestCloudSync(bool registerFirst) {
+  if (WiFi.status() != WL_CONNECTED) return false;
+  return PROJECT_STICK_BACKGROUND_SYNC.requestSync(registerFirst);
+}
+
+void ProjectStickActivity::runManualRefresh() {
+  const bool online = WiFi.status() == WL_CONNECTED;
+  const bool selected = service.sendManualRefresh(false);
+  if (selected) {
+    state = online ? State::Online : State::Offline;
+    setStatus(online ? tr(STR_PROJECT_STICK_ONLINE) : tr(STR_PROJECT_STICK_OFFLINE));
+  } else if (online) {
+    state = State::Connecting;
+    setStatus(tr(STR_PROJECT_STICK_REFRESHING));
+  } else {
+    state = State::Offline;
+    setStatus(tr(STR_PROJECT_STICK_OFFLINE));
+  }
+  // Wake the renderer immediately. Cloud work is only offered to the
+  // process-lifetime worker after the local selection is complete.
+  requestUpdate(true);
+  requestCloudSync(project_stick::registrationDue(millis(), lastRegisterMs));
+}
+
+void ProjectStickActivity::applyBackgroundResult() {
+  ProjectStickBackgroundSync::Result result;
+  if (!PROJECT_STICK_BACKGROUND_SYNC.takeResult(backgroundResultSequence, result)) return;
+
+  if (result.kind == ProjectStickBackgroundSync::WorkKind::AlertPoll) {
+    if (result.alertReceived) {
+      service.adoptDisplay(std::move(result.alertDisplay));
+      state = State::Online;
+      setStatus(tr(STR_PROJECT_STICK_ALERT));
+      requestUpdate();
+    }
+    return;
+  }
+
+  const auto& report = result.syncReport;
   recordSyncTiming(report);
+  lastManifestAttemptMs = millis();
+  lastAlertPollMs = millis();
+  lastScheduleCheckMs = millis();
+  if ((report.result == ProjectStickService::SyncResult::Updated ||
+       report.result == ProjectStickService::SyncResult::Unchanged) &&
+      (report.result == ProjectStickService::SyncResult::Updated ||
+       service.display().copyId == 0)) {
+    service.refreshScheduledContent();
+  }
   updateState(report);
 #ifdef SIMULATOR
   simulatorRecoveryPending =
@@ -128,49 +176,6 @@ void ProjectStickActivity::runInitialSync() {
        report.result == ProjectStickService::SyncResult::Unchanged) &&
       std::getenv("CROSSPOINT_SIM_POLL_ALERT_ONCE") != nullptr;
 #endif
-  lastManifestAttemptMs = millis();
-  lastAlertPollMs = millis();
-  lastScheduleCheckMs = millis();
-}
-
-void ProjectStickActivity::runManualRefresh() {
-  const bool online = WiFi.status() == WL_CONNECTED;
-  const auto plan = project_stick::manualRefreshPlan(
-      online, workPending || manualCloudSyncPending, cloudSyncInProgress);
-
-  for (uint8_t i = 0; i < plan.count; ++i) {
-    if (plan.steps[i] == project_stick::ManualRefreshStep::LocalRefresh) {
-      const bool selected = service.sendManualRefresh(false);
-      if (selected) {
-        state = online ? State::Online : State::Offline;
-        setStatus(online ? tr(STR_PROJECT_STICK_ONLINE) : tr(STR_PROJECT_STICK_OFFLINE));
-      } else if (online) {
-        state = State::Connecting;
-        setStatus(tr(STR_PROJECT_STICK_REFRESHING));
-      } else {
-        state = State::Offline;
-        setStatus(tr(STR_PROJECT_STICK_OFFLINE));
-      }
-      // Present the SD-backed selection before a later loop iteration starts
-      // any blocking HTTPS work.
-      requestUpdateAndWait();
-    } else {
-      manualCloudSyncPending = true;
-    }
-  }
-}
-
-void ProjectStickActivity::runPendingManualCloudSync() {
-  if (!manualCloudSyncPending || cloudSyncInProgress) return;
-  manualCloudSyncPending = false;
-  if (WiFi.status() != WL_CONNECTED) return;
-
-  cloudSyncInProgress = true;
-  const auto report = service.sync(true);
-  cloudSyncInProgress = false;
-  lastManifestAttemptMs = millis();
-  recordSyncTiming(report);
-  updateState(report);
 }
 
 void ProjectStickActivity::recordSyncTiming(const project_stick::SyncReport& report) {
@@ -211,17 +216,7 @@ void ProjectStickActivity::updateState(const project_stick::SyncReport& report) 
 }
 
 void ProjectStickActivity::loop() {
-  if (workPending) {
-    workPending = false;
-    cloudSyncInProgress = true;
-    runInitialSync();
-    cloudSyncInProgress = false;
-    return;
-  }
-  if (manualCloudSyncPending) {
-    runPendingManualCloudSync();
-    return;
-  }
+  applyBackgroundResult();
 #ifdef SIMULATOR
   if (simulatorRecoveryPending) {
     simulatorRecoveryPending = false;
@@ -232,11 +227,7 @@ void ProjectStickActivity::loop() {
   if (simulatorAlertPollPending) {
     simulatorAlertPollPending = false;
     LOG_INF("STICK", "Simulator invoking one Project.Stick alert poll");
-    if (service.pollAlerts()) {
-      state = State::Online;
-      setStatus(tr(STR_PROJECT_STICK_ALERT));
-      requestUpdate();
-    }
+    PROJECT_STICK_BACKGROUND_SYNC.requestAlertPoll();
     return;
   }
 #endif
@@ -245,7 +236,8 @@ void ProjectStickActivity::loop() {
   // and BTN_DOWN is on the right edge.
   if (mappedInput.wasReleased(MappedInputManager::Button::Up)) {
     if (service.display().copyId != 0) {
-      service.sendFeedback(false, WiFi.status() == WL_CONNECTED);
+      service.sendFeedback(false, false);
+      requestCloudSync(false);
       setStatus(tr(STR_PROJECT_STICK_MEH_SENT));
       requestUpdate();
     }
@@ -254,7 +246,8 @@ void ProjectStickActivity::loop() {
 
   if (mappedInput.wasReleased(MappedInputManager::Button::Down)) {
     if (service.display().copyId != 0) {
-      service.sendFeedback(true, WiFi.status() == WL_CONNECTED);
+      service.sendFeedback(true, false);
+      requestCloudSync(false);
       setStatus(tr(STR_PROJECT_STICK_USEFUL_SENT));
       requestUpdate();
     }
@@ -280,16 +273,8 @@ void ProjectStickActivity::loop() {
   const uint32_t nowMs = millis();
   if (state != State::Inactive && WiFi.status() == WL_CONNECTED &&
       nowMs - lastManifestAttemptMs >= service.pollIntervalSeconds() * 1000UL) {
-    lastManifestAttemptMs = nowMs;
-    setStatus(tr(STR_PROJECT_STICK_SYNCING));
-    requestUpdateAndWait();
     const bool heartbeatDue = project_stick::registrationDue(nowMs, lastRegisterMs);
-    cloudSyncInProgress = true;
-    const auto report = service.sync(heartbeatDue);
-    cloudSyncInProgress = false;
-    recordSyncTiming(report);
-    updateState(report);
-    return;
+    if (requestCloudSync(heartbeatDue)) lastManifestAttemptMs = nowMs;
   }
   if (nowMs - lastScheduleCheckMs >= 30000UL) {
     lastScheduleCheckMs = nowMs;
@@ -301,12 +286,7 @@ void ProjectStickActivity::loop() {
   }
   if (state != State::Inactive && WiFi.status() == WL_CONNECTED &&
       nowMs - lastAlertPollMs >= service.alertPollIntervalSeconds() * 1000UL) {
-    lastAlertPollMs = nowMs;
-    if (service.pollAlerts()) {
-      state = State::Online;
-      setStatus(tr(STR_PROJECT_STICK_ALERT));
-      requestUpdate();
-    }
+    if (PROJECT_STICK_BACKGROUND_SYNC.requestAlertPoll()) lastAlertPollMs = nowMs;
   }
 }
 
@@ -317,7 +297,7 @@ void ProjectStickActivity::launchWifiSelection() {
         if (WiFi.status() == WL_CONNECTED) {
           state = State::Connecting;
           setStatus(tr(STR_PROJECT_STICK_SYNCING));
-          workPending = true;
+          requestCloudSync(true);
         } else {
           service.refreshScheduledContent();
           state = State::Offline;

@@ -30,25 +30,21 @@ TEST(ProjectStickSyncState, SuccessfulSyncRecordsOnlyCompletedProtocolStages) {
   EXPECT_TRUE(shouldRecordManifestPoll(updated));
 }
 
-TEST(ProjectStickSyncState, ManualRefreshRunsLocalFirstThenQueuesCloudWhenIdle) {
-  const auto plan = manualRefreshPlan(true, false, false);
-  ASSERT_EQ(plan.count, 2);
-  EXPECT_EQ(plan.steps[0], ManualRefreshStep::LocalRefresh);
-  EXPECT_EQ(plan.steps[1], ManualRefreshStep::QueueCloudSync);
-}
+TEST(ProjectStickSyncState, BackgroundWorkGateRejectsRefreshWhileCloudIsQueuedOrRunning) {
+  BackgroundWorkGate gate;
 
-TEST(ProjectStickSyncState, ManualRefreshDoesNotQueueDuplicateCloudSync) {
-  const auto pending = manualRefreshPlan(true, true, false);
-  ASSERT_EQ(pending.count, 1);
-  EXPECT_EQ(pending.steps[0], ManualRefreshStep::LocalRefresh);
+  EXPECT_TRUE(gate.tryQueue());
+  EXPECT_TRUE(gate.pending());
+  EXPECT_FALSE(gate.tryQueue());
 
-  const auto inProgress = manualRefreshPlan(true, false, true);
-  ASSERT_EQ(inProgress.count, 1);
-  EXPECT_EQ(inProgress.steps[0], ManualRefreshStep::LocalRefresh);
+  EXPECT_TRUE(gate.begin());
+  EXPECT_TRUE(gate.running());
+  EXPECT_FALSE(gate.tryQueue());
 
-  const auto offline = manualRefreshPlan(false, false, false);
-  ASSERT_EQ(offline.count, 1);
-  EXPECT_EQ(offline.steps[0], ManualRefreshStep::LocalRefresh);
+  gate.complete();
+  EXPECT_FALSE(gate.pending());
+  EXPECT_FALSE(gate.running());
+  EXPECT_TRUE(gate.tryQueue());
 }
 
 TEST(ProjectStickSyncState, ManifestFailureDoesNotSuppressTheNextRecovery) {

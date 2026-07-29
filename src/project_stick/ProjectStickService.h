@@ -22,7 +22,7 @@ class ProjectStickService {
   };
 
   void begin();
-  SyncReport sync(bool registerFirst = true);
+  SyncReport sync(bool registerFirst = true, bool refreshDisplay = true);
   bool pollAlerts();
   bool refreshIfScheduleChanged();
   bool refreshScheduledContent(const char* forcedScenario = nullptr);
@@ -31,6 +31,8 @@ class ProjectStickService {
   void queueManualRefresh();
 
   const Display& display() const { return currentDisplay; }
+  Display displaySnapshot() const;
+  void adoptDisplay(Display display);
   uint32_t activeVersion() const;
   uint32_t pendingEventCount() const;
   uint32_t pollIntervalSeconds() const;

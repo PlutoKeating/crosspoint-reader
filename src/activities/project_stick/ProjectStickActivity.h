@@ -1,6 +1,7 @@
 #pragma once
 
 #include "activities/Activity.h"
+#include "project_stick/ProjectStickBackgroundSync.h"
 #include "project_stick/ProjectStickService.h"
 
 class ProjectStickActivity final : public Activity {
@@ -19,9 +20,7 @@ class ProjectStickActivity final : public Activity {
 
   ProjectStickService service;
   State state = State::Connecting;
-  bool workPending = false;
-  bool manualCloudSyncPending = false;
-  bool cloudSyncInProgress = false;
+  uint32_t backgroundResultSequence = 0;
   uint32_t lastManifestPollMs = 0;
   uint32_t lastManifestAttemptMs = 0;
   uint32_t lastAlertPollMs = 0;
@@ -34,9 +33,9 @@ class ProjectStickActivity final : public Activity {
   bool simulatorAlertPollPending = false;
 #endif
 
-  void runInitialSync();
   void runManualRefresh();
-  void runPendingManualCloudSync();
+  void applyBackgroundResult();
+  bool requestCloudSync(bool registerFirst);
   void updateState(const project_stick::SyncReport& report);
   void recordSyncTiming(const project_stick::SyncReport& report);
   void launchWifiSelection();

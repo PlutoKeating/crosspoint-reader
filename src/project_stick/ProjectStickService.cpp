@@ -15,6 +15,7 @@
 #include <cstdio>
 #include <cstring>
 #include <cstdlib>
+#include <mutex>
 #ifdef SIMULATOR
 #include <random>
 #endif
@@ -28,6 +29,10 @@
 #endif
 
 namespace {
+std::recursive_mutex projectStickStateMutex;
+using ProjectStickStateLock = std::lock_guard<std::recursive_mutex>;
+bool projectStickStoreInitialized = false;
+
 constexpr size_t MAX_RELEASE_FILE_SIZE = 512 * 1024;
 constexpr size_t MAX_MANIFEST_BYTES = 64 * 1024;
 constexpr size_t MAX_ALERT_BYTES = 32 * 1024;
@@ -177,9 +182,12 @@ class JsonObjectValidator {
 void ProjectStickService::begin() {
   baseUrl = PROJECT_STICK_BASE_URL;
   while (!baseUrl.empty() && baseUrl.back() == '/') baseUrl.pop_back();
+  ProjectStickStateLock lock(projectStickStateMutex);
+  if (projectStickStoreInitialized) return;
   PROJECT_STICK_STORE.loadFromFile();
   if (ensureIdentity()) PROJECT_STICK_STORE.saveToFile();
   cleanupReleaseStorage();
+  projectStickStoreInitialized = true;
 }
 
 bool ProjectStickService::ensureIdentity() {
@@ -189,7 +197,7 @@ bool ProjectStickService::ensureIdentity() {
   return true;
 }
 
-ProjectStickService::SyncReport ProjectStickService::sync(bool registerFirst) {
+ProjectStickService::SyncReport ProjectStickService::sync(bool registerFirst, bool refreshDisplay) {
   SyncReport report;
   inactive = false;
   if (registerFirst) {
@@ -201,7 +209,10 @@ ProjectStickService::SyncReport ProjectStickService::sync(bool registerFirst) {
         report.result = SyncResult::Inactive;
         return report;
       }
-      report.result = refreshScheduledContent() ? SyncResult::OfflineCache : SyncResult::Failed;
+      report.result =
+          refreshDisplay
+              ? (refreshScheduledContent() ? SyncResult::OfflineCache : SyncResult::Failed)
+              : (activeVersion() != 0 ? SyncResult::OfflineCache : SyncResult::Failed);
       return report;
     }
     report.registerSucceeded = true;
@@ -212,13 +223,14 @@ ProjectStickService::SyncReport ProjectStickService::sync(bool registerFirst) {
   report.result = syncManifest();
   report.manifestCompleted =
       report.result == SyncResult::Updated || report.result == SyncResult::Unchanged;
-  if (report.result == SyncResult::Updated ||
-      (report.result == SyncResult::Unchanged && currentDisplay.copyId == 0)) {
+  if (refreshDisplay &&
+      (report.result == SyncResult::Updated ||
+       (report.result == SyncResult::Unchanged && currentDisplay.copyId == 0))) {
     if (!refreshScheduledContent()) {
       report.result =
           project_stick::contentSelectionFailureResult(PROJECT_STICK_STORE.activeVersion);
     }
-  } else if (report.result == SyncResult::OfflineCache && currentDisplay.copyId == 0 &&
+  } else if (refreshDisplay && report.result == SyncResult::OfflineCache && currentDisplay.copyId == 0 &&
              !refreshScheduledContent()) {
     // A failed manifest request with no usable cache is a connection/storage
     // failure, not evidence that the server has no published release.
@@ -231,7 +243,10 @@ ProjectStickService::SyncReport ProjectStickService::sync(bool registerFirst) {
 bool ProjectStickService::registerDevice(int& status) {
   LOG_INF("STICK", "Registering device (firmware=%s)", CROSSPOINT_VERSION);
   JsonDocument request;
-  request["device_id"] = PROJECT_STICK_STORE.deviceId;
+  {
+    ProjectStickStateLock lock(projectStickStateMutex);
+    request["device_id"] = PROJECT_STICK_STORE.deviceId;
+  }
   request["firmware_version"] = CROSSPOINT_VERSION;
   std::string body;
   serializeJson(request, body);
@@ -247,31 +262,44 @@ bool ProjectStickService::registerDevice(int& status) {
     return false;
   }
 
-  PROJECT_STICK_STORE.pollIntervalSeconds =
-      std::clamp<uint32_t>(doc["poll_interval_seconds"] | 300, 30, 86400);
-  PROJECT_STICK_STORE.alertPollIntervalSeconds =
-      std::clamp<uint32_t>(doc["alert_poll_interval_seconds"] | 30, 10, 3600);
-  PROJECT_STICK_STORE.tradingDay = doc["is_trading_day"] | false;
-  parseServerTime(doc["server_time"] | "");
-  if (!PROJECT_STICK_STORE.saveToFile()) {
-    LOG_ERR("STICK", "Device registration state could not be saved to SD");
-    return false;
+  uint32_t pollSeconds = 300;
+  uint32_t alertSeconds = 30;
+  {
+    ProjectStickStateLock lock(projectStickStateMutex);
+    PROJECT_STICK_STORE.pollIntervalSeconds =
+        std::clamp<uint32_t>(doc["poll_interval_seconds"] | 300, 30, 86400);
+    PROJECT_STICK_STORE.alertPollIntervalSeconds =
+        std::clamp<uint32_t>(doc["alert_poll_interval_seconds"] | 30, 10, 3600);
+    PROJECT_STICK_STORE.tradingDay = doc["is_trading_day"] | false;
+    parseServerTime(doc["server_time"] | "");
+    pollSeconds = PROJECT_STICK_STORE.pollIntervalSeconds;
+    alertSeconds = PROJECT_STICK_STORE.alertPollIntervalSeconds;
+    if (!PROJECT_STICK_STORE.saveToFile()) {
+      LOG_ERR("STICK", "Device registration state could not be saved to SD");
+      return false;
+    }
   }
   LOG_INF("STICK", "Device registered (release=%u poll=%us alerts=%us)",
           (unsigned)(doc["current_release_version"] | 0),
-          (unsigned)PROJECT_STICK_STORE.pollIntervalSeconds,
-          (unsigned)PROJECT_STICK_STORE.alertPollIntervalSeconds);
+          (unsigned)pollSeconds, (unsigned)alertSeconds);
   return true;
 }
 
 ProjectStickService::SyncResult ProjectStickService::syncManifest() {
-  const std::string path = "/api/v1/device/manifest?device_id=" + PROJECT_STICK_STORE.deviceId +
-                           "&current_version=" + std::to_string(PROJECT_STICK_STORE.activeVersion);
+  std::string deviceId;
+  uint32_t activeVersion = 0;
+  {
+    ProjectStickStateLock lock(projectStickStateMutex);
+    deviceId = PROJECT_STICK_STORE.deviceId;
+    activeVersion = PROJECT_STICK_STORE.activeVersion;
+  }
+  const std::string path = "/api/v1/device/manifest?device_id=" + deviceId +
+                           "&current_version=" + std::to_string(activeVersion);
   if ((!Storage.mkdir(DATA_ROOT, true) && !Storage.exists(DATA_ROOT)) ||
       (!Storage.mkdir(SNAPSHOT_ROOT, true) && !Storage.exists(SNAPSHOT_ROOT))) {
     return SyncResult::Failed;
   }
-  LOG_INF("STICK", "Fetching manifest (current=%u)", (unsigned)PROJECT_STICK_STORE.activeVersion);
+  LOG_INF("STICK", "Fetching manifest (current=%u)", (unsigned)activeVersion);
   if (!fetchToFile(baseUrl + path, MANIFEST_TEMP, MAX_MANIFEST_BYTES)) {
     LOG_ERR("STICK", "Manifest request failed");
     return SyncResult::OfflineCache;
@@ -319,30 +347,40 @@ ProjectStickService::SyncResult ProjectStickService::syncManifest() {
     Storage.remove(SNAPSHOT_TEMP);
     return SyncResult::Failed;
   }
-  if (!decoder->serverTime().empty()) parseServerTime(decoder->serverTime().c_str());
-  if (decoder->pollIntervalSeconds() != 0) {
-    PROJECT_STICK_STORE.pollIntervalSeconds =
-        std::clamp<uint32_t>(decoder->pollIntervalSeconds(), 30, 86400);
-  }
-  if (decoder->alertPollIntervalSeconds() != 0) {
-    PROJECT_STICK_STORE.alertPollIntervalSeconds =
-        std::clamp<uint32_t>(decoder->alertPollIntervalSeconds(), 10, 3600);
+  {
+    ProjectStickStateLock lock(projectStickStateMutex);
+    if (!decoder->serverTime().empty()) parseServerTime(decoder->serverTime().c_str());
+    if (decoder->pollIntervalSeconds() != 0) {
+      PROJECT_STICK_STORE.pollIntervalSeconds =
+          std::clamp<uint32_t>(decoder->pollIntervalSeconds(), 30, 86400);
+    }
+    if (decoder->alertPollIntervalSeconds() != 0) {
+      PROJECT_STICK_STORE.alertPollIntervalSeconds =
+          std::clamp<uint32_t>(decoder->alertPollIntervalSeconds(), 10, 3600);
+    }
   }
   const uint32_t version = decoder->version();
   if (decoder->unchanged()) {
     LOG_INF("STICK", "Manifest unchanged (version=%u)", (unsigned)version);
     Storage.remove(SNAPSHOT_TEMP);
+    ProjectStickStateLock lock(projectStickStateMutex);
     PROJECT_STICK_STORE.saveToFile();
     return SyncResult::Unchanged;
   }
-  if (version != PROJECT_STICK_STORE.activeVersion && PROJECT_STICK_STORE.previousVersion != 0) {
-    const uint32_t obsolete = PROJECT_STICK_STORE.previousVersion;
-    PROJECT_STICK_STORE.previousVersion = 0;
-    if (!PROJECT_STICK_STORE.saveToFile()) {
-      PROJECT_STICK_STORE.previousVersion = obsolete;
-      Storage.remove(SNAPSHOT_TEMP);
-      return SyncResult::Failed;
+  uint32_t obsolete = 0;
+  {
+    ProjectStickStateLock lock(projectStickStateMutex);
+    if (version != PROJECT_STICK_STORE.activeVersion && PROJECT_STICK_STORE.previousVersion != 0) {
+      obsolete = PROJECT_STICK_STORE.previousVersion;
+      PROJECT_STICK_STORE.previousVersion = 0;
+      if (!PROJECT_STICK_STORE.saveToFile()) {
+        PROJECT_STICK_STORE.previousVersion = obsolete;
+        Storage.remove(SNAPSHOT_TEMP);
+        return SyncResult::Failed;
+      }
     }
+  }
+  if (obsolete != 0) {
     Storage.removeDir(releaseRoot(obsolete).c_str());
     cleanupReleaseStorage(true);
   }
@@ -420,8 +458,13 @@ bool ProjectStickService::ensureObject(uint32_t version, const project_stick::Re
   }
   Storage.remove(destination.c_str());
 
-  const std::string legacy = releaseFile(PROJECT_STICK_STORE.activeVersion, file.path);
-  if (PROJECT_STICK_STORE.activeVersion != 0 && Storage.exists(legacy.c_str()) &&
+  uint32_t currentVersion = 0;
+  {
+    ProjectStickStateLock lock(projectStickStateMutex);
+    currentVersion = PROJECT_STICK_STORE.activeVersion;
+  }
+  const std::string legacy = releaseFile(currentVersion, file.path);
+  if (currentVersion != 0 && Storage.exists(legacy.c_str()) &&
       fileWithinLimit(legacy, file.size) && hashFile(legacy, existingHash) &&
       equalsIgnoreCase(existingHash, file.sha256)) {
     const std::string temporary = destination + ".tmp";
@@ -435,8 +478,13 @@ bool ProjectStickService::ensureObject(uint32_t version, const project_stick::Re
 bool ProjectStickService::downloadObject(uint32_t version, const project_stick::ReleaseFileEntry& file) {
   const std::string destination = objectFile(file.sha256);
   const std::string temporary = destination + ".tmp";
+  std::string deviceId;
+  {
+    ProjectStickStateLock lock(projectStickStateMutex);
+    deviceId = PROJECT_STICK_STORE.deviceId;
+  }
   const std::string url = baseUrl + "/api/v1/device/releases/" + std::to_string(version) + "/" + file.path +
-                          "?device_id=" + PROJECT_STICK_STORE.deviceId;
+                          "?device_id=" + deviceId;
   LOG_INF("STICK", "Downloading %s (%u bytes)", file.path.c_str(), (unsigned)file.size);
   for (uint8_t attempt = 0; attempt < 3; ++attempt) {
     Storage.remove(temporary.c_str());
@@ -506,6 +554,7 @@ bool ProjectStickService::validateObject(const project_stick::ReleaseFileEntry& 
 }
 
 bool ProjectStickService::activateSnapshot(uint32_t version) {
+  ProjectStickStateLock lock(projectStickStateMutex);
   const uint32_t oldActive = PROJECT_STICK_STORE.activeVersion;
   const uint32_t oldPrevious = PROJECT_STICK_STORE.previousVersion;
   PROJECT_STICK_STORE.previousVersion = oldActive == version ? oldPrevious : oldActive;
@@ -556,6 +605,7 @@ bool ProjectStickService::selectContent(const std::string& scenario, uint32_t ra
 }
 
 bool ProjectStickService::refreshScheduledContent(const char* forcedScenario) {
+  ProjectStickStateLock lock(projectStickStateMutex);
   if (PROJECT_STICK_STORE.activeVersion == 0) return false;
   const project_stick::ShanghaiTime current = now();
   std::string scenario;
@@ -601,6 +651,7 @@ bool ProjectStickService::refreshScheduledContent(const char* forcedScenario) {
 }
 
 bool ProjectStickService::refreshIfScheduleChanged() {
+  ProjectStickStateLock lock(projectStickStateMutex);
   if (PROJECT_STICK_STORE.activeVersion == 0) return false;
   if (scheduleCache.empty() && !loadSchedule(scheduleCache)) return false;
   const project_stick::ShanghaiTime current = now();
@@ -612,8 +663,15 @@ bool ProjectStickService::refreshIfScheduleChanged() {
 }
 
 bool ProjectStickService::pollAlerts() {
-  const project_stick::ShanghaiTime current = now();
-  bool eligible = PROJECT_STICK_STORE.tradingDay && current.valid;
+  project_stick::ShanghaiTime current;
+  bool eligible = false;
+  std::string deviceId;
+  {
+    ProjectStickStateLock lock(projectStickStateMutex);
+    current = now();
+    eligible = PROJECT_STICK_STORE.tradingDay && current.valid;
+    deviceId = PROJECT_STICK_STORE.deviceId;
+  }
   const uint16_t minute = current.minuteOfDay();
   eligible =
       eligible && ((minute >= 570 && minute < 690) || (minute >= 780 && minute < 900));
@@ -623,32 +681,48 @@ bool ProjectStickService::pollAlerts() {
   if (!eligible) return false;
 
   std::string response;
-  const std::string url =
-      baseUrl + "/api/v1/device/alerts?device_id=" + PROJECT_STICK_STORE.deviceId;
+  const std::string url = baseUrl + "/api/v1/device/alerts?device_id=" + deviceId;
   if (!fetchJson(url, response, MAX_ALERT_BYTES)) return false;
   JsonDocument doc;
   if (deserializeJson(doc, response)) return false;
-  parseServerTime(doc["server_time"] | "");
-  PROJECT_STICK_STORE.tradingDay = doc["is_trading_day"] | PROJECT_STICK_STORE.tradingDay;
+  {
+    ProjectStickStateLock lock(projectStickStateMutex);
+    parseServerTime(doc["server_time"] | "");
+    PROJECT_STICK_STORE.tradingDay = doc["is_trading_day"] | PROJECT_STICK_STORE.tradingDay;
+  }
 
   for (JsonObjectConst alert : doc["alerts"].as<JsonArrayConst>()) {
     const int64_t id = alert["id"] | 0;
-    if (id != 0 && !PROJECT_STICK_STORE.hasSeenAlert(id)) {
+    bool unseen = false;
+    {
+      ProjectStickStateLock lock(projectStickStateMutex);
+      unseen = id != 0 && !PROJECT_STICK_STORE.hasSeenAlert(id);
+    }
+    if (unseen) {
       if (refreshScheduledContent(alert["scenario"] | "volatility_alert")) {
-        PROJECT_STICK_STORE.markAlertSeen(id);
-        PROJECT_STICK_STORE.saveToFile();
+        {
+          ProjectStickStateLock lock(projectStickStateMutex);
+          PROJECT_STICK_STORE.markAlertSeen(id);
+          PROJECT_STICK_STORE.saveToFile();
+        }
         flushEvents();
         return true;
       }
     }
   }
-  PROJECT_STICK_STORE.saveToFile();
+  {
+    ProjectStickStateLock lock(projectStickStateMutex);
+    PROJECT_STICK_STORE.saveToFile();
+  }
   return false;
 }
 
 void ProjectStickService::sendFeedback(bool useful, bool canSend) {
-  if (currentDisplay.copyId == 0) return;
-  queueEvent(useful ? "feedback_useful" : "feedback_meh", currentDisplay.scenario, currentDisplay.copyId);
+  {
+    ProjectStickStateLock lock(projectStickStateMutex);
+    if (currentDisplay.copyId == 0) return;
+    queueEvent(useful ? "feedback_useful" : "feedback_meh", currentDisplay.scenario, currentDisplay.copyId);
+  }
   if (canSend) flushEvents();
 }
 
@@ -657,20 +731,23 @@ void ProjectStickService::queueManualRefresh() {
 }
 
 bool ProjectStickService::sendManualRefresh(bool canSend) {
-  queueManualRefresh();
-  if (canSend) flushEvents();
   bool selected = false;
-  if (currentDisplay.scenario.empty()) {
-    selected = refreshScheduledContent("manual_refresh");
-  } else {
-    const std::string scenario = currentDisplay.scenario;
-    selected = refreshScheduledContent(scenario.c_str());
+  {
+    ProjectStickStateLock lock(projectStickStateMutex);
+    queueManualRefresh();
+    if (currentDisplay.scenario.empty()) {
+      selected = refreshScheduledContent("manual_refresh");
+    } else {
+      const std::string scenario = currentDisplay.scenario;
+      selected = refreshScheduledContent(scenario.c_str());
+    }
   }
   if (canSend) flushEvents();
   return selected;
 }
 
 void ProjectStickService::queueEvent(const char* type, const std::string& scenario, int64_t copyId) {
+  ProjectStickStateLock lock(projectStickStateMutex);
   ProjectStickEvent event;
   event.id = makeUuid();
   event.type = type;
@@ -682,11 +759,18 @@ void ProjectStickService::queueEvent(const char* type, const std::string& scenar
 }
 
 bool ProjectStickService::flushEvents() {
-  if (PROJECT_STICK_STORE.pendingEvents.empty()) return true;
+  std::vector<ProjectStickEvent> pending;
+  std::string deviceId;
+  {
+    ProjectStickStateLock lock(projectStickStateMutex);
+    if (PROJECT_STICK_STORE.pendingEvents.empty()) return true;
+    pending = PROJECT_STICK_STORE.pendingEvents;
+    deviceId = PROJECT_STICK_STORE.deviceId;
+  }
   JsonDocument request;
-  request["device_id"] = PROJECT_STICK_STORE.deviceId;
+  request["device_id"] = deviceId;
   JsonArray events = request["events"].to<JsonArray>();
-  for (const auto& event : PROJECT_STICK_STORE.pendingEvents) {
+  for (const auto& event : pending) {
     JsonObject obj = events.add<JsonObject>();
     obj["client_event_id"] = event.id;
     obj["event_type"] = event.type;
@@ -699,7 +783,15 @@ bool ProjectStickService::flushEvents() {
   std::string response;
   int status = 0;
   if (!requestPost("/api/v1/device/events", body, response, status) || status != 200) return false;
-  PROJECT_STICK_STORE.pendingEvents.clear();
+  ProjectStickStateLock lock(projectStickStateMutex);
+  for (const auto& sent : pending) {
+    auto& events = PROJECT_STICK_STORE.pendingEvents;
+    events.erase(std::remove_if(events.begin(), events.end(),
+                                [&sent](const ProjectStickEvent& event) {
+                                  return event.id == sent.id;
+                                }),
+                 events.end());
+  }
   return PROJECT_STICK_STORE.saveToFile();
 }
 
@@ -948,6 +1040,7 @@ bool ProjectStickService::resolveReleaseFile(uint32_t version, const std::string
 }
 
 void ProjectStickService::cleanupReleaseStorage(bool keepIncoming) {
+  ProjectStickStateLock lock(projectStickStateMutex);
   Storage.remove(MANIFEST_TEMP);
   Storage.mkdir(SNAPSHOT_ROOT, true);
   Storage.mkdir(OBJECT_ROOT, true);
@@ -1039,12 +1132,33 @@ std::string ProjectStickService::makeUuid() {
   return value;
 }
 
-uint32_t ProjectStickService::activeVersion() const { return PROJECT_STICK_STORE.activeVersion; }
+ProjectStickService::Display ProjectStickService::displaySnapshot() const {
+  ProjectStickStateLock lock(projectStickStateMutex);
+  return currentDisplay;
+}
+
+void ProjectStickService::adoptDisplay(Display display) {
+  ProjectStickStateLock lock(projectStickStateMutex);
+  currentDisplay = std::move(display);
+}
+
+uint32_t ProjectStickService::activeVersion() const {
+  ProjectStickStateLock lock(projectStickStateMutex);
+  return PROJECT_STICK_STORE.activeVersion;
+}
 uint32_t ProjectStickService::pendingEventCount() const {
+  ProjectStickStateLock lock(projectStickStateMutex);
   return static_cast<uint32_t>(PROJECT_STICK_STORE.pendingEvents.size());
 }
-uint32_t ProjectStickService::pollIntervalSeconds() const { return PROJECT_STICK_STORE.pollIntervalSeconds; }
+uint32_t ProjectStickService::pollIntervalSeconds() const {
+  ProjectStickStateLock lock(projectStickStateMutex);
+  return PROJECT_STICK_STORE.pollIntervalSeconds;
+}
 uint32_t ProjectStickService::alertPollIntervalSeconds() const {
+  ProjectStickStateLock lock(projectStickStateMutex);
   return PROJECT_STICK_STORE.alertPollIntervalSeconds;
 }
-bool ProjectStickService::isTradingDay() const { return PROJECT_STICK_STORE.tradingDay; }
+bool ProjectStickService::isTradingDay() const {
+  ProjectStickStateLock lock(projectStickStateMutex);
+  return PROJECT_STICK_STORE.tradingDay;
+}

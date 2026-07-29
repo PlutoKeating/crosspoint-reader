@@ -14,12 +14,29 @@ struct SyncReport {
   bool manifestCompleted = false;
 };
 
-enum class ManualRefreshStep : uint8_t { LocalRefresh, QueueCloudSync };
+class BackgroundWorkGate {
+ public:
+  bool tryQueue() {
+    if (pending_ || running_) return false;
+    pending_ = true;
+    return true;
+  }
 
-struct ManualRefreshPlan {
-  ManualRefreshStep steps[2] = {ManualRefreshStep::LocalRefresh,
-                                ManualRefreshStep::QueueCloudSync};
-  uint8_t count = 1;
+  bool begin() {
+    if (!pending_ || running_) return false;
+    pending_ = false;
+    running_ = true;
+    return true;
+  }
+
+  void complete() { running_ = false; }
+  bool pending() const { return pending_; }
+  bool running() const { return running_; }
+  bool busy() const { return pending_ || running_; }
+
+ private:
+  bool pending_ = false;
+  bool running_ = false;
 };
 
 inline bool shouldRecordRegisterSuccess(const SyncReport& report) {
@@ -37,13 +54,6 @@ inline SyncResult contentSelectionFailureResult(uint32_t activeVersion) {
 inline bool registrationDue(uint32_t nowMs, uint32_t lastSuccessMs,
                             uint32_t intervalMs = 4UL * 60UL * 60UL * 1000UL) {
   return lastSuccessMs == 0 || nowMs - lastSuccessMs >= intervalMs;
-}
-
-inline ManualRefreshPlan manualRefreshPlan(bool online, bool cloudSyncPending,
-                                           bool cloudSyncInProgress) {
-  ManualRefreshPlan plan;
-  if (online && !cloudSyncPending && !cloudSyncInProgress) plan.count = 2;
-  return plan;
 }
 
 }  // namespace project_stick
