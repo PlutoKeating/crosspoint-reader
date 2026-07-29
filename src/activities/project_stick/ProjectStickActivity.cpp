@@ -277,13 +277,12 @@ void ProjectStickActivity::render(RenderLock&&) {
     const int scenarioHeight =
         scenarioName[0] == '\0'
             ? 0
-            : renderer.getTextLineHeight(UI_10_FONT_ID, scenarioName, EpdFontFamily::BOLD);
+            : renderer.getTextLineHeight(UI_10_FONT_ID, scenarioName);
     const int tagHeight =
         scenarioHeight > 0 ? scenarioHeight + SCENARIO_TAG_VERTICAL_PADDING * 2 : 0;
     const int tagWidth =
         scenarioHeight > 0
-            ? renderer.getTextWidth(UI_10_FONT_ID, scenarioName, EpdFontFamily::BOLD) +
-                  SCENARIO_TAG_HORIZONTAL_PADDING * 2
+            ? renderer.getTextWidth(UI_10_FONT_ID, scenarioName) + SCENARIO_TAG_HORIZONTAL_PADDING * 2
             : 0;
     const int tagX = (width - tagWidth) / 2;
     const int tagY = hintTop - SCENARIO_TAG_BOTTOM_GAP - tagHeight;
@@ -314,8 +313,7 @@ void ProjectStickActivity::render(RenderLock&&) {
       renderer.drawRoundedRect(tagX, tagY, tagWidth, tagHeight, 1, tagHeight / 2, true);
       const Rect tagBounds{tagX, tagY, tagWidth, tagHeight};
       UITheme::drawCenteredText(renderer, tagBounds, UI_10_FONT_ID,
-                                tagY + SCENARIO_TAG_VERTICAL_PADDING, scenarioName, true,
-                                EpdFontFamily::BOLD);
+                                tagY + SCENARIO_TAG_VERTICAL_PADDING, scenarioName, true);
     }
   } else {
     const bool showOfflineEmptyState = WiFi.status() != WL_CONNECTED && state == State::Offline;
