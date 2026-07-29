@@ -23,9 +23,9 @@ constexpr int SIDE_BUTTON_HEIGHT = 80;
 constexpr int SIDE_BUTTON_Y = 155;
 constexpr int SIDE_CONTENT_GAP = 8;
 constexpr int SCENARIO_TAG_HORIZONTAL_PADDING = 16;
-constexpr int SCENARIO_TAG_VERTICAL_PADDING = 5;
-constexpr int SCENARIO_TAG_BOTTOM_GAP = 36;
-constexpr int SCENARIO_TAG_CONTENT_GAP = 36;
+constexpr int SCENARIO_TAG_VERTICAL_PADDING = 4;
+constexpr int GOLDEN_RATIO_NUMERATOR = 1618;
+constexpr int GOLDEN_RATIO_DENOMINATOR = 1000;
 constexpr int NETWORK_TAG_BOTTOM_GAP = 12;
 constexpr int NETWORK_TAG_HORIZONTAL_PADDING = 8;
 constexpr int NETWORK_TAG_DOT_SIZE = 5;
@@ -277,32 +277,36 @@ void ProjectStickActivity::render(RenderLock&&) {
     const int scenarioHeight =
         scenarioName[0] == '\0'
             ? 0
-            : renderer.getTextLineHeight(UI_10_FONT_ID, scenarioName);
+            : renderer.getTextLineHeight(NOTOSANSSC_12_FONT_ID, scenarioName);
     const int tagHeight =
         scenarioHeight > 0 ? scenarioHeight + SCENARIO_TAG_VERTICAL_PADDING * 2 : 0;
     const int tagWidth =
         scenarioHeight > 0
-            ? renderer.getTextWidth(UI_10_FONT_ID, scenarioName) + SCENARIO_TAG_HORIZONTAL_PADDING * 2
+            ? renderer.getTextWidth(NOTOSANSSC_12_FONT_ID, scenarioName) +
+                  SCENARIO_TAG_HORIZONTAL_PADDING * 2
             : 0;
-    const int tagX = (width - tagWidth) / 2;
-    const int tagY = hintTop - SCENARIO_TAG_BOTTOM_GAP - tagHeight;
-    const int bodyBottom =
-        scenarioHeight > 0 ? tagY - SCENARIO_TAG_CONTENT_GAP : contentBounds.y + contentBounds.height;
-    const Rect bodyBounds{contentBounds.x, contentBounds.y, contentBounds.width,
-                          std::max(1, bodyBottom - contentBounds.y)};
+    const int bodyTagGap =
+        scenarioHeight > 0
+            ? std::max(metrics.verticalSpacing,
+                       tagHeight * GOLDEN_RATIO_DENOMINATOR / GOLDEN_RATIO_NUMERATOR)
+            : 0;
+    const int maxBodyHeight = std::max(1, contentBounds.height - tagHeight - bodyTagGap);
     const int bodyLineHeight =
         renderer.getTextLineHeight(NOTOSANSSC_13_FONT_ID, bodyText.c_str());
     const int bodyLineStep = bodyLineHeight + BODY_LINE_GAP;
     const int maxBodyLines =
-        std::max(1, (bodyBounds.height + BODY_LINE_GAP) / bodyLineStep);
+        std::max(1, (maxBodyHeight + BODY_LINE_GAP) / bodyLineStep);
     const auto lines =
-        renderer.wrappedCjkText(NOTOSANSSC_13_FONT_ID, bodyText.c_str(), bodyBounds.width, maxBodyLines);
+        renderer.wrappedCjkText(NOTOSANSSC_13_FONT_ID, bodyText.c_str(), contentBounds.width, maxBodyLines);
     const int bodyHeight =
         lines.empty() ? 0 : static_cast<int>(lines.size()) * bodyLineStep - BODY_LINE_GAP;
-    const int centeredBodyY = bodyBounds.y + (bodyBounds.height - bodyHeight) / 2;
-    const int minBodyY = bodyBounds.y;
-    const int maxBodyY = bodyBounds.y + bodyBounds.height - bodyHeight;
-    const int bodyY = std::clamp(centeredBodyY, minBodyY, std::max(minBodyY, maxBodyY));
+    const int groupHeight = bodyHeight + bodyTagGap + tagHeight;
+    const int freeHeight = std::max(0, contentBounds.height - groupHeight);
+    const int bodyY =
+        contentBounds.y +
+        freeHeight * (GOLDEN_RATIO_NUMERATOR - GOLDEN_RATIO_DENOMINATOR) /
+            GOLDEN_RATIO_NUMERATOR;
+    const Rect bodyBounds{contentBounds.x, bodyY, contentBounds.width, bodyHeight};
 
     int y = bodyY;
     for (const auto& line : lines) {
@@ -310,9 +314,11 @@ void ProjectStickActivity::render(RenderLock&&) {
       y += bodyLineStep;
     }
     if (scenarioHeight > 0) {
+      const int tagX = (width - tagWidth) / 2;
+      const int tagY = bodyY + bodyHeight + bodyTagGap;
       renderer.drawRoundedRect(tagX, tagY, tagWidth, tagHeight, 1, tagHeight / 2, true);
       const Rect tagBounds{tagX, tagY, tagWidth, tagHeight};
-      UITheme::drawCenteredText(renderer, tagBounds, UI_10_FONT_ID,
+      UITheme::drawCenteredText(renderer, tagBounds, NOTOSANSSC_12_FONT_ID,
                                 tagY + SCENARIO_TAG_VERTICAL_PADDING, scenarioName, true);
     }
   } else {
