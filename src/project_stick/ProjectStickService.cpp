@@ -183,26 +183,39 @@ bool ProjectStickService::ensureIdentity() {
   return true;
 }
 
-ProjectStickService::SyncResult ProjectStickService::sync(bool registerFirst) {
+ProjectStickService::SyncReport ProjectStickService::sync(bool registerFirst) {
+  SyncReport report;
   inactive = false;
   if (registerFirst) {
+    report.registerAttempted = true;
     int status = 0;
     if (!registerDevice(status)) {
       if (status == 403) {
         inactive = true;
-        return SyncResult::Inactive;
+        report.result = SyncResult::Inactive;
+        return report;
       }
-      return refreshScheduledContent() ? SyncResult::OfflineCache : SyncResult::Failed;
+      report.result = refreshScheduledContent() ? SyncResult::OfflineCache : SyncResult::Failed;
+      return report;
     }
+    report.registerSucceeded = true;
   }
 
   flushEvents();
-  const SyncResult result = syncManifest();
-  if (result == SyncResult::Updated ||
-      ((result == SyncResult::Unchanged || result == SyncResult::OfflineCache) && currentDisplay.copyId == 0)) {
-    if (!refreshScheduledContent()) return SyncResult::NoContent;
+  report.manifestAttempted = true;
+  report.result = syncManifest();
+  report.manifestCompleted =
+      report.result == SyncResult::Updated || report.result == SyncResult::Unchanged;
+  if (report.result == SyncResult::Updated ||
+      (report.result == SyncResult::Unchanged && currentDisplay.copyId == 0)) {
+    if (!refreshScheduledContent()) report.result = SyncResult::NoContent;
+  } else if (report.result == SyncResult::OfflineCache && currentDisplay.copyId == 0 &&
+             !refreshScheduledContent()) {
+    // A failed manifest request with no usable cache is a connection/storage
+    // failure, not evidence that the server has no published release.
+    report.result = SyncResult::Failed;
   }
-  return result;
+  return report;
 }
 
 bool ProjectStickService::registerDevice(int& status) {
@@ -591,14 +604,18 @@ void ProjectStickService::sendFeedback(bool useful) {
   flushEvents();
 }
 
-void ProjectStickService::sendManualRefresh() {
+void ProjectStickService::queueManualRefresh() {
   queueEvent("manual_refresh", currentDisplay.scenario, currentDisplay.copyId);
+}
+
+bool ProjectStickService::sendManualRefresh() {
+  queueManualRefresh();
+  flushEvents();
   if (currentDisplay.scenario.empty()) {
-    refreshScheduledContent("manual_refresh");
-  } else {
-    const std::string scenario = currentDisplay.scenario;
-    refreshScheduledContent(scenario.c_str());
+    return refreshScheduledContent("manual_refresh");
   }
+  const std::string scenario = currentDisplay.scenario;
+  return refreshScheduledContent(scenario.c_str());
 }
 
 void ProjectStickService::queueEvent(const char* type, const std::string& scenario, int64_t copyId) {

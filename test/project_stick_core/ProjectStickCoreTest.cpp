@@ -59,6 +59,12 @@ TEST(ProjectStickSyncState, ManifestFailureDoesNotSuppressTheNextRecovery) {
   EXPECT_EQ(manualRefreshMode(true, 3, failed), ManualRefreshMode::FullCloudSync);
 }
 
+TEST(ProjectStickSyncState, FailedRegistrationRemainsDueAtTheNextPoll) {
+  EXPECT_TRUE(registrationDue(5UL * 60UL * 1000UL, 0));
+  EXPECT_FALSE(registrationDue(5UL * 60UL * 1000UL, 60UL * 1000UL));
+  EXPECT_TRUE(registrationDue(4UL * 60UL * 60UL * 1000UL + 1, 1));
+}
+
 TEST(ProjectStickCore, ParsesProtocolTimesIntoShanghai) {
   ShanghaiTime time;
   ASSERT_TRUE(parseIso8601ToShanghai("2026-07-22T13:30:05+08:00", time));

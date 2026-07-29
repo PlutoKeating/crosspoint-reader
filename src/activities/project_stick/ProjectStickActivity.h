@@ -21,13 +21,16 @@ class ProjectStickActivity final : public Activity {
   State state = State::Connecting;
   bool workPending = false;
   uint32_t lastManifestPollMs = 0;
+  uint32_t lastManifestAttemptMs = 0;
   uint32_t lastAlertPollMs = 0;
   uint32_t lastScheduleCheckMs = 0;
   uint32_t lastRegisterMs = 0;
+  project_stick::SyncReport lastSyncReport;
   char statusLine[96] = {0};
 
   void runInitialSync();
-  void updateState(ProjectStickService::SyncResult result);
+  void updateState(const project_stick::SyncReport& report);
+  void recordSyncTiming(const project_stick::SyncReport& report);
   void launchWifiSelection();
   void setStatus(const char* text);
 };

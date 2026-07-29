@@ -1,6 +1,7 @@
 #pragma once
 
 #include <ProjectStickCore.h>
+#include <ProjectStickSyncState.h>
 #include <ProjectStickStream.h>
 
 #include <cstdint>
@@ -9,7 +10,8 @@
 
 class ProjectStickService {
  public:
-  enum class SyncResult { Updated, Unchanged, OfflineCache, NoContent, Failed, Inactive };
+  using SyncResult = project_stick::SyncResult;
+  using SyncReport = project_stick::SyncReport;
 
   struct Display {
     std::string scenario;
@@ -20,12 +22,13 @@ class ProjectStickService {
   };
 
   void begin();
-  SyncResult sync(bool registerFirst = true);
+  SyncReport sync(bool registerFirst = true);
   bool pollAlerts();
   bool refreshIfScheduleChanged();
   bool refreshScheduledContent(const char* forcedScenario = nullptr);
   void sendFeedback(bool useful);
-  void sendManualRefresh();
+  bool sendManualRefresh();
+  void queueManualRefresh();
 
   const Display& display() const { return currentDisplay; }
   uint32_t activeVersion() const;

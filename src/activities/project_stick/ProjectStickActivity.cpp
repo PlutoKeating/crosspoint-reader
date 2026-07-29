@@ -116,15 +116,23 @@ void ProjectStickActivity::onEnter() {
 
 void ProjectStickActivity::runInitialSync() {
   requestUpdateAndWait();
-  updateState(service.sync());
-  lastManifestPollMs = millis();
+  const auto report = service.sync();
+  recordSyncTiming(report);
+  updateState(report);
+  lastManifestAttemptMs = millis();
   lastAlertPollMs = millis();
   lastScheduleCheckMs = millis();
-  lastRegisterMs = millis();
 }
 
-void ProjectStickActivity::updateState(ProjectStickService::SyncResult result) {
-  switch (result) {
+void ProjectStickActivity::recordSyncTiming(const project_stick::SyncReport& report) {
+  const uint32_t nowMs = millis();
+  if (project_stick::shouldRecordRegisterSuccess(report)) lastRegisterMs = nowMs;
+  if (project_stick::shouldRecordManifestPoll(report)) lastManifestPollMs = nowMs;
+}
+
+void ProjectStickActivity::updateState(const project_stick::SyncReport& report) {
+  lastSyncReport = report;
+  switch (report.result) {
     case ProjectStickService::SyncResult::Updated:
       state = State::Online;
       setStatus(tr(STR_PROJECT_STICK_UPDATED));
@@ -194,14 +202,20 @@ void ProjectStickActivity::loop() {
   if (frontButton == HalGPIO::BTN_RIGHT) {
     setStatus(tr(STR_PROJECT_STICK_REFRESHING));
     requestUpdateAndWait();
-    service.sendManualRefresh();
-    if (WiFi.status() == WL_CONNECTED) {
-      state = service.display().copyId == 0 ? State::Empty : State::Online;
-      setStatus(service.display().copyId == 0 ? tr(STR_PROJECT_STICK_NO_CONTENT)
-                                             : tr(STR_PROJECT_STICK_ONLINE));
+    const bool online = WiFi.status() == WL_CONNECTED;
+    if (project_stick::manualRefreshMode(online, service.activeVersion(), lastSyncReport) ==
+        project_stick::ManualRefreshMode::FullCloudSync) {
+      service.queueManualRefresh();
+      const auto report = service.sync(true);
+      lastManifestAttemptMs = millis();
+      recordSyncTiming(report);
+      updateState(report);
+    } else if (service.sendManualRefresh()) {
+      state = online ? State::Online : State::Offline;
+      setStatus(online ? tr(STR_PROJECT_STICK_ONLINE) : tr(STR_PROJECT_STICK_OFFLINE));
     } else {
-      state = State::Offline;
-      setStatus(tr(STR_PROJECT_STICK_OFFLINE));
+      state = online ? State::Error : State::Offline;
+      setStatus(online ? tr(STR_PROJECT_STICK_FAILED) : tr(STR_PROJECT_STICK_OFFLINE));
     }
     requestUpdate();
     return;
@@ -209,13 +223,14 @@ void ProjectStickActivity::loop() {
 
   const uint32_t nowMs = millis();
   if (state != State::Inactive && WiFi.status() == WL_CONNECTED &&
-      nowMs - lastManifestPollMs >= service.pollIntervalSeconds() * 1000UL) {
-    lastManifestPollMs = nowMs;
+      nowMs - lastManifestAttemptMs >= service.pollIntervalSeconds() * 1000UL) {
+    lastManifestAttemptMs = nowMs;
     setStatus(tr(STR_PROJECT_STICK_SYNCING));
     requestUpdateAndWait();
-    const bool heartbeatDue = nowMs - lastRegisterMs >= 4UL * 60UL * 60UL * 1000UL;
-    updateState(service.sync(heartbeatDue));
-    if (heartbeatDue) lastRegisterMs = millis();
+    const bool heartbeatDue = project_stick::registrationDue(nowMs, lastRegisterMs);
+    const auto report = service.sync(heartbeatDue);
+    recordSyncTiming(report);
+    updateState(report);
     return;
   }
   if (nowMs - lastScheduleCheckMs >= 30000UL) {
