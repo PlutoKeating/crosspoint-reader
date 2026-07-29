@@ -16,13 +16,16 @@
 #include "ProjectStickCore.h"
 
 namespace {
-constexpr int BLOCK_GAP = 10;
 constexpr int BODY_LINE_GAP = 4;
 constexpr int SIDE_BUTTON_MARGIN = 4;
 constexpr int SIDE_BUTTON_WIDTH = 30;
 constexpr int SIDE_BUTTON_HEIGHT = 80;
 constexpr int SIDE_BUTTON_Y = 155;
 constexpr int SIDE_CONTENT_GAP = 8;
+constexpr int SCENARIO_TAG_HORIZONTAL_PADDING = 16;
+constexpr int SCENARIO_TAG_VERTICAL_PADDING = 5;
+constexpr int SCENARIO_TAG_BOTTOM_GAP = 36;
+constexpr int SCENARIO_TAG_CONTENT_GAP = 36;
 constexpr int NETWORK_TAG_BOTTOM_GAP = 12;
 constexpr int NETWORK_TAG_HORIZONTAL_PADDING = 8;
 constexpr int NETWORK_TAG_DOT_SIZE = 5;
@@ -275,29 +278,44 @@ void ProjectStickActivity::render(RenderLock&&) {
         scenarioName[0] == '\0'
             ? 0
             : renderer.getTextLineHeight(UI_10_FONT_ID, scenarioName, EpdFontFamily::BOLD);
-    const int scenarioReserve = scenarioHeight > 0 ? scenarioHeight + BLOCK_GAP : 0;
+    const int tagHeight =
+        scenarioHeight > 0 ? scenarioHeight + SCENARIO_TAG_VERTICAL_PADDING * 2 : 0;
+    const int tagWidth =
+        scenarioHeight > 0
+            ? renderer.getTextWidth(UI_10_FONT_ID, scenarioName, EpdFontFamily::BOLD) +
+                  SCENARIO_TAG_HORIZONTAL_PADDING * 2
+            : 0;
+    const int tagX = (width - tagWidth) / 2;
+    const int tagY = hintTop - SCENARIO_TAG_BOTTOM_GAP - tagHeight;
+    const int bodyBottom =
+        scenarioHeight > 0 ? tagY - SCENARIO_TAG_CONTENT_GAP : contentBounds.y + contentBounds.height;
+    const Rect bodyBounds{contentBounds.x, contentBounds.y, contentBounds.width,
+                          std::max(1, bodyBottom - contentBounds.y)};
     const int bodyLineHeight =
         renderer.getTextLineHeight(NOTOSANSSC_13_FONT_ID, bodyText.c_str());
     const int bodyLineStep = bodyLineHeight + BODY_LINE_GAP;
     const int maxBodyLines =
-        std::max(1, (contentBounds.height - scenarioReserve + BODY_LINE_GAP) / bodyLineStep);
+        std::max(1, (bodyBounds.height + BODY_LINE_GAP) / bodyLineStep);
     const auto lines =
-        renderer.wrappedCjkText(NOTOSANSSC_13_FONT_ID, bodyText.c_str(), contentBounds.width, maxBodyLines);
+        renderer.wrappedCjkText(NOTOSANSSC_13_FONT_ID, bodyText.c_str(), bodyBounds.width, maxBodyLines);
     const int bodyHeight =
         lines.empty() ? 0 : static_cast<int>(lines.size()) * bodyLineStep - BODY_LINE_GAP;
-    const int centeredBodyY = contentBounds.y + (contentBounds.height - bodyHeight) / 2;
-    const int minBodyY = contentBounds.y + scenarioReserve;
-    const int maxBodyY = contentBounds.y + contentBounds.height - bodyHeight;
+    const int centeredBodyY = bodyBounds.y + (bodyBounds.height - bodyHeight) / 2;
+    const int minBodyY = bodyBounds.y;
+    const int maxBodyY = bodyBounds.y + bodyBounds.height - bodyHeight;
     const int bodyY = std::clamp(centeredBodyY, minBodyY, std::max(minBodyY, maxBodyY));
 
-    if (scenarioName[0] != '\0') {
-      UITheme::drawCenteredText(renderer, contentBounds, UI_10_FONT_ID, bodyY - scenarioReserve,
-                                scenarioName, true, EpdFontFamily::BOLD);
-    }
     int y = bodyY;
     for (const auto& line : lines) {
-      UITheme::drawCenteredText(renderer, contentBounds, NOTOSANSSC_13_FONT_ID, y, line.c_str(), true);
+      UITheme::drawCenteredText(renderer, bodyBounds, NOTOSANSSC_13_FONT_ID, y, line.c_str(), true);
       y += bodyLineStep;
+    }
+    if (scenarioHeight > 0) {
+      renderer.drawRoundedRect(tagX, tagY, tagWidth, tagHeight, 1, tagHeight / 2, true);
+      const Rect tagBounds{tagX, tagY, tagWidth, tagHeight};
+      UITheme::drawCenteredText(renderer, tagBounds, UI_10_FONT_ID,
+                                tagY + SCENARIO_TAG_VERTICAL_PADDING, scenarioName, true,
+                                EpdFontFamily::BOLD);
     }
   } else {
     const bool showOfflineEmptyState = WiFi.status() != WL_CONNECTED && state == State::Offline;
