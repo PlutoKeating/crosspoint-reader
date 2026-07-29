@@ -18,6 +18,9 @@
 #include <builtinFonts/all.h>
 
 #include <cstring>
+#ifdef SIMULATOR
+#include <cstdlib>
+#endif
 
 #include "CrossPointSettings.h"
 #include "CrossPointState.h"
@@ -422,7 +425,15 @@ void setup() {
     // Skip normal home/reader routing: jump straight into the SD firmware picker.
     activityManager.replaceActivity(
         std::make_unique<SdFirmwareUpdateActivity>(renderer, mappedInputManager, /*recoveryMode=*/true));
-  } else if (HalSystem::isRebootFromPanic()) {
+  }
+#ifdef SIMULATOR
+  else if (const char* startActivity = std::getenv("CROSSPOINT_SIM_START_ACTIVITY");
+           startActivity && strcmp(startActivity, "project_stick") == 0) {
+    WiFi.begin("Simulator WiFi (fake)");
+    activityManager.goToProjectStick();
+  }
+#endif
+  else if (HalSystem::isRebootFromPanic()) {
     // If we rebooted from a panic, go to crash report screen to show the panic info
     activityManager.goToCrashReport();
   } else if (resume == BootResume::Silent && snapshotTarget == SILENT_REBOOT_TARGET_READER &&
