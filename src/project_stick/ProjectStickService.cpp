@@ -219,6 +219,7 @@ ProjectStickService::SyncReport ProjectStickService::sync(bool registerFirst) {
 }
 
 bool ProjectStickService::registerDevice(int& status) {
+  LOG_INF("STICK", "Registering device (firmware=%s)", CROSSPOINT_VERSION);
   JsonDocument request;
   request["device_id"] = PROJECT_STICK_STORE.deviceId;
   request["firmware_version"] = CROSSPOINT_VERSION;
@@ -226,9 +227,15 @@ bool ProjectStickService::registerDevice(int& status) {
   serializeJson(request, body);
 
   std::string response;
-  if (!requestPost("/api/v1/device/register", body, response, status) || status != 200) return false;
+  if (!requestPost("/api/v1/device/register", body, response, status) || status != 200) {
+    LOG_ERR("STICK", "Device registration failed (status=%d)", status);
+    return false;
+  }
   JsonDocument doc;
-  if (deserializeJson(doc, response)) return false;
+  if (deserializeJson(doc, response)) {
+    LOG_ERR("STICK", "Device registration returned invalid JSON");
+    return false;
+  }
 
   PROJECT_STICK_STORE.pollIntervalSeconds =
       std::clamp<uint32_t>(doc["poll_interval_seconds"] | 300, 30, 86400);
@@ -236,7 +243,15 @@ bool ProjectStickService::registerDevice(int& status) {
       std::clamp<uint32_t>(doc["alert_poll_interval_seconds"] | 30, 10, 3600);
   PROJECT_STICK_STORE.tradingDay = doc["is_trading_day"] | false;
   parseServerTime(doc["server_time"] | "");
-  return PROJECT_STICK_STORE.saveToFile();
+  if (!PROJECT_STICK_STORE.saveToFile()) {
+    LOG_ERR("STICK", "Device registration state could not be saved to SD");
+    return false;
+  }
+  LOG_INF("STICK", "Device registered (release=%u poll=%us alerts=%us)",
+          (unsigned)(doc["current_release_version"] | 0),
+          (unsigned)PROJECT_STICK_STORE.pollIntervalSeconds,
+          (unsigned)PROJECT_STICK_STORE.alertPollIntervalSeconds);
+  return true;
 }
 
 ProjectStickService::SyncResult ProjectStickService::syncManifest() {
@@ -246,7 +261,11 @@ ProjectStickService::SyncResult ProjectStickService::syncManifest() {
       (!Storage.mkdir(SNAPSHOT_ROOT, true) && !Storage.exists(SNAPSHOT_ROOT))) {
     return SyncResult::Failed;
   }
-  if (!fetchToFile(baseUrl + path, MANIFEST_TEMP, MAX_MANIFEST_BYTES)) return SyncResult::OfflineCache;
+  LOG_INF("STICK", "Fetching manifest (current=%u)", (unsigned)PROJECT_STICK_STORE.activeVersion);
+  if (!fetchToFile(baseUrl + path, MANIFEST_TEMP, MAX_MANIFEST_BYTES)) {
+    LOG_ERR("STICK", "Manifest request failed");
+    return SyncResult::OfflineCache;
+  }
 
   Storage.remove(SNAPSHOT_TEMP);
   HalFile manifest;
@@ -286,6 +305,7 @@ ProjectStickService::SyncResult ProjectStickService::syncManifest() {
   Storage.remove(MANIFEST_TEMP);
   if (!decoder->finish() ||
       (!decoder->unchanged() && (!writer.hasSchedule || !writer.hasConfig || !writer.hasContent))) {
+    LOG_ERR("STICK", "Manifest is invalid or incomplete");
     Storage.remove(SNAPSHOT_TEMP);
     return SyncResult::Failed;
   }
@@ -300,6 +320,7 @@ ProjectStickService::SyncResult ProjectStickService::syncManifest() {
   }
   const uint32_t version = decoder->version();
   if (decoder->unchanged()) {
+    LOG_INF("STICK", "Manifest unchanged (version=%u)", (unsigned)version);
     Storage.remove(SNAPSHOT_TEMP);
     PROJECT_STICK_STORE.saveToFile();
     return SyncResult::Unchanged;
@@ -322,11 +343,19 @@ ProjectStickService::SyncResult ProjectStickService::syncManifest() {
     return SyncResult::Failed;
   }
 
-  if (!materializeRelease(version) || !activateSnapshot(version)) return SyncResult::Failed;
+  if (!materializeRelease(version)) {
+    LOG_ERR("STICK", "Release %u download/validation failed", (unsigned)version);
+    return SyncResult::Failed;
+  }
+  if (!activateSnapshot(version)) {
+    LOG_ERR("STICK", "Release %u activation failed", (unsigned)version);
+    return SyncResult::Failed;
+  }
   scheduleCache.clear();
   cleanupReleaseStorage();
   queueEvent("sync_completed", "", 0);
   flushEvents();
+  LOG_INF("STICK", "Release %u synchronized and activated", (unsigned)version);
   return SyncResult::Updated;
 }
 
@@ -398,6 +427,7 @@ bool ProjectStickService::downloadObject(uint32_t version, const project_stick::
   const std::string temporary = destination + ".tmp";
   const std::string url = baseUrl + "/api/v1/device/releases/" + std::to_string(version) + "/" + file.path +
                           "?device_id=" + PROJECT_STICK_STORE.deviceId;
+  LOG_INF("STICK", "Downloading %s (%u bytes)", file.path.c_str(), (unsigned)file.size);
   for (uint8_t attempt = 0; attempt < 3; ++attempt) {
     Storage.remove(temporary.c_str());
     HalFile output;
@@ -424,7 +454,10 @@ bool ProjectStickService::downloadObject(uint32_t version, const project_stick::
     hex[64] = '\0';
     if (fetched && received == file.size && equalsIgnoreCase(hex, file.sha256)) {
       Storage.remove(destination.c_str());
-      if (Storage.rename(temporary.c_str(), destination.c_str())) return true;
+      if (Storage.rename(temporary.c_str(), destination.c_str())) {
+        LOG_INF("STICK", "Stored %s", file.path.c_str());
+        return true;
+      }
     }
     Storage.remove(temporary.c_str());
     if (attempt < 2) delay(250UL << attempt);
@@ -653,7 +686,16 @@ bool ProjectStickService::flushEvents() {
 
 bool ProjectStickService::requestPost(const std::string& path, const std::string& body, std::string& response,
                                       int& status) {
+  status = 0;
   for (uint8_t attempt = 0; attempt < 3; ++attempt) {
+#ifndef SIMULATOR
+    LOG_INF("STICK", "POST %s attempt %u/3 (heap=%u max=%u)", path.c_str(),
+            (unsigned)attempt + 1, (unsigned)ESP.getFreeHeap(),
+            (unsigned)ESP.getMaxAllocHeap());
+#else
+    LOG_INF("STICK", "POST %s attempt %u/3 (simulator OpenSSL)", path.c_str(),
+            (unsigned)attempt + 1);
+#endif
     freeink::SecureHttpClient http;
     http.setTimeout(HTTP_TIMEOUT_MS);
     http.setInsecure();
@@ -661,7 +703,10 @@ bool ProjectStickService::requestPost(const std::string& path, const std::string
     http.setUserAgent("Project.Stick-CrossPoint-" CROSSPOINT_VERSION);
     http.setFollowRedirects(3);
 #endif
-    if (!http.begin(baseUrl + path)) return false;
+    if (!http.begin(baseUrl + path)) {
+      LOG_ERR("STICK", "POST %s has an invalid URL", path.c_str());
+      return false;
+    }
     http.addHeader("Content-Type", "application/json");
     status = http.sendRequest("POST", body);
     response = http.getString();
@@ -671,7 +716,13 @@ bool ProjectStickService::requestPost(const std::string& path, const std::string
     const bool complete = http.responseComplete();
 #endif
     http.end();
-    if (status > 0 && complete && status < 500) return true;
+    if (status > 0 && complete && status < 500) {
+      LOG_INF("STICK", "POST %s completed (status=%d bytes=%u)", path.c_str(),
+              status, (unsigned)response.size());
+      return true;
+    }
+    LOG_ERR("STICK", "POST %s failed (status=%d complete=%u bytes=%u)",
+            path.c_str(), status, complete ? 1u : 0u, (unsigned)response.size());
     if (attempt < 2) delay(250UL << attempt);
   }
   return false;
