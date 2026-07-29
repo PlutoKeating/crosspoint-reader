@@ -34,7 +34,10 @@ constexpr size_t MAX_ALERT_BYTES = 32 * 1024;
 constexpr size_t MAX_SCHEDULE_BYTES = 32 * 1024;
 constexpr size_t MAX_CONTENT_BYTES = 96 * 1024;
 constexpr size_t IO_CHUNK = 1024;
-constexpr uint32_t HTTP_TIMEOUT_MS = 5000;
+// Vercel cold starts can take longer than five seconds before response headers.
+// Keep POSTs below the user's 60-second UI patience budget while leaving enough
+// room for the real X3 wolfSSL handshake and a cold API invocation.
+constexpr uint32_t HTTP_TIMEOUT_MS = 20000;
 constexpr char DATA_ROOT[] = "/.crosspoint/project_stick";
 constexpr char OBJECT_ROOT[] = "/.crosspoint/project_stick/objects";
 constexpr char SNAPSHOT_ROOT[] = "/.crosspoint/project_stick/snapshots";
