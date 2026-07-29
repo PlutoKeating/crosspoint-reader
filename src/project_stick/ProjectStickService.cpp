@@ -7,7 +7,6 @@
 #include <Logging.h>
 #include <Memory.h>
 #include <SecureHttpClient.h>
-#include <WiFi.h>
 #include <esp_system.h>
 #include <mbedtls/sha256.h>
 
@@ -222,6 +221,7 @@ ProjectStickService::SyncReport ProjectStickService::sync(bool registerFirst) {
     // failure, not evidence that the server has no published release.
     report.result = SyncResult::Failed;
   }
+  if (report.manifestCompleted && currentDisplay.copyId != 0) flushEvents();
   return report;
 }
 
@@ -594,7 +594,6 @@ bool ProjectStickService::refreshScheduledContent(const char* forcedScenario) {
   PROJECT_STICK_STORE.saveToFile();
   queueEvent("trigger_fired", scenario, selected.id);
   queueEvent("screen_view", scenario, selected.id);
-  flushEvents();
   return true;
 }
 
@@ -630,6 +629,7 @@ bool ProjectStickService::pollAlerts() {
       if (refreshScheduledContent(alert["scenario"] | "volatility_alert")) {
         PROJECT_STICK_STORE.markAlertSeen(id);
         PROJECT_STICK_STORE.saveToFile();
+        flushEvents();
         return true;
       }
     }
@@ -638,24 +638,28 @@ bool ProjectStickService::pollAlerts() {
   return false;
 }
 
-void ProjectStickService::sendFeedback(bool useful) {
+void ProjectStickService::sendFeedback(bool useful, bool canSend) {
   if (currentDisplay.copyId == 0) return;
   queueEvent(useful ? "feedback_useful" : "feedback_meh", currentDisplay.scenario, currentDisplay.copyId);
-  flushEvents();
+  if (canSend) flushEvents();
 }
 
 void ProjectStickService::queueManualRefresh() {
   queueEvent("manual_refresh", currentDisplay.scenario, currentDisplay.copyId);
 }
 
-bool ProjectStickService::sendManualRefresh() {
+bool ProjectStickService::sendManualRefresh(bool canSend) {
   queueManualRefresh();
-  flushEvents();
+  if (canSend) flushEvents();
+  bool selected = false;
   if (currentDisplay.scenario.empty()) {
-    return refreshScheduledContent("manual_refresh");
+    selected = refreshScheduledContent("manual_refresh");
+  } else {
+    const std::string scenario = currentDisplay.scenario;
+    selected = refreshScheduledContent(scenario.c_str());
   }
-  const std::string scenario = currentDisplay.scenario;
-  return refreshScheduledContent(scenario.c_str());
+  if (canSend) flushEvents();
+  return selected;
 }
 
 void ProjectStickService::queueEvent(const char* type, const std::string& scenario, int64_t copyId) {
@@ -671,7 +675,6 @@ void ProjectStickService::queueEvent(const char* type, const std::string& scenar
 
 bool ProjectStickService::flushEvents() {
   if (PROJECT_STICK_STORE.pendingEvents.empty()) return true;
-  if (WiFi.status() != WL_CONNECTED) return false;
   JsonDocument request;
   request["device_id"] = PROJECT_STICK_STORE.deviceId;
   JsonArray events = request["events"].to<JsonArray>();

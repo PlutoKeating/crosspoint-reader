@@ -26,8 +26,8 @@ class ProjectStickService {
   bool pollAlerts();
   bool refreshIfScheduleChanged();
   bool refreshScheduledContent(const char* forcedScenario = nullptr);
-  void sendFeedback(bool useful);
-  bool sendManualRefresh();
+  void sendFeedback(bool useful, bool canSend);
+  bool sendManualRefresh(bool canSend);
   void queueManualRefresh();
 
   const Display& display() const { return currentDisplay; }

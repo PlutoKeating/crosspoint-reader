@@ -172,7 +172,7 @@ void ProjectStickActivity::loop() {
   // and BTN_DOWN is on the right edge.
   if (mappedInput.wasReleased(MappedInputManager::Button::Up)) {
     if (service.display().copyId != 0) {
-      service.sendFeedback(false);
+      service.sendFeedback(false, WiFi.status() == WL_CONNECTED);
       setStatus(tr(STR_PROJECT_STICK_MEH_SENT));
       requestUpdate();
     }
@@ -181,7 +181,7 @@ void ProjectStickActivity::loop() {
 
   if (mappedInput.wasReleased(MappedInputManager::Button::Down)) {
     if (service.display().copyId != 0) {
-      service.sendFeedback(true);
+      service.sendFeedback(true, WiFi.status() == WL_CONNECTED);
       setStatus(tr(STR_PROJECT_STICK_USEFUL_SENT));
       requestUpdate();
     }
@@ -210,7 +210,7 @@ void ProjectStickActivity::loop() {
       lastManifestAttemptMs = millis();
       recordSyncTiming(report);
       updateState(report);
-    } else if (service.sendManualRefresh()) {
+    } else if (service.sendManualRefresh(online)) {
       state = online ? State::Online : State::Offline;
       setStatus(online ? tr(STR_PROJECT_STICK_ONLINE) : tr(STR_PROJECT_STICK_OFFLINE));
     } else {
