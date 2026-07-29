@@ -6,14 +6,13 @@
 
 using namespace project_stick;
 
-TEST(ProjectStickSyncState, FailedFirstSyncRequiresFullCloudRecovery) {
+TEST(ProjectStickSyncState, FailedFirstSyncDoesNotRecordCompletedStages) {
   const SyncReport failed{
       .result = SyncResult::Failed,
       .registerAttempted = true,
       .registerSucceeded = false,
   };
 
-  EXPECT_EQ(manualRefreshMode(true, 0, failed), ManualRefreshMode::FullCloudSync);
   EXPECT_FALSE(shouldRecordRegisterSuccess(failed));
   EXPECT_FALSE(shouldRecordManifestPoll(failed));
 }
@@ -29,20 +28,27 @@ TEST(ProjectStickSyncState, SuccessfulSyncRecordsOnlyCompletedProtocolStages) {
 
   EXPECT_TRUE(shouldRecordRegisterSuccess(updated));
   EXPECT_TRUE(shouldRecordManifestPoll(updated));
-  EXPECT_EQ(manualRefreshMode(true, 7, updated), ManualRefreshMode::LocalReselect);
 }
 
-TEST(ProjectStickSyncState, OnlineDeviceWithoutActiveReleaseRetriesCloud) {
-  const SyncReport noContent{
-      .result = SyncResult::NoContent,
-      .registerAttempted = true,
-      .registerSucceeded = true,
-      .manifestAttempted = true,
-      .manifestCompleted = true,
-  };
+TEST(ProjectStickSyncState, ManualRefreshRunsLocalFirstThenQueuesCloudWhenIdle) {
+  const auto plan = manualRefreshPlan(true, false, false);
+  ASSERT_EQ(plan.count, 2);
+  EXPECT_EQ(plan.steps[0], ManualRefreshStep::LocalRefresh);
+  EXPECT_EQ(plan.steps[1], ManualRefreshStep::QueueCloudSync);
+}
 
-  EXPECT_EQ(manualRefreshMode(true, 0, noContent), ManualRefreshMode::FullCloudSync);
-  EXPECT_EQ(manualRefreshMode(false, 0, noContent), ManualRefreshMode::LocalReselect);
+TEST(ProjectStickSyncState, ManualRefreshDoesNotQueueDuplicateCloudSync) {
+  const auto pending = manualRefreshPlan(true, true, false);
+  ASSERT_EQ(pending.count, 1);
+  EXPECT_EQ(pending.steps[0], ManualRefreshStep::LocalRefresh);
+
+  const auto inProgress = manualRefreshPlan(true, false, true);
+  ASSERT_EQ(inProgress.count, 1);
+  EXPECT_EQ(inProgress.steps[0], ManualRefreshStep::LocalRefresh);
+
+  const auto offline = manualRefreshPlan(false, false, false);
+  ASSERT_EQ(offline.count, 1);
+  EXPECT_EQ(offline.steps[0], ManualRefreshStep::LocalRefresh);
 }
 
 TEST(ProjectStickSyncState, ManifestFailureDoesNotSuppressTheNextRecovery) {
@@ -56,7 +62,6 @@ TEST(ProjectStickSyncState, ManifestFailureDoesNotSuppressTheNextRecovery) {
 
   EXPECT_TRUE(shouldRecordRegisterSuccess(failed));
   EXPECT_FALSE(shouldRecordManifestPoll(failed));
-  EXPECT_EQ(manualRefreshMode(true, 3, failed), ManualRefreshMode::FullCloudSync);
 }
 
 TEST(ProjectStickSyncState, FailedRegistrationRemainsDueAtTheNextPoll) {

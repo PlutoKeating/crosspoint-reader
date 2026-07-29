@@ -14,7 +14,13 @@ struct SyncReport {
   bool manifestCompleted = false;
 };
 
-enum class ManualRefreshMode { LocalReselect, FullCloudSync };
+enum class ManualRefreshStep : uint8_t { LocalRefresh, QueueCloudSync };
+
+struct ManualRefreshPlan {
+  ManualRefreshStep steps[2] = {ManualRefreshStep::LocalRefresh,
+                                ManualRefreshStep::QueueCloudSync};
+  uint8_t count = 1;
+};
 
 inline bool shouldRecordRegisterSuccess(const SyncReport& report) {
   return report.registerAttempted && report.registerSucceeded;
@@ -33,14 +39,11 @@ inline bool registrationDue(uint32_t nowMs, uint32_t lastSuccessMs,
   return lastSuccessMs == 0 || nowMs - lastSuccessMs >= intervalMs;
 }
 
-inline ManualRefreshMode manualRefreshMode(bool online, uint32_t activeVersion,
-                                           const SyncReport& lastReport) {
-  if (!online) return ManualRefreshMode::LocalReselect;
-  if (activeVersion == 0 || lastReport.result == SyncResult::Failed ||
-      lastReport.result == SyncResult::NoContent) {
-    return ManualRefreshMode::FullCloudSync;
-  }
-  return ManualRefreshMode::LocalReselect;
+inline ManualRefreshPlan manualRefreshPlan(bool online, bool cloudSyncPending,
+                                           bool cloudSyncInProgress) {
+  ManualRefreshPlan plan;
+  if (online && !cloudSyncPending && !cloudSyncInProgress) plan.count = 2;
+  return plan;
 }
 
 }  // namespace project_stick

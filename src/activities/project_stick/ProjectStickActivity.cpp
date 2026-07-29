@@ -134,24 +134,43 @@ void ProjectStickActivity::runInitialSync() {
 }
 
 void ProjectStickActivity::runManualRefresh() {
-  setStatus(tr(STR_PROJECT_STICK_REFRESHING));
-  requestUpdateAndWait();
   const bool online = WiFi.status() == WL_CONNECTED;
-  if (project_stick::manualRefreshMode(online, service.activeVersion(), lastSyncReport) ==
-      project_stick::ManualRefreshMode::FullCloudSync) {
-    service.queueManualRefresh();
-    const auto report = service.sync(true);
-    lastManifestAttemptMs = millis();
-    recordSyncTiming(report);
-    updateState(report);
-  } else if (service.sendManualRefresh(online)) {
-    state = online ? State::Online : State::Offline;
-    setStatus(online ? tr(STR_PROJECT_STICK_ONLINE) : tr(STR_PROJECT_STICK_OFFLINE));
-  } else {
-    state = online ? State::Error : State::Offline;
-    setStatus(online ? tr(STR_PROJECT_STICK_FAILED) : tr(STR_PROJECT_STICK_OFFLINE));
+  const auto plan = project_stick::manualRefreshPlan(
+      online, workPending || manualCloudSyncPending, cloudSyncInProgress);
+
+  for (uint8_t i = 0; i < plan.count; ++i) {
+    if (plan.steps[i] == project_stick::ManualRefreshStep::LocalRefresh) {
+      const bool selected = service.sendManualRefresh(false);
+      if (selected) {
+        state = online ? State::Online : State::Offline;
+        setStatus(online ? tr(STR_PROJECT_STICK_ONLINE) : tr(STR_PROJECT_STICK_OFFLINE));
+      } else if (online) {
+        state = State::Connecting;
+        setStatus(tr(STR_PROJECT_STICK_REFRESHING));
+      } else {
+        state = State::Offline;
+        setStatus(tr(STR_PROJECT_STICK_OFFLINE));
+      }
+      // Present the SD-backed selection before a later loop iteration starts
+      // any blocking HTTPS work.
+      requestUpdateAndWait();
+    } else {
+      manualCloudSyncPending = true;
+    }
   }
-  requestUpdate();
+}
+
+void ProjectStickActivity::runPendingManualCloudSync() {
+  if (!manualCloudSyncPending || cloudSyncInProgress) return;
+  manualCloudSyncPending = false;
+  if (WiFi.status() != WL_CONNECTED) return;
+
+  cloudSyncInProgress = true;
+  const auto report = service.sync(true);
+  cloudSyncInProgress = false;
+  lastManifestAttemptMs = millis();
+  recordSyncTiming(report);
+  updateState(report);
 }
 
 void ProjectStickActivity::recordSyncTiming(const project_stick::SyncReport& report) {
@@ -194,7 +213,13 @@ void ProjectStickActivity::updateState(const project_stick::SyncReport& report) 
 void ProjectStickActivity::loop() {
   if (workPending) {
     workPending = false;
+    cloudSyncInProgress = true;
     runInitialSync();
+    cloudSyncInProgress = false;
+    return;
+  }
+  if (manualCloudSyncPending) {
+    runPendingManualCloudSync();
     return;
   }
 #ifdef SIMULATOR
@@ -259,7 +284,9 @@ void ProjectStickActivity::loop() {
     setStatus(tr(STR_PROJECT_STICK_SYNCING));
     requestUpdateAndWait();
     const bool heartbeatDue = project_stick::registrationDue(nowMs, lastRegisterMs);
+    cloudSyncInProgress = true;
     const auto report = service.sync(heartbeatDue);
+    cloudSyncInProgress = false;
     recordSyncTiming(report);
     updateState(report);
     return;
