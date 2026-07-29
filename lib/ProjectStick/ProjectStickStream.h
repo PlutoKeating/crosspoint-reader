@@ -27,7 +27,6 @@ class ReleaseManifestDecoder {
 
   void feed(const char* data, size_t length);
   bool finish() const;
-  bool finishAllowEmpty() const;
 
   uint32_t version() const { return releaseVersion; }
   bool unchanged() const { return releaseUnchanged; }
@@ -121,6 +120,7 @@ class ContentStreamDecoder {
 
   void feed(const char* data, size_t length);
   bool finish() const;
+  bool finishAllowEmpty() const;
 
   uint32_t totalWeight() const { return allWeight; }
   uint32_t unusedWeight() const { return availableWeight; }
