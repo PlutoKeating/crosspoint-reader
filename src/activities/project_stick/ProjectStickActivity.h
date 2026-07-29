@@ -27,8 +27,12 @@ class ProjectStickActivity final : public Activity {
   uint32_t lastRegisterMs = 0;
   project_stick::SyncReport lastSyncReport;
   char statusLine[96] = {0};
+#ifdef SIMULATOR
+  bool simulatorRecoveryPending = false;
+#endif
 
   void runInitialSync();
+  void runManualRefresh();
   void updateState(const project_stick::SyncReport& report);
   void recordSyncTiming(const project_stick::SyncReport& report);
   void launchWifiSelection();

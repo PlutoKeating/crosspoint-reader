@@ -119,9 +119,35 @@ void ProjectStickActivity::runInitialSync() {
   const auto report = service.sync();
   recordSyncTiming(report);
   updateState(report);
+#ifdef SIMULATOR
+  simulatorRecoveryPending =
+      report.result == ProjectStickService::SyncResult::Failed &&
+      std::getenv("CROSSPOINT_SIM_RECOVER_AFTER_FIRST_FAILURE") != nullptr;
+#endif
   lastManifestAttemptMs = millis();
   lastAlertPollMs = millis();
   lastScheduleCheckMs = millis();
+}
+
+void ProjectStickActivity::runManualRefresh() {
+  setStatus(tr(STR_PROJECT_STICK_REFRESHING));
+  requestUpdateAndWait();
+  const bool online = WiFi.status() == WL_CONNECTED;
+  if (project_stick::manualRefreshMode(online, service.activeVersion(), lastSyncReport) ==
+      project_stick::ManualRefreshMode::FullCloudSync) {
+    service.queueManualRefresh();
+    const auto report = service.sync(true);
+    lastManifestAttemptMs = millis();
+    recordSyncTiming(report);
+    updateState(report);
+  } else if (service.sendManualRefresh(online)) {
+    state = online ? State::Online : State::Offline;
+    setStatus(online ? tr(STR_PROJECT_STICK_ONLINE) : tr(STR_PROJECT_STICK_OFFLINE));
+  } else {
+    state = online ? State::Error : State::Offline;
+    setStatus(online ? tr(STR_PROJECT_STICK_FAILED) : tr(STR_PROJECT_STICK_OFFLINE));
+  }
+  requestUpdate();
 }
 
 void ProjectStickActivity::recordSyncTiming(const project_stick::SyncReport& report) {
@@ -167,6 +193,14 @@ void ProjectStickActivity::loop() {
     runInitialSync();
     return;
   }
+#ifdef SIMULATOR
+  if (simulatorRecoveryPending) {
+    simulatorRecoveryPending = false;
+    LOG_INF("STICK", "Simulator invoking the Project.Stick Refresh recovery path");
+    runManualRefresh();
+    return;
+  }
+#endif
 
   // X3 side buttons are fixed physical controls: BTN_UP is on the left edge
   // and BTN_DOWN is on the right edge.
@@ -200,24 +234,7 @@ void ProjectStickActivity::loop() {
     return;
   }
   if (frontButton == HalGPIO::BTN_RIGHT) {
-    setStatus(tr(STR_PROJECT_STICK_REFRESHING));
-    requestUpdateAndWait();
-    const bool online = WiFi.status() == WL_CONNECTED;
-    if (project_stick::manualRefreshMode(online, service.activeVersion(), lastSyncReport) ==
-        project_stick::ManualRefreshMode::FullCloudSync) {
-      service.queueManualRefresh();
-      const auto report = service.sync(true);
-      lastManifestAttemptMs = millis();
-      recordSyncTiming(report);
-      updateState(report);
-    } else if (service.sendManualRefresh(online)) {
-      state = online ? State::Online : State::Offline;
-      setStatus(online ? tr(STR_PROJECT_STICK_ONLINE) : tr(STR_PROJECT_STICK_OFFLINE));
-    } else {
-      state = online ? State::Error : State::Offline;
-      setStatus(online ? tr(STR_PROJECT_STICK_FAILED) : tr(STR_PROJECT_STICK_OFFLINE));
-    }
-    requestUpdate();
+    runManualRefresh();
     return;
   }
 

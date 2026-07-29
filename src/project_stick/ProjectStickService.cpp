@@ -698,6 +698,15 @@ bool ProjectStickService::flushEvents() {
 bool ProjectStickService::requestPost(const std::string& path, const std::string& body, std::string& response,
                                       int& status) {
   status = 0;
+#ifdef SIMULATOR
+  static bool injectedRegisterFailure = false;
+  if (!injectedRegisterFailure && path == "/api/v1/device/register" &&
+      std::getenv("CROSSPOINT_SIM_FAIL_FIRST_REGISTER") != nullptr) {
+    injectedRegisterFailure = true;
+    LOG_ERR("STICK", "Simulator injected the first register failure");
+    return false;
+  }
+#endif
   for (uint8_t attempt = 0; attempt < 3; ++attempt) {
 #ifndef SIMULATOR
     LOG_INF("STICK", "POST %s attempt %u/3 (heap=%u max=%u)", path.c_str(),
