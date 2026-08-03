@@ -33,7 +33,7 @@ working clock whenever the API returns `server_time`.
 The production service defaults to:
 
 ```text
-https://stickstock.williamhvollita.dpdns.org
+https://stockstick.arr2018.dpdns.org
 ```
 
 Override it at build time without editing source:
@@ -45,6 +45,23 @@ build_flags =
 ```
 
 The HTTP API path prefix (`/api/v1/device`) is appended by the service.
+
+## X3 controls
+
+- Release the left side button (`Up`) to send `feedback_meh` for the displayed copy.
+- Release the right side button (`Down`) to send `feedback_useful` for the displayed copy.
+- Press the front-right button to select another copy and, when online, check for a new release.
+- The front confirm button opens Wi-Fi selection; the front back button returns home.
+
+## Desktop simulator
+
+Build and launch the same Project.Stick activity used by the firmware:
+
+```bash
+pio run -e simulator -t run_simulator
+```
+
+The simulator uses the production API by default and persists its simulated SD state under `fs_/.crosspoint/`.
 
 ## X3 memory boundaries
 

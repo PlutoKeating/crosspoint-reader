@@ -25,7 +25,7 @@
 #include "project_stick/ProjectStickStore.h"
 
 #ifndef PROJECT_STICK_BASE_URL
-#define PROJECT_STICK_BASE_URL "https://stickstock.williamhvollita.dpdns.org"
+#define PROJECT_STICK_BASE_URL "https://stockstick.arr2018.dpdns.org"
 #endif
 
 namespace {
