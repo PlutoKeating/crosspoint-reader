@@ -32,11 +32,13 @@ flowchart TD
     B --> C[Init SD storage]
     C --> D[Load settings and app state]
     D --> E[Init display and fonts]
-    E --> F{Resume reader?}
-    F -->|No| G[Enter Home activity]
-    F -->|Yes| H[Enter Reader activity]
+    E --> F{Special boot route?}
+    F -->|Recovery or panic| G[Enter recovery/crash activity]
+    F -->|Explicit silent target| H[Enter Home or Reader activity]
+    F -->|Normal boot/wake| P[Enter ProjectStick activity]
     G --> I[Main loop]
     H --> I
+    P --> I
     I --> J[Poll input and run current activity]
     J --> K{Sleep condition met?}
     K -->|No| I
@@ -60,6 +62,7 @@ Top-level activity groups:
 - `src/activities/reader/`: EPUB/XTC/TXT reading flows
 - `src/activities/settings/`: settings menus and configuration
 - `src/activities/network/`: Wi-Fi selection, AP/STA mode, file transfer server
+- `src/activities/project_stick/`: the default Project.Stick product surface
 - `src/activities/boot_sleep/`: boot and sleep transitions
 
 ## Reader and content pipeline
@@ -130,7 +133,10 @@ Notes:
   viewport size, paragraph alignment, hyphenation, embedded CSS, image rendering,
   and Focus Reading settings
 - rendering favors reusing precomputed layout data to keep page turns responsive on constrained hardware
-- progress/session state is persisted so the reader can reopen at the last position after reboot/sleep
+- progress/session state is persisted so an explicitly requested silent-reader
+  restart can reopen at the last position. In this private Project.Stick fork,
+  ordinary boots and quick-resume wakeups enter `ProjectStickActivity` instead
+  of automatically reopening the persisted reader session.
 
 ## State and persistence
 

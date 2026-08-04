@@ -7,7 +7,10 @@ multi-device feature.
 
 ## Runtime flow
 
-1. The Home screen opens `ProjectStickActivity`.
+1. Cold boots, ordinary restarts, and quick-resume wakeups open
+   `ProjectStickActivity` by default. Recovery firmware mode, crash reporting,
+   and explicit silent-restart targets retain their dedicated routes; holding
+   Back during boot remains an escape hatch to the reader Home screen.
 2. The activity opens in offline mode immediately. Wi-Fi is optional; when it
    is available the service registers the persistent UUID v4 device identity.
 3. The manifest is streamed through a 512-byte parser and written to a
