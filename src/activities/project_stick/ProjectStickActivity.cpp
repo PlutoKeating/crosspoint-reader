@@ -91,6 +91,7 @@ void drawNetworkStatusTag(const GfxRenderer& renderer, const Rect& headerBounds,
 
 const char* scenarioDisplayName(const std::string& scenario) {
   if (scenario == "pre_open") return tr(STR_PROJECT_STICK_SCENARIO_PRE_OPEN);
+  if (scenario == "market_open") return tr(STR_PROJECT_STICK_SCENARIO_MARKET_OPEN);
   if (scenario == "midday_reset") return tr(STR_PROJECT_STICK_SCENARIO_MIDDAY_RESET);
   if (scenario == "post_close") return tr(STR_PROJECT_STICK_SCENARIO_POST_CLOSE);
   if (scenario == "volatility_alert") return tr(STR_PROJECT_STICK_SCENARIO_VOLATILITY_ALERT);

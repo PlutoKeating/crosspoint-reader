@@ -25,6 +25,10 @@ multi-device feature.
 7. Events are persisted in the same state file and retried after connectivity
    returns.
 
+The `market_open` scenario is the normal non-alert display during trading
+sessions. Its device tag is rendered as `盘中常态`; `volatility_alert` may
+temporarily override it, while `post_close` remains the all-day fallback.
+
 The service uses the device RTC as the offline scheduling clock and corrects its
 working clock whenever the API returns `server_time`.
 
