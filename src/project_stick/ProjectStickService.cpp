@@ -15,6 +15,7 @@
 #include <cstdio>
 #include <cstring>
 #include <cstdlib>
+#include <ctime>
 #include <mutex>
 #ifdef SIMULATOR
 #include <random>
@@ -37,6 +38,7 @@ constexpr size_t MAX_RELEASE_FILE_SIZE = 512 * 1024;
 constexpr size_t MAX_MANIFEST_BYTES = 64 * 1024;
 constexpr size_t MAX_ALERT_BYTES = 32 * 1024;
 constexpr size_t MAX_SCHEDULE_BYTES = 32 * 1024;
+constexpr size_t MAX_CONFIG_BYTES = 16 * 1024;
 constexpr size_t MAX_CONTENT_BYTES = 96 * 1024;
 constexpr size_t IO_CHUNK = 1024;
 // Vercel cold starts can take longer than five seconds before response headers.
@@ -183,11 +185,26 @@ void ProjectStickService::begin() {
   baseUrl = PROJECT_STICK_BASE_URL;
   while (!baseUrl.empty() && baseUrl.back() == '/') baseUrl.pop_back();
   ProjectStickStateLock lock(projectStickStateMutex);
-  if (projectStickStoreInitialized) return;
-  PROJECT_STICK_STORE.loadFromFile();
-  if (ensureIdentity()) PROJECT_STICK_STORE.saveToFile();
-  cleanupReleaseStorage();
-  projectStickStoreInitialized = true;
+  if (!projectStickStoreInitialized) {
+    PROJECT_STICK_STORE.loadFromFile();
+    if (ensureIdentity()) PROJECT_STICK_STORE.saveToFile();
+    if (PROJECT_STICK_STORE.activeVersion != 0) {
+      uint32_t refreshInterval = 600;
+      if (loadDisplayConfig(PROJECT_STICK_STORE.activeVersion, refreshInterval) &&
+          refreshInterval != PROJECT_STICK_STORE.contentRefreshIntervalSeconds) {
+        PROJECT_STICK_STORE.contentRefreshIntervalSeconds = refreshInterval;
+        PROJECT_STICK_STORE.saveToFile();
+      }
+    }
+    cleanupReleaseStorage();
+    projectStickStoreInitialized = true;
+  }
+  currentDisplay.scenario = PROJECT_STICK_STORE.displayScenario;
+  currentDisplay.text = PROJECT_STICK_STORE.displayText;
+  currentDisplay.tone = PROJECT_STICK_STORE.displayTone;
+  currentDisplay.copyId = PROJECT_STICK_STORE.displayCopyId;
+  currentDisplay.alert = PROJECT_STICK_STORE.displayAlert;
+  currentDisplay.alertUntil = PROJECT_STICK_STORE.displayAlertUntil;
 }
 
 bool ProjectStickService::ensureIdentity() {
@@ -557,14 +574,38 @@ bool ProjectStickService::validateObject(const project_stick::ReleaseFileEntry& 
 
 bool ProjectStickService::activateSnapshot(uint32_t version) {
   ProjectStickStateLock lock(projectStickStateMutex);
+  uint32_t contentRefreshIntervalSeconds = 600;
+  if (!loadDisplayConfig(version, contentRefreshIntervalSeconds)) return false;
   const uint32_t oldActive = PROJECT_STICK_STORE.activeVersion;
   const uint32_t oldPrevious = PROJECT_STICK_STORE.previousVersion;
+  const uint32_t oldRefreshInterval = PROJECT_STICK_STORE.contentRefreshIntervalSeconds;
   PROJECT_STICK_STORE.previousVersion = oldActive == version ? oldPrevious : oldActive;
   PROJECT_STICK_STORE.activeVersion = version;
+  PROJECT_STICK_STORE.contentRefreshIntervalSeconds = contentRefreshIntervalSeconds;
   if (PROJECT_STICK_STORE.saveToFile()) return true;
   PROJECT_STICK_STORE.activeVersion = oldActive;
   PROJECT_STICK_STORE.previousVersion = oldPrevious;
+  PROJECT_STICK_STORE.contentRefreshIntervalSeconds = oldRefreshInterval;
   return false;
+}
+
+bool ProjectStickService::loadDisplayConfig(uint32_t version,
+                                            uint32_t& contentRefreshIntervalSeconds) {
+  std::string path;
+  if (!resolveReleaseFile(version, "config.json", path) ||
+      !fileWithinLimit(path, MAX_CONFIG_BYTES)) {
+    return false;
+  }
+  HalFile input;
+  if (!Storage.openFileForRead("STICK", path, input)) return false;
+  JsonDocument doc;
+  const DeserializationError error = deserializeJson(doc, input);
+  input.close();
+  if (error) return false;
+  const uint32_t configured = doc["display"]["content_refresh_interval_seconds"] | 600;
+  contentRefreshIntervalSeconds =
+      configured == 0 ? 0 : std::clamp<uint32_t>(configured, 60, 86400);
+  return true;
 }
 
 bool ProjectStickService::loadSchedule(std::vector<project_stick::ScheduleWindow>& windows) {
@@ -619,7 +660,8 @@ bool ProjectStickService::selectContent(const std::string& scenario, uint32_t ra
   return true;
 }
 
-bool ProjectStickService::refreshScheduledContent(const char* forcedScenario) {
+bool ProjectStickService::refreshScheduledContent(
+    const char* forcedScenario, const project_stick::ShanghaiTime* alertUntil) {
   ProjectStickStateLock lock(projectStickStateMutex);
   if (PROJECT_STICK_STORE.activeVersion == 0) return false;
   const project_stick::ShanghaiTime current = now();
@@ -644,12 +686,6 @@ bool ProjectStickService::refreshScheduledContent(const char* forcedScenario) {
 #else
   const uint32_t randomValue = esp_random();
 #endif
-  // The e-paper retains the previous pixels; release its backing text before
-  // streaming the next selection so only one full copy is resident at a time.
-  std::string().swap(currentDisplay.text);
-  std::string().swap(currentDisplay.tone);
-  currentDisplay.copyId = 0;
-  currentDisplay.alert = false;
   project_stick::ContentCopy selected;
   if (!selectContent(scenario, randomValue, selected)) return false;
 
@@ -658,14 +694,24 @@ bool ProjectStickService::refreshScheduledContent(const char* forcedScenario) {
   currentDisplay.tone = std::move(selected.tone);
   currentDisplay.copyId = selected.id;
   currentDisplay.alert = forcedScenario && strcmp(forcedScenario, "volatility_alert") == 0;
+  currentDisplay.alertUntil =
+      currentDisplay.alert && alertUntil ? *alertUntil : project_stick::ShanghaiTime{};
+  PROJECT_STICK_STORE.displayVersion = PROJECT_STICK_STORE.activeVersion;
+  PROJECT_STICK_STORE.displayScenario = currentDisplay.scenario;
+  PROJECT_STICK_STORE.displayText = currentDisplay.text;
+  PROJECT_STICK_STORE.displayTone = currentDisplay.tone;
+  PROJECT_STICK_STORE.displayCopyId = currentDisplay.copyId;
+  PROJECT_STICK_STORE.displayAlert = currentDisplay.alert;
+  PROJECT_STICK_STORE.displayAlertUntil = currentDisplay.alertUntil;
   PROJECT_STICK_STORE.markCopyUsed(current.valid ? current.day : PROJECT_STICK_STORE.usedDay, selected.id);
+  if (current.valid) PROJECT_STICK_STORE.rotationAnchor = current;
   PROJECT_STICK_STORE.saveToFile();
   queueEvent("trigger_fired", scenario, selected.id);
   queueEvent("screen_view", scenario, selected.id);
   return true;
 }
 
-bool ProjectStickService::refreshIfScheduleChanged() {
+bool ProjectStickService::refreshIfScheduleOrContentDue() {
   ProjectStickStateLock lock(projectStickStateMutex);
   if (PROJECT_STICK_STORE.activeVersion == 0) return false;
   if (!ensureScheduleCache()) return false;
@@ -673,7 +719,18 @@ bool ProjectStickService::refreshIfScheduleChanged() {
   const auto* selected =
       project_stick::selectSchedule(scheduleCache, current.valid ? current.minuteOfDay() : 0,
                                     PROJECT_STICK_STORE.tradingDay);
-  if (!selected || selected->scenario == currentDisplay.scenario) return false;
+  if (!selected) return false;
+  if (currentDisplay.alert && currentDisplay.alertUntil.valid && current.valid) {
+    const bool alertActive = current.day < currentDisplay.alertUntil.day ||
+                             (current.day == currentDisplay.alertUntil.day &&
+                              current.secondOfDay < currentDisplay.alertUntil.secondOfDay);
+    if (alertActive) return false;
+  }
+  const bool scenarioChanged = selected->scenario != currentDisplay.scenario;
+  const bool rotationDue = project_stick::contentRotationDue(
+      current, PROJECT_STICK_STORE.rotationAnchor,
+      contentRefreshIntervalSeconds());
+  if (!scenarioChanged && !rotationDue) return false;
   return refreshScheduledContent(selected->scenario.c_str());
 }
 
@@ -714,7 +771,9 @@ bool ProjectStickService::pollAlerts() {
       unseen = id != 0 && !PROJECT_STICK_STORE.hasSeenAlert(id);
     }
     if (unseen) {
-      if (refreshScheduledContent(alert["scenario"] | "volatility_alert")) {
+      project_stick::ShanghaiTime activeUntil;
+      project_stick::parseIso8601ToShanghai(alert["active_until"] | "", activeUntil);
+      if (refreshScheduledContent(alert["scenario"] | "volatility_alert", &activeUntil)) {
         {
           ProjectStickStateLock lock(projectStickStateMutex);
           PROJECT_STICK_STORE.markAlertSeen(id);
@@ -737,6 +796,11 @@ void ProjectStickService::sendFeedback(bool useful, bool canSend) {
     ProjectStickStateLock lock(projectStickStateMutex);
     if (currentDisplay.copyId == 0) return;
     queueEvent(useful ? "feedback_useful" : "feedback_meh", currentDisplay.scenario, currentDisplay.copyId);
+    if (useful) {
+      const project_stick::ShanghaiTime current = now();
+      if (current.valid) PROJECT_STICK_STORE.rotationAnchor = current;
+      PROJECT_STICK_STORE.saveToFile();
+    }
   }
   if (canSend) flushEvents();
 }
@@ -945,9 +1009,23 @@ project_stick::ShanghaiTime ProjectStickService::now() const {
   uint8_t day = 0;
   uint8_t hour = 0;
   uint8_t minute = 0;
-  if (!halClock.getDateTime(year, month, day, hour, minute)) return {};
+  uint8_t second = 0;
+#ifdef SIMULATOR
+  const std::time_t wallTime = std::time(nullptr);
+  std::tm utcTime{};
+  if (wallTime <= 0 || !gmtime_r(&wallTime, &utcTime)) return {};
+  year = static_cast<uint16_t>(utcTime.tm_year + 1900);
+  month = static_cast<uint8_t>(utcTime.tm_mon + 1);
+  day = static_cast<uint8_t>(utcTime.tm_mday);
+  hour = static_cast<uint8_t>(utcTime.tm_hour);
+  minute = static_cast<uint8_t>(utcTime.tm_min);
+  second = static_cast<uint8_t>(utcTime.tm_sec);
+#else
+  if (!halClock.getDateTime(year, month, day, hour, minute, second)) return {};
+#endif
   char utc[32];
-  snprintf(utc, sizeof(utc), "%04u-%02u-%02uT%02u:%02u:00Z", year, month, day, hour, minute);
+  snprintf(utc, sizeof(utc), "%04u-%02u-%02uT%02u:%02u:%02uZ", year, month, day,
+           hour, minute, second);
   project_stick::ShanghaiTime rtcTime;
   project_stick::parseIso8601ToShanghai(utc, rtcTime);
   return rtcTime;
@@ -1174,6 +1252,16 @@ uint32_t ProjectStickService::pollIntervalSeconds() const {
 uint32_t ProjectStickService::alertPollIntervalSeconds() const {
   ProjectStickStateLock lock(projectStickStateMutex);
   return PROJECT_STICK_STORE.alertPollIntervalSeconds;
+}
+uint32_t ProjectStickService::contentRefreshIntervalSeconds() const {
+#ifdef SIMULATOR
+  if (const char* overrideValue = std::getenv("CROSSPOINT_SIM_CONTENT_REFRESH_SECONDS")) {
+    const unsigned long parsed = std::strtoul(overrideValue, nullptr, 10);
+    if (parsed <= 86400) return static_cast<uint32_t>(parsed);
+  }
+#endif
+  ProjectStickStateLock lock(projectStickStateMutex);
+  return PROJECT_STICK_STORE.contentRefreshIntervalSeconds;
 }
 bool ProjectStickService::isTradingDay() const {
   ProjectStickStateLock lock(projectStickStateMutex);

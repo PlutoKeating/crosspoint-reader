@@ -135,6 +135,15 @@ ShanghaiTime advanceTime(const ShanghaiTime& base, uint32_t elapsedSeconds) {
   return result;
 }
 
+bool contentRotationDue(const ShanghaiTime& now, const ShanghaiTime& anchor,
+                        uint32_t intervalSeconds) {
+  if (intervalSeconds == 0 || !now.valid || !anchor.valid) return false;
+  const int64_t elapsed = (now.day - anchor.day) * 86400LL +
+                          static_cast<int64_t>(now.secondOfDay) -
+                          static_cast<int64_t>(anchor.secondOfDay);
+  return elapsed >= static_cast<int64_t>(intervalSeconds);
+}
+
 std::string formatIso8601Shanghai(const ShanghaiTime& time) {
   if (!time.valid) return {};
   int year = 0;

@@ -2,6 +2,7 @@
 
 #include <ArduinoJson.h>
 #include <PersistableStore.h>
+#include <ProjectStickCore.h>
 
 #include <cstdint>
 #include <string>
@@ -29,8 +30,17 @@ class ProjectStickStore : public PersistableStore<ProjectStickStore> {
   uint32_t previousVersion = 0;
   uint32_t pollIntervalSeconds = 300;
   uint32_t alertPollIntervalSeconds = 30;
+  uint32_t contentRefreshIntervalSeconds = 600;
   bool tradingDay = false;
   int64_t usedDay = 0;
+  project_stick::ShanghaiTime rotationAnchor;
+  uint32_t displayVersion = 0;
+  std::string displayScenario;
+  std::string displayText;
+  std::string displayTone;
+  int64_t displayCopyId = 0;
+  bool displayAlert = false;
+  project_stick::ShanghaiTime displayAlertUntil;
   std::vector<int64_t> usedCopyIds;
   std::vector<int64_t> seenAlertIds;
   std::vector<ProjectStickEvent> pendingEvents;

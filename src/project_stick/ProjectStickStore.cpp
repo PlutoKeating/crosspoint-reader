@@ -9,8 +9,25 @@ void ProjectStickStore::toJson(JsonDocument& doc) const {
   doc["previous_version"] = previousVersion;
   doc["poll_interval_seconds"] = pollIntervalSeconds;
   doc["alert_poll_interval_seconds"] = alertPollIntervalSeconds;
+  doc["content_refresh_interval_seconds"] = contentRefreshIntervalSeconds;
   doc["is_trading_day"] = tradingDay;
   doc["used_day"] = usedDay;
+  if (rotationAnchor.valid) {
+    doc["rotation_anchor_day"] = rotationAnchor.day;
+    doc["rotation_anchor_second"] = rotationAnchor.secondOfDay;
+  }
+  if (displayCopyId != 0) {
+    doc["display_version"] = displayVersion;
+    doc["display_scenario"] = displayScenario;
+    doc["display_text"] = displayText;
+    doc["display_tone"] = displayTone;
+    doc["display_copy_id"] = displayCopyId;
+    doc["display_alert"] = displayAlert;
+    if (displayAlertUntil.valid) {
+      doc["display_alert_until_day"] = displayAlertUntil.day;
+      doc["display_alert_until_second"] = displayAlertUntil.secondOfDay;
+    }
+  }
 
   JsonArray used = doc["used_copy_ids"].to<JsonArray>();
   for (const int64_t id : usedCopyIds) used.add(id);
@@ -35,8 +52,34 @@ bool ProjectStickStore::fromJson(JsonVariantConst doc) {
   previousVersion = doc["previous_version"] | 0;
   pollIntervalSeconds = std::clamp<uint32_t>(doc["poll_interval_seconds"] | 300, 30, 86400);
   alertPollIntervalSeconds = std::clamp<uint32_t>(doc["alert_poll_interval_seconds"] | 30, 10, 3600);
+  const uint32_t refreshInterval = doc["content_refresh_interval_seconds"] | 600;
+  contentRefreshIntervalSeconds =
+      refreshInterval == 0 ? 0 : std::clamp<uint32_t>(refreshInterval, 60, 86400);
   tradingDay = doc["is_trading_day"] | false;
   usedDay = doc["used_day"] | 0;
+  rotationAnchor.day = doc["rotation_anchor_day"] | 0;
+  rotationAnchor.secondOfDay = doc["rotation_anchor_second"] | 0;
+  rotationAnchor.valid = rotationAnchor.day != 0 && rotationAnchor.secondOfDay < 86400;
+  displayVersion = doc["display_version"] | 0;
+  displayScenario = std::string(doc["display_scenario"] | "").substr(0, 64);
+  displayText = std::string(doc["display_text"] | "").substr(0, 256);
+  displayTone = std::string(doc["display_tone"] | "").substr(0, 32);
+  displayCopyId = doc["display_copy_id"] | 0;
+  displayAlert = doc["display_alert"] | false;
+  displayAlertUntil.day = doc["display_alert_until_day"] | 0;
+  displayAlertUntil.secondOfDay = doc["display_alert_until_second"] | 0;
+  displayAlertUntil.valid =
+      displayAlertUntil.day != 0 && displayAlertUntil.secondOfDay < 86400;
+  if (displayVersion != activeVersion || displayScenario.empty() ||
+      displayText.empty() || displayCopyId == 0) {
+    displayVersion = 0;
+    displayScenario.clear();
+    displayText.clear();
+    displayTone.clear();
+    displayCopyId = 0;
+    displayAlert = false;
+    displayAlertUntil = {};
+  }
 
   usedCopyIds.clear();
   JsonArrayConst used = doc["used_copy_ids"].as<JsonArrayConst>();

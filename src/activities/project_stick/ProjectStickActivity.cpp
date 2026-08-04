@@ -108,7 +108,12 @@ void ProjectStickActivity::onEnter() {
   service.begin();
   PROJECT_STICK_BACKGROUND_SYNC.begin();
   backgroundResultSequence = PROJECT_STICK_BACKGROUND_SYNC.latestSequence();
-  const bool haveLocalContent = service.refreshScheduledContent();
+  bool haveLocalContent = service.display().copyId != 0;
+  if (haveLocalContent) {
+    service.refreshIfScheduleOrContentDue();
+  } else {
+    haveLocalContent = service.refreshScheduledContent();
+  }
   if (WiFi.status() == WL_CONNECTED) {
     state = haveLocalContent ? State::Online : State::Connecting;
     setStatus(haveLocalContent ? tr(STR_PROJECT_STICK_ONLINE)
@@ -284,9 +289,15 @@ void ProjectStickActivity::loop() {
     const bool heartbeatDue = project_stick::registrationDue(nowMs, lastRegisterMs);
     if (requestCloudSync(heartbeatDue)) lastManifestAttemptMs = nowMs;
   }
-  if (nowMs - lastScheduleCheckMs >= 30000UL) {
+  uint32_t scheduleCheckIntervalMs = 30000UL;
+#ifdef SIMULATOR
+  if (std::getenv("CROSSPOINT_SIM_CONTENT_REFRESH_SECONDS") != nullptr) {
+    scheduleCheckIntervalMs = 1000UL;
+  }
+#endif
+  if (nowMs - lastScheduleCheckMs >= scheduleCheckIntervalMs) {
     lastScheduleCheckMs = nowMs;
-    if (service.refreshIfScheduleChanged()) {
+    if (service.refreshIfScheduleOrContentDue()) {
       state = State::Online;
       setStatus(tr(STR_PROJECT_STICK_ONLINE));
       requestUpdate();

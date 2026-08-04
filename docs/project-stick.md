@@ -23,20 +23,37 @@ multi-device feature.
 5. Only after every object passes validation does
    `/.crosspoint/project_stick.json` atomically switch `active_version`.
    `previous_version` remains the rollback snapshot.
-6. The active schedule is checked every 30 seconds, the manifest at the
-   server-provided interval, and alerts during the documented trading windows.
+6. The active schedule and persisted content-rotation deadline are checked
+   every 30 seconds, the manifest at the server-provided interval, and alerts
+   during the documented trading windows. The default rotation interval is
+   600 seconds; `0` disables it and other values are clamped to 60-86400 seconds.
    A release-version change invalidates the foreground schedule cache before
    selection, and the foreground clock adopts the Shanghai server time returned
    by each completed background synchronization.
 7. Events are persisted in the same state file and retried after connectivity
    returns.
 
+Content rotation is local and independent from manifest polling. The active
+Release's display snapshot, alert expiry, and rotation anchor are persisted as
+one coherent runtime state, so restart restores the current page before checking
+whether its schedule or deadline changed. At a deadline
+the service first re-evaluates the schedule, then selects another weighted,
+unused copy from that scenario. The Shanghai-time anchor is persisted across
+reboots. Schedule transitions take priority, active alerts pause ordinary
+rotation, and useful/meh/manual interactions restart the interval. A failed
+selection retains the current display. Automatic selections enqueue the same
+`trigger_fired` and `screen_view` events as other display changes; they do not
+change the last successful synchronization label.
+
 The `market_open` scenario is the normal non-alert display during trading
 sessions. Its device tag is rendered as `盘中常态`; `volatility_alert` may
 temporarily override it, while `post_close` remains the all-day fallback.
 
 The service uses the device RTC as the offline scheduling clock and corrects its
-working clock whenever the API returns `server_time`.
+working clock whenever the API returns `server_time`. RTC reads retain seconds,
+while the desktop simulator reads the host UTC wall clock, so both production
+deadlines and accelerated simulator checks use the same absolute wall-time
+comparison.
 
 ## Configuration
 
@@ -55,6 +72,12 @@ build_flags =
 ```
 
 The HTTP API path prefix (`/api/v1/device`) is appended by the service.
+
+The active Release `config.json` supplies
+`display.content_refresh_interval_seconds`. Firmware without that field uses
+600 seconds. For fast desktop verification only, set
+`CROSSPOINT_SIM_CONTENT_REFRESH_SECONDS=5`; this also shortens the simulator's
+schedule/deadline check cadence to one second without changing production data.
 
 ## X3 controls
 
@@ -87,11 +110,18 @@ pio run -e simulator -t run_simulator
 
 The simulator uses the production API by default and persists its simulated SD state under `fs_/.crosspoint/`.
 
+To verify local rotation quickly:
+
+```bash
+CROSSPOINT_SIM_CONTENT_REFRESH_SECONDS=5 pio run -e simulator -t run_simulator
+```
+
 ## X3 memory boundaries
 
 - The manifest never occupies a 64 KiB RAM body: it is capped at 64 KiB on SD
   and parsed with a 512-byte heap buffer. Alerts remain capped at 32 KiB.
-- Schedule and content JSON are rejected above 32 KiB / 96 KiB before parsing.
+- Config, schedule, and content JSON are rejected above 16 KiB / 32 KiB /
+  96 KiB before parsing.
 - The schedule parser keeps at most 32 windows in RAM.
 - Content is read in two 512-byte streaming passes: the first measures weights
   without retaining text, and the second retains only the selected copy.

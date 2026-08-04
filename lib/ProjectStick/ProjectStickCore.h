@@ -33,6 +33,8 @@ struct ShanghaiTime {
 bool parseClockMinute(const char* value, uint16_t& minute);
 bool parseIso8601ToShanghai(const char* value, ShanghaiTime& result);
 ShanghaiTime advanceTime(const ShanghaiTime& base, uint32_t elapsedSeconds);
+bool contentRotationDue(const ShanghaiTime& now, const ShanghaiTime& anchor,
+                        uint32_t intervalSeconds);
 std::string formatIso8601Shanghai(const ShanghaiTime& time);
 const ScheduleWindow* selectSchedule(const std::vector<ScheduleWindow>& windows, uint16_t minute, bool tradingDay);
 const ContentCopy* selectCopy(const std::vector<ContentCopy>& copies, const std::vector<int64_t>& usedIds,

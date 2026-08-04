@@ -100,6 +100,21 @@ TEST(ProjectStickCore, AdvancesAcrossMidnight) {
   EXPECT_EQ(next.minuteOfDay(), 1);
 }
 
+TEST(ProjectStickCore, ContentRotationUsesPersistedShanghaiTime) {
+  const ShanghaiTime anchor{.day = 100, .secondOfDay = 86370, .valid = true};
+  EXPECT_FALSE(contentRotationDue(anchor, anchor, 60));
+  EXPECT_FALSE(contentRotationDue(
+      ShanghaiTime{.day = 101, .secondOfDay = 29, .valid = true}, anchor, 60));
+  EXPECT_TRUE(contentRotationDue(
+      ShanghaiTime{.day = 101, .secondOfDay = 30, .valid = true}, anchor, 60));
+  EXPECT_FALSE(contentRotationDue(
+      ShanghaiTime{.day = 99, .secondOfDay = 0, .valid = true}, anchor, 60));
+  EXPECT_FALSE(contentRotationDue(ShanghaiTime{}, anchor, 60));
+  EXPECT_FALSE(contentRotationDue(anchor, ShanghaiTime{}, 60));
+  EXPECT_FALSE(contentRotationDue(
+      ShanghaiTime{.day = 101, .secondOfDay = 30, .valid = true}, anchor, 0));
+}
+
 TEST(ProjectStickCore, SelectsTimedThenAllDayThenEnabledFallback) {
   std::vector<ScheduleWindow> windows = {
       {.scenario = "disabled", .startMinute = 0, .endMinute = 1439, .enabled = false},

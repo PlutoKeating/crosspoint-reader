@@ -19,13 +19,15 @@ class ProjectStickService {
     std::string tone;
     int64_t copyId = 0;
     bool alert = false;
+    project_stick::ShanghaiTime alertUntil;
   };
 
   void begin();
   SyncReport sync(bool registerFirst = true, bool refreshDisplay = true);
   bool pollAlerts();
-  bool refreshIfScheduleChanged();
-  bool refreshScheduledContent(const char* forcedScenario = nullptr);
+  bool refreshIfScheduleOrContentDue();
+  bool refreshScheduledContent(const char* forcedScenario = nullptr,
+                               const project_stick::ShanghaiTime* alertUntil = nullptr);
   void sendFeedback(bool useful, bool canSend);
   bool sendManualRefresh(bool canSend);
   void queueManualRefresh();
@@ -38,6 +40,7 @@ class ProjectStickService {
   uint32_t pendingEventCount() const;
   uint32_t pollIntervalSeconds() const;
   uint32_t alertPollIntervalSeconds() const;
+  uint32_t contentRefreshIntervalSeconds() const;
   bool isTradingDay() const;
   bool hasClock() const { return serverTime.valid; }
   project_stick::ShanghaiTime now() const;
@@ -59,6 +62,7 @@ class ProjectStickService {
   bool downloadObject(uint32_t version, const project_stick::ReleaseFileEntry& file);
   bool validateObject(const project_stick::ReleaseFileEntry& file);
   bool activateSnapshot(uint32_t version);
+  bool loadDisplayConfig(uint32_t version, uint32_t& contentRefreshIntervalSeconds);
   void cleanupReleaseStorage(bool keepIncoming = false);
   bool ensureScheduleCache();
   bool loadSchedule(std::vector<project_stick::ScheduleWindow>& windows);
