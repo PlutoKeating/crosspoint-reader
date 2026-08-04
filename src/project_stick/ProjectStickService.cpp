@@ -237,6 +237,7 @@ ProjectStickService::SyncReport ProjectStickService::sync(bool registerFirst, bo
     report.result = SyncResult::Failed;
   }
   if (report.manifestCompleted && currentDisplay.copyId != 0) flushEvents();
+  if (report.manifestCompleted) report.synchronizedAt = now();
   return report;
 }
 
@@ -400,6 +401,7 @@ ProjectStickService::SyncResult ProjectStickService::syncManifest() {
     return SyncResult::Failed;
   }
   scheduleCache.clear();
+  scheduleCacheVersion = 0;
   cleanupReleaseStorage();
   queueEvent("sync_completed", "", 0);
   flushEvents();
@@ -578,6 +580,19 @@ bool ProjectStickService::loadSchedule(std::vector<project_stick::ScheduleWindow
   return !windows.empty();
 }
 
+bool ProjectStickService::ensureScheduleCache() {
+  const uint32_t activeVersion = PROJECT_STICK_STORE.activeVersion;
+  if (!project_stick::scheduleCacheNeedsReload(scheduleCacheVersion, activeVersion,
+                                                scheduleCache.empty())) {
+    return true;
+  }
+  scheduleCache.clear();
+  scheduleCacheVersion = 0;
+  if (!loadSchedule(scheduleCache)) return false;
+  scheduleCacheVersion = activeVersion;
+  return true;
+}
+
 bool ProjectStickService::selectContent(const std::string& scenario, uint32_t randomValue,
                                         project_stick::ContentCopy& selected) {
   const std::string relative = "content/" + scenario + ".json";
@@ -612,7 +627,7 @@ bool ProjectStickService::refreshScheduledContent(const char* forcedScenario) {
   if (forcedScenario && *forcedScenario) {
     scenario = forcedScenario;
   } else {
-    if (scheduleCache.empty() && !loadSchedule(scheduleCache)) return false;
+    if (!ensureScheduleCache()) return false;
     const auto* selected =
         project_stick::selectSchedule(scheduleCache, current.valid ? current.minuteOfDay() : 0,
                                       PROJECT_STICK_STORE.tradingDay);
@@ -653,7 +668,7 @@ bool ProjectStickService::refreshScheduledContent(const char* forcedScenario) {
 bool ProjectStickService::refreshIfScheduleChanged() {
   ProjectStickStateLock lock(projectStickStateMutex);
   if (PROJECT_STICK_STORE.activeVersion == 0) return false;
-  if (scheduleCache.empty() && !loadSchedule(scheduleCache)) return false;
+  if (!ensureScheduleCache()) return false;
   const project_stick::ShanghaiTime current = now();
   const auto* selected =
       project_stick::selectSchedule(scheduleCache, current.valid ? current.minuteOfDay() : 0,
@@ -735,12 +750,7 @@ bool ProjectStickService::sendManualRefresh(bool canSend) {
   {
     ProjectStickStateLock lock(projectStickStateMutex);
     queueManualRefresh();
-    if (currentDisplay.scenario.empty()) {
-      selected = refreshScheduledContent("manual_refresh");
-    } else {
-      const std::string scenario = currentDisplay.scenario;
-      selected = refreshScheduledContent(scenario.c_str());
-    }
+    selected = refreshScheduledContent();
   }
   if (canSend) flushEvents();
   return selected;
@@ -1140,6 +1150,13 @@ ProjectStickService::Display ProjectStickService::displaySnapshot() const {
 void ProjectStickService::adoptDisplay(Display display) {
   ProjectStickStateLock lock(projectStickStateMutex);
   currentDisplay = std::move(display);
+}
+
+void ProjectStickService::adoptServerTime(const project_stick::ShanghaiTime& time) {
+  if (!time.valid) return;
+  ProjectStickStateLock lock(projectStickStateMutex);
+  serverTime = time;
+  serverTimeCapturedMs = millis();
 }
 
 uint32_t ProjectStickService::activeVersion() const {

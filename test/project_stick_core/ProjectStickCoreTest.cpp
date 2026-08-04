@@ -11,6 +11,7 @@ TEST(ProjectStickSyncState, FailedFirstSyncDoesNotRecordCompletedStages) {
       .result = SyncResult::Failed,
       .registerAttempted = true,
       .registerSucceeded = false,
+      .synchronizedAt = {},
   };
 
   EXPECT_FALSE(shouldRecordRegisterSuccess(failed));
@@ -24,6 +25,7 @@ TEST(ProjectStickSyncState, SuccessfulSyncRecordsOnlyCompletedProtocolStages) {
       .registerSucceeded = true,
       .manifestAttempted = true,
       .manifestCompleted = true,
+      .synchronizedAt = {},
   };
 
   EXPECT_TRUE(shouldRecordRegisterSuccess(updated));
@@ -54,6 +56,7 @@ TEST(ProjectStickSyncState, ManifestFailureDoesNotSuppressTheNextRecovery) {
       .registerSucceeded = true,
       .manifestAttempted = true,
       .manifestCompleted = false,
+      .synchronizedAt = {},
   };
 
   EXPECT_TRUE(shouldRecordRegisterSuccess(failed));
@@ -69,6 +72,12 @@ TEST(ProjectStickSyncState, FailedRegistrationRemainsDueAtTheNextPoll) {
 TEST(ProjectStickSyncState, NoPublishedContentRequiresNoActiveRelease) {
   EXPECT_EQ(contentSelectionFailureResult(0), SyncResult::NoContent);
   EXPECT_EQ(contentSelectionFailureResult(2), SyncResult::Failed);
+}
+
+TEST(ProjectStickSyncState, ActiveReleaseChangeInvalidatesScheduleCache) {
+  EXPECT_TRUE(scheduleCacheNeedsReload(5, 6, false));
+  EXPECT_TRUE(scheduleCacheNeedsReload(6, 6, true));
+  EXPECT_FALSE(scheduleCacheNeedsReload(6, 6, false));
 }
 
 TEST(ProjectStickCore, ParsesProtocolTimesIntoShanghai) {

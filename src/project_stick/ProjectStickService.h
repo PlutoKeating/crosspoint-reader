@@ -33,6 +33,7 @@ class ProjectStickService {
   const Display& display() const { return currentDisplay; }
   Display displaySnapshot() const;
   void adoptDisplay(Display display);
+  void adoptServerTime(const project_stick::ShanghaiTime& time);
   uint32_t activeVersion() const;
   uint32_t pendingEventCount() const;
   uint32_t pollIntervalSeconds() const;
@@ -48,6 +49,7 @@ class ProjectStickService {
   uint32_t serverTimeCapturedMs = 0;
   bool inactive = false;
   std::vector<project_stick::ScheduleWindow> scheduleCache;
+  uint32_t scheduleCacheVersion = 0;
 
   bool ensureIdentity();
   bool registerDevice(int& status);
@@ -58,6 +60,7 @@ class ProjectStickService {
   bool validateObject(const project_stick::ReleaseFileEntry& file);
   bool activateSnapshot(uint32_t version);
   void cleanupReleaseStorage(bool keepIncoming = false);
+  bool ensureScheduleCache();
   bool loadSchedule(std::vector<project_stick::ScheduleWindow>& windows);
   bool selectContent(const std::string& scenario, uint32_t randomValue,
                      project_stick::ContentCopy& selected);

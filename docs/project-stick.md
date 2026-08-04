@@ -22,6 +22,9 @@ multi-device feature.
    `previous_version` remains the rollback snapshot.
 6. The active schedule is checked every 30 seconds, the manifest at the
    server-provided interval, and alerts during the documented trading windows.
+   A release-version change invalidates the foreground schedule cache before
+   selection, and the foreground clock adopts the Shanghai server time returned
+   by each completed background synchronization.
 7. Events are persisted in the same state file and retried after connectivity
    returns.
 
@@ -52,9 +55,23 @@ The HTTP API path prefix (`/api/v1/device`) is appended by the service.
 
 ## X3 controls
 
-- Release the left side button (`Up`) to send `feedback_meh` for the displayed copy.
-- Release the right side button (`Down`) to send `feedback_useful` for the displayed copy.
-- Press the front-right button to select another copy and, when online, check for a new release.
+Project.Stick is currently a Chinese-language product surface. Its schedule
+labels, synchronization timestamp, and feedback confirmations intentionally use
+the English fallback catalogue so the required Chinese wording remains stable
+even when the reader shell is set to another locale.
+
+- Release the left side button (`Up`) to send `feedback_meh`, show a left-origin
+  white confirmation box with a thin black rounded outline, and immediately
+  select another unused copy from the currently active schedule window.
+- Release the right side button (`Down`) to send `feedback_useful` and show a
+  matching right-origin confirmation box without replacing the displayed copy.
+  Both confirmations slide toward the centre and intentionally have no speech
+  bubble tail. The X3 renderer uses discrete e-paper-safe frames over 360 ms and
+  clears the confirmation after 2200 ms.
+- The top of the content area records the Shanghai `HH:MM` of the latest
+  completed background manifest synchronization.
+- Press the front-right button to re-evaluate the current schedule, select
+  another copy, and, when online, check for a new release.
 - The front confirm button opens Wi-Fi selection; the front back button returns home.
 
 ## Desktop simulator

@@ -1,5 +1,7 @@
 #pragma once
 
+#include "ProjectStickCore.h"
+
 #include <cstdint>
 
 namespace project_stick {
@@ -12,6 +14,7 @@ struct SyncReport {
   bool registerSucceeded = false;
   bool manifestAttempted = false;
   bool manifestCompleted = false;
+  ShanghaiTime synchronizedAt;
 };
 
 class BackgroundWorkGate {
@@ -49,6 +52,11 @@ inline bool shouldRecordManifestPoll(const SyncReport& report) {
 
 inline SyncResult contentSelectionFailureResult(uint32_t activeVersion) {
   return activeVersion == 0 ? SyncResult::NoContent : SyncResult::Failed;
+}
+
+inline bool scheduleCacheNeedsReload(uint32_t cachedVersion, uint32_t activeVersion,
+                                     bool cacheEmpty) {
+  return cacheEmpty || cachedVersion != activeVersion;
 }
 
 inline bool registrationDue(uint32_t nowMs, uint32_t lastSuccessMs,

@@ -31,6 +31,9 @@ constexpr int NETWORK_TAG_HORIZONTAL_PADDING = 8;
 constexpr int NETWORK_TAG_DOT_SIZE = 5;
 constexpr int NETWORK_TAG_DOT_GAP = 5;
 constexpr int COMPACT_HEADER_BATTERY_RESERVE = 90;
+constexpr uint32_t FEEDBACK_BUBBLE_FRAME_MS = 120;
+constexpr uint32_t FEEDBACK_BUBBLE_VISIBLE_MS = 2200;
+constexpr uint8_t FEEDBACK_BUBBLE_FINAL_FRAME = 3;
 
 void drawFeedbackIcon(const GfxRenderer& renderer, int x, int y, bool thumbsUp) {
   constexpr int size = 24;
@@ -157,6 +160,8 @@ void ProjectStickActivity::applyBackgroundResult() {
   }
 
   const auto& report = result.syncReport;
+  service.adoptServerTime(report.synchronizedAt);
+  recordSynchronizedAt(report.synchronizedAt);
   recordSyncTiming(report);
   lastManifestAttemptMs = millis();
   lastAlertPollMs = millis();
@@ -218,6 +223,7 @@ void ProjectStickActivity::updateState(const project_stick::SyncReport& report) 
 
 void ProjectStickActivity::loop() {
   applyBackgroundResult();
+  updateFeedbackBubble();
 #ifdef SIMULATOR
   if (simulatorRecoveryPending) {
     simulatorRecoveryPending = false;
@@ -238,9 +244,10 @@ void ProjectStickActivity::loop() {
   if (mappedInput.wasReleased(MappedInputManager::Button::Up)) {
     if (service.display().copyId != 0) {
       service.sendFeedback(false, false);
+      service.refreshScheduledContent();
+      showFeedbackBubble(FeedbackBubble::Meh);
       requestCloudSync(false);
       setStatus(tr(STR_PROJECT_STICK_MEH_SENT));
-      requestUpdate();
     }
     return;
   }
@@ -248,9 +255,9 @@ void ProjectStickActivity::loop() {
   if (mappedInput.wasReleased(MappedInputManager::Button::Down)) {
     if (service.display().copyId != 0) {
       service.sendFeedback(true, false);
+      showFeedbackBubble(FeedbackBubble::Useful);
       requestCloudSync(false);
       setStatus(tr(STR_PROJECT_STICK_USEFUL_SENT));
-      requestUpdate();
     }
     return;
   }
@@ -317,11 +324,19 @@ void ProjectStickActivity::render(RenderLock&&) {
   drawNetworkStatusTag(renderer, headerBounds, metrics.contentSidePadding,
                        WiFi.status() == WL_CONNECTED);
 
-  const auto& display = service.display();
+  const auto display = service.displaySnapshot();
   const int hintTop = height - metrics.buttonHintsHeight;
   const int contentInset =
       std::max(metrics.contentSidePadding, SIDE_BUTTON_MARGIN + SIDE_BUTTON_WIDTH + SIDE_CONTENT_GAP);
-  const int contentTop = metrics.topPadding + metrics.headerHeight + metrics.verticalSpacing;
+  const int syncLineHeight = synchronizedAtLine[0] == '\0'
+                                 ? 0
+                                 : renderer.getTextLineHeight(UI_10_FONT_ID, synchronizedAtLine);
+  const int syncLineY = metrics.topPadding + metrics.headerHeight + metrics.verticalSpacing;
+  if (syncLineHeight > 0) {
+    renderer.drawCenteredText(UI_10_FONT_ID, syncLineY, synchronizedAtLine);
+  }
+  const int contentTop = syncLineY + syncLineHeight +
+                         (syncLineHeight > 0 ? metrics.verticalSpacing : 0);
   const Rect contentBounds{contentInset, contentTop, width - contentInset * 2,
                            hintTop - metrics.verticalSpacing - contentTop};
 
@@ -397,11 +412,83 @@ void ProjectStickActivity::render(RenderLock&&) {
   }
 
   drawFeedbackHints(renderer);
+  drawFeedbackBubble(width);
   GUI.drawButtonHints(renderer, tr(STR_BACK), tr(STR_PROJECT_STICK_CONNECT_WIFI), "",
                       tr(STR_PROJECT_STICK_REFRESH));
   renderer.displayBuffer();
 }
 
 void ProjectStickActivity::setStatus(const char* text) {
+  RenderLock lock;
   snprintf(statusLine, sizeof(statusLine), "%s", text ? text : "");
+}
+
+void ProjectStickActivity::recordSynchronizedAt(const project_stick::ShanghaiTime& time) {
+  if (!time.valid) return;
+  const unsigned hour = time.secondOfDay / 3600;
+  const unsigned minute = (time.secondOfDay / 60) % 60;
+  RenderLock lock;
+  snprintf(synchronizedAtLine, sizeof(synchronizedAtLine), tr(STR_PROJECT_STICK_SYNCED_AT), hour,
+           minute);
+}
+
+void ProjectStickActivity::showFeedbackBubble(FeedbackBubble bubble) {
+  {
+    RenderLock lock;
+    feedbackBubble = bubble;
+    feedbackBubbleStartedMs = millis();
+    feedbackBubbleFrame = 0;
+  }
+  requestUpdate(true);
+}
+
+void ProjectStickActivity::updateFeedbackBubble() {
+  bool repaint = false;
+  {
+    RenderLock lock;
+    if (feedbackBubble == FeedbackBubble::None) return;
+    const uint32_t elapsed = millis() - feedbackBubbleStartedMs;
+    if (elapsed >= FEEDBACK_BUBBLE_VISIBLE_MS) {
+      feedbackBubble = FeedbackBubble::None;
+      repaint = true;
+    } else {
+      const uint8_t nextFrame =
+          std::min<uint8_t>(FEEDBACK_BUBBLE_FINAL_FRAME, elapsed / FEEDBACK_BUBBLE_FRAME_MS);
+      if (nextFrame != feedbackBubbleFrame) {
+        feedbackBubbleFrame = nextFrame;
+        repaint = true;
+      }
+    }
+  }
+  if (repaint) requestUpdate();
+}
+
+void ProjectStickActivity::drawFeedbackBubble(int screenWidth) const {
+  if (feedbackBubble == FeedbackBubble::None) return;
+  const char* text = feedbackBubble == FeedbackBubble::Meh
+                         ? tr(STR_PROJECT_STICK_MEH_BUBBLE)
+                         : tr(STR_PROJECT_STICK_USEFUL_BUBBLE);
+  constexpr int horizontalPadding = 18;
+  constexpr int verticalPadding = 11;
+  constexpr int sideGap = 8;
+  constexpr int borderWidth = 2;
+  constexpr int cornerRadius = 10;
+  const int textWidth = renderer.getTextWidth(NOTOSANSSC_13_FONT_ID, text);
+  const int textHeight = renderer.getTextLineHeight(NOTOSANSSC_13_FONT_ID, text);
+  const int maxWidth = screenWidth - 2 * (SIDE_BUTTON_MARGIN + SIDE_BUTTON_WIDTH + sideGap);
+  const int bubbleWidth = std::min(maxWidth, textWidth + horizontalPadding * 2);
+  const int bubbleHeight = textHeight + verticalPadding * 2;
+  const int finalX = (screenWidth - bubbleWidth) / 2;
+  const bool fromLeft = feedbackBubble == FeedbackBubble::Meh;
+  const int startX = fromLeft ? SIDE_BUTTON_MARGIN + SIDE_BUTTON_WIDTH + sideGap
+                              : screenWidth - SIDE_BUTTON_MARGIN - SIDE_BUTTON_WIDTH - sideGap -
+                                    bubbleWidth;
+  const int x = startX + (finalX - startX) * feedbackBubbleFrame /
+                             FEEDBACK_BUBBLE_FINAL_FRAME;
+  const int y = SIDE_BUTTON_Y + (SIDE_BUTTON_HEIGHT - bubbleHeight) / 2;
+  renderer.fillRoundedRect(x, y, bubbleWidth, bubbleHeight, cornerRadius, Color::White);
+  renderer.drawRoundedRect(x, y, bubbleWidth, bubbleHeight, borderWidth, cornerRadius, true);
+  const Rect bounds{x, y, bubbleWidth, bubbleHeight};
+  UITheme::drawCenteredText(renderer, bounds, NOTOSANSSC_13_FONT_ID, y + verticalPadding, text,
+                            true, EpdFontFamily::BOLD);
 }
