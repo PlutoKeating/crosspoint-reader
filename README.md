@@ -1,5 +1,9 @@
 # CrossPoint Reader
 
+> This checkout includes the private Project.Stick integration: authenticated
+> mini-program device binding, per-user v2 Release synchronization, and four
+> e-ink display presets. See [docs/project-stick.md](docs/project-stick.md).
+
 [![Fund contributors](https://img.shields.io/badge/%F0%9F%91%91_Fund_contributors-royalty.dev-BB953A?style=for-the-badge&labelColor=1a1a1a)](https://app.royalty.dev/crosspoint-reader/crosspoint-reader)
 
 CrossPoint is open-source e-reader firmware - community-built, fully hackable, free forever. It's maintained by a growing community of developers and readers who believe your device should do what you want - not what a manufacturer decided for you.

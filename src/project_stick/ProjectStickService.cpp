@@ -190,9 +190,18 @@ void ProjectStickService::begin() {
     if (ensureIdentity()) PROJECT_STICK_STORE.saveToFile();
     if (PROJECT_STICK_STORE.activeVersion != 0) {
       uint32_t refreshInterval = 600;
-      if (loadDisplayConfig(PROJECT_STICK_STORE.activeVersion, refreshInterval) &&
-          refreshInterval != PROJECT_STICK_STORE.contentRefreshIntervalSeconds) {
+      DisplayPreferences preferences;
+      uint32_t profileRevision = 0;
+      if (loadDisplayConfig(PROJECT_STICK_STORE.activeVersion, refreshInterval, &preferences,
+                            &profileRevision)) {
         PROJECT_STICK_STORE.contentRefreshIntervalSeconds = refreshInterval;
+        PROJECT_STICK_STORE.profileRevision = profileRevision;
+        PROJECT_STICK_STORE.themeId = preferences.themeId;
+        PROJECT_STICK_STORE.textScale = preferences.textScale;
+        PROJECT_STICK_STORE.displayLayout = preferences.layout;
+        PROJECT_STICK_STORE.showScenario = preferences.showScenario;
+        PROJECT_STICK_STORE.showTone = preferences.showTone;
+        PROJECT_STICK_STORE.showSyncTime = preferences.showSyncTime;
         PROJECT_STICK_STORE.saveToFile();
       }
     }
@@ -217,6 +226,10 @@ bool ProjectStickService::ensureIdentity() {
 ProjectStickService::SyncReport ProjectStickService::sync(bool registerFirst, bool refreshDisplay) {
   SyncReport report;
   inactive = false;
+  {
+    ProjectStickStateLock lock(projectStickStateMutex);
+    registerFirst = registerFirst || !PROJECT_STICK_STORE.bound;
+  }
   if (registerFirst) {
     report.registerAttempted = true;
     int status = 0;
@@ -233,6 +246,15 @@ ProjectStickService::SyncReport ProjectStickService::sync(bool registerFirst, bo
       return report;
     }
     report.registerSucceeded = true;
+  }
+
+  {
+    ProjectStickStateLock lock(projectStickStateMutex);
+    if (!PROJECT_STICK_STORE.bound) {
+      report.result = PROJECT_STICK_STORE.activeVersion != 0 ? SyncResult::OfflineCache
+                                                             : SyncResult::NoContent;
+      return report;
+    }
   }
 
   flushEvents();
@@ -258,19 +280,63 @@ ProjectStickService::SyncReport ProjectStickService::sync(bool registerFirst, bo
   return report;
 }
 
+bool ProjectStickService::ensurePairing(int& status) {
+  std::string deviceId;
+  std::string deviceToken;
+  {
+    ProjectStickStateLock lock(projectStickStateMutex);
+    deviceId = PROJECT_STICK_STORE.deviceId;
+    deviceToken = PROJECT_STICK_STORE.deviceToken;
+  }
+  JsonDocument request;
+  request["device_id"] = deviceId;
+  request["firmware_version"] = CROSSPOINT_VERSION;
+  JsonObject capabilities = request["capabilities"].to<JsonObject>();
+  capabilities["protocol"] = 2;
+  capabilities["themes"] = true;
+  capabilities["panel"] = "xteink_x3";
+  std::string body;
+  serializeJson(request, body);
+  std::string response;
+  if (!requestPost("/api/v2/device/pairing", body, response, status) || status != 200) return false;
+  JsonDocument doc;
+  if (deserializeJson(doc, response)) return false;
+  const std::string returnedToken = doc["device_token"] | "";
+  const std::string returnedCode = doc["pairing_code"] | "";
+  if (returnedCode.size() != 8 || (deviceToken.empty() && returnedToken.empty())) return false;
+  ProjectStickStateLock lock(projectStickStateMutex);
+  if (!returnedToken.empty()) PROJECT_STICK_STORE.deviceToken = returnedToken.substr(0, 96);
+  PROJECT_STICK_STORE.pairingCode = returnedCode.substr(0, 8);
+  return PROJECT_STICK_STORE.saveToFile();
+}
+
 bool ProjectStickService::registerDevice(int& status) {
   LOG_INF("STICK", "Registering device (firmware=%s)", CROSSPOINT_VERSION);
+  bool bound = false;
+  {
+    ProjectStickStateLock lock(projectStickStateMutex);
+    bound = PROJECT_STICK_STORE.bound;
+  }
+  if (!bound && !ensurePairing(status)) {
+    LOG_ERR("STICK", "Device pairing refresh failed (status=%d)", status);
+    return false;
+  }
   JsonDocument request;
   {
     ProjectStickStateLock lock(projectStickStateMutex);
     request["device_id"] = PROJECT_STICK_STORE.deviceId;
   }
   request["firmware_version"] = CROSSPOINT_VERSION;
+  request["applied_revision"] = PROJECT_STICK_STORE.profileRevision;
+  JsonObject capabilities = request["capabilities"].to<JsonObject>();
+  capabilities["protocol"] = 2;
+  capabilities["themes"] = true;
+  capabilities["panel"] = "xteink_x3";
   std::string body;
   serializeJson(request, body);
 
   std::string response;
-  if (!requestPost("/api/v1/device/register", body, response, status) || status != 200) {
+  if (!requestPost("/api/v2/device/register", body, response, status) || status != 200) {
     LOG_ERR("STICK", "Device registration failed (status=%d)", status);
     return false;
   }
@@ -289,6 +355,8 @@ bool ProjectStickService::registerDevice(int& status) {
     PROJECT_STICK_STORE.alertPollIntervalSeconds =
         std::clamp<uint32_t>(doc["alert_poll_interval_seconds"] | 30, 10, 3600);
     PROJECT_STICK_STORE.tradingDay = doc["is_trading_day"] | false;
+    PROJECT_STICK_STORE.bound = doc["bound"] | false;
+    if (PROJECT_STICK_STORE.bound) PROJECT_STICK_STORE.pairingCode.clear();
     parseServerTime(doc["server_time"] | "");
     pollSeconds = PROJECT_STICK_STORE.pollIntervalSeconds;
     alertSeconds = PROJECT_STICK_STORE.alertPollIntervalSeconds;
@@ -311,7 +379,7 @@ ProjectStickService::SyncResult ProjectStickService::syncManifest() {
     deviceId = PROJECT_STICK_STORE.deviceId;
     activeVersion = PROJECT_STICK_STORE.activeVersion;
   }
-  const std::string path = "/api/v1/device/manifest?device_id=" + deviceId +
+  const std::string path = "/api/v2/device/manifest?device_id=" + deviceId +
                            "&current_version=" + std::to_string(activeVersion);
   if ((!Storage.mkdir(DATA_ROOT, true) && !Storage.exists(DATA_ROOT)) ||
       (!Storage.mkdir(SNAPSHOT_ROOT, true) && !Storage.exists(SNAPSHOT_ROOT))) {
@@ -502,7 +570,7 @@ bool ProjectStickService::downloadObject(uint32_t version, const project_stick::
     ProjectStickStateLock lock(projectStickStateMutex);
     deviceId = PROJECT_STICK_STORE.deviceId;
   }
-  const std::string url = baseUrl + "/api/v1/device/releases/" + std::to_string(version) + "/" + file.path +
+  const std::string url = baseUrl + "/api/v2/device/releases/" + std::to_string(version) + "/" + file.path +
                           "?device_id=" + deviceId;
   LOG_INF("STICK", "Downloading %s (%u bytes)", file.path.c_str(), (unsigned)file.size);
   for (uint8_t attempt = 0; attempt < 3; ++attempt) {
@@ -513,7 +581,7 @@ bool ProjectStickService::downloadObject(uint32_t version, const project_stick::
     mbedtls_sha256_context context;
     mbedtls_sha256_init(&context);
     mbedtls_sha256_starts(&context, 0);
-    const bool fetched = HttpDownloader::fetchUrl(url, [&output, &received, &context, &file](
+    const bool fetched = fetchAuthenticated(url, [&output, &received, &context, &file](
                                                            const uint8_t* data, size_t length) {
       if (received > file.size || length > file.size - received) return false;
       if (output.write(data, length) != length) return false;
@@ -575,22 +643,47 @@ bool ProjectStickService::validateObject(const project_stick::ReleaseFileEntry& 
 bool ProjectStickService::activateSnapshot(uint32_t version) {
   ProjectStickStateLock lock(projectStickStateMutex);
   uint32_t contentRefreshIntervalSeconds = 600;
-  if (!loadDisplayConfig(version, contentRefreshIntervalSeconds)) return false;
+  uint32_t profileRevision = 0;
+  DisplayPreferences preferences;
+  if (!loadDisplayConfig(version, contentRefreshIntervalSeconds, &preferences, &profileRevision)) return false;
   const uint32_t oldActive = PROJECT_STICK_STORE.activeVersion;
   const uint32_t oldPrevious = PROJECT_STICK_STORE.previousVersion;
   const uint32_t oldRefreshInterval = PROJECT_STICK_STORE.contentRefreshIntervalSeconds;
+  const uint32_t oldProfileRevision = PROJECT_STICK_STORE.profileRevision;
+  const std::string oldThemeId = PROJECT_STICK_STORE.themeId;
+  const std::string oldTextScale = PROJECT_STICK_STORE.textScale;
+  const std::string oldLayout = PROJECT_STICK_STORE.displayLayout;
+  const bool oldShowScenario = PROJECT_STICK_STORE.showScenario;
+  const bool oldShowTone = PROJECT_STICK_STORE.showTone;
+  const bool oldShowSyncTime = PROJECT_STICK_STORE.showSyncTime;
   PROJECT_STICK_STORE.previousVersion = oldActive == version ? oldPrevious : oldActive;
   PROJECT_STICK_STORE.activeVersion = version;
   PROJECT_STICK_STORE.contentRefreshIntervalSeconds = contentRefreshIntervalSeconds;
+  PROJECT_STICK_STORE.profileRevision = profileRevision;
+  PROJECT_STICK_STORE.themeId = preferences.themeId;
+  PROJECT_STICK_STORE.textScale = preferences.textScale;
+  PROJECT_STICK_STORE.displayLayout = preferences.layout;
+  PROJECT_STICK_STORE.showScenario = preferences.showScenario;
+  PROJECT_STICK_STORE.showTone = preferences.showTone;
+  PROJECT_STICK_STORE.showSyncTime = preferences.showSyncTime;
   if (PROJECT_STICK_STORE.saveToFile()) return true;
   PROJECT_STICK_STORE.activeVersion = oldActive;
   PROJECT_STICK_STORE.previousVersion = oldPrevious;
   PROJECT_STICK_STORE.contentRefreshIntervalSeconds = oldRefreshInterval;
+  PROJECT_STICK_STORE.profileRevision = oldProfileRevision;
+  PROJECT_STICK_STORE.themeId = oldThemeId;
+  PROJECT_STICK_STORE.textScale = oldTextScale;
+  PROJECT_STICK_STORE.displayLayout = oldLayout;
+  PROJECT_STICK_STORE.showScenario = oldShowScenario;
+  PROJECT_STICK_STORE.showTone = oldShowTone;
+  PROJECT_STICK_STORE.showSyncTime = oldShowSyncTime;
   return false;
 }
 
 bool ProjectStickService::loadDisplayConfig(uint32_t version,
-                                            uint32_t& contentRefreshIntervalSeconds) {
+                                            uint32_t& contentRefreshIntervalSeconds,
+                                            DisplayPreferences* preferences,
+                                            uint32_t* profileRevision) {
   std::string path;
   if (!resolveReleaseFile(version, "config.json", path) ||
       !fileWithinLimit(path, MAX_CONFIG_BYTES)) {
@@ -605,6 +698,23 @@ bool ProjectStickService::loadDisplayConfig(uint32_t version,
   const uint32_t configured = doc["display"]["content_refresh_interval_seconds"] | 600;
   contentRefreshIntervalSeconds =
       configured == 0 ? 0 : std::clamp<uint32_t>(configured, 60, 86400);
+  if (profileRevision) *profileRevision = doc["profile_revision"] | 0;
+  if (preferences) {
+    const std::string theme = doc["display"]["theme"]["id"] | "calm";
+    const std::string scale = doc["display"]["text_scale"] | "standard";
+    const std::string layout = doc["display"]["layout"] | "balanced";
+    preferences->themeId =
+        (theme == "calm" || theme == "large" || theme == "minimal" || theme == "information")
+            ? theme
+            : "calm";
+    preferences->textScale =
+        (scale == "compact" || scale == "standard" || scale == "large") ? scale : "standard";
+    preferences->layout =
+        (layout == "focused" || layout == "balanced" || layout == "dense") ? layout : "balanced";
+    preferences->showScenario = doc["display"]["show_scenario"] | true;
+    preferences->showTone = doc["display"]["show_tone"] | false;
+    preferences->showSyncTime = doc["display"]["show_sync_time"] | true;
+  }
   return true;
 }
 
@@ -753,7 +863,7 @@ bool ProjectStickService::pollAlerts() {
   if (!eligible) return false;
 
   std::string response;
-  const std::string url = baseUrl + "/api/v1/device/alerts?device_id=" + deviceId;
+  const std::string url = baseUrl + "/api/v2/device/alerts?device_id=" + deviceId;
   if (!fetchJson(url, response, MAX_ALERT_BYTES)) return false;
   JsonDocument doc;
   if (deserializeJson(doc, response)) return false;
@@ -856,7 +966,7 @@ bool ProjectStickService::flushEvents() {
   serializeJson(request, body);
   std::string response;
   int status = 0;
-  if (!requestPost("/api/v1/device/events", body, response, status) || status != 200) return false;
+  if (!requestPost("/api/v2/device/events", body, response, status) || status != 200) return false;
   ProjectStickStateLock lock(projectStickStateMutex);
   for (const auto& sent : pending) {
     auto& events = PROJECT_STICK_STORE.pendingEvents;
@@ -874,7 +984,7 @@ bool ProjectStickService::requestPost(const std::string& path, const std::string
   status = 0;
 #ifdef SIMULATOR
   static bool injectedRegisterFailure = false;
-  if (!injectedRegisterFailure && path == "/api/v1/device/register" &&
+  if (!injectedRegisterFailure && path == "/api/v2/device/register" &&
       std::getenv("CROSSPOINT_SIM_FAIL_FIRST_REGISTER") != nullptr) {
     injectedRegisterFailure = true;
     LOG_ERR("STICK", "Simulator injected the first register failure");
@@ -902,6 +1012,14 @@ bool ProjectStickService::requestPost(const std::string& path, const std::string
       return false;
     }
     http.addHeader("Content-Type", "application/json");
+    std::string deviceToken;
+    {
+      ProjectStickStateLock lock(projectStickStateMutex);
+      deviceToken = PROJECT_STICK_STORE.deviceToken;
+    }
+    if (!deviceToken.empty() && path.rfind("/api/v2/device/", 0) == 0) {
+      http.addHeader("Authorization", "Bearer " + deviceToken);
+    }
     status = http.sendRequest("POST", body);
     response = http.getString();
 #ifdef SIMULATOR
@@ -926,7 +1044,7 @@ bool ProjectStickService::fetchJson(const std::string& url, std::string& respons
   for (uint8_t attempt = 0; attempt < 3; ++attempt) {
     response.clear();
     response.reserve(std::min<size_t>(maxBytes, 4096));
-    const bool ok = HttpDownloader::fetchUrl(url, [&response, maxBytes](const uint8_t* data, size_t length) {
+    const bool ok = fetchAuthenticated(url, [&response, maxBytes](const uint8_t* data, size_t length) {
       if (length > maxBytes - response.size()) return false;
       response.append(reinterpret_cast<const char*>(data), length);
       return true;
@@ -944,7 +1062,7 @@ bool ProjectStickService::fetchToFile(const std::string& url, const std::string&
     HalFile output;
     if (!Storage.openFileForWrite("STICK", path, output)) return false;
     size_t received = 0;
-    const bool ok = HttpDownloader::fetchUrl(url, [&output, &received, maxBytes](const uint8_t* data,
+    const bool ok = fetchAuthenticated(url, [&output, &received, maxBytes](const uint8_t* data,
                                                                                 size_t length) {
       if (received > maxBytes || length > maxBytes - received) return false;
       if (output.write(data, length) != length) return false;
@@ -958,6 +1076,37 @@ bool ProjectStickService::fetchToFile(const std::string& url, const std::string&
     if (attempt < 2) delay(250UL << attempt);
   }
   return false;
+}
+
+bool ProjectStickService::fetchAuthenticated(
+    const std::string& url, const std::function<bool(const uint8_t*, size_t)>& onData) {
+  std::string deviceToken;
+  {
+    ProjectStickStateLock lock(projectStickStateMutex);
+    deviceToken = PROJECT_STICK_STORE.deviceToken;
+  }
+  if (deviceToken.empty()) return HttpDownloader::fetchUrl(url, onData);
+  freeink::SecureHttpClient http;
+  http.setTimeout(HTTP_TIMEOUT_MS);
+  http.setInsecure();
+#ifndef SIMULATOR
+  http.setUserAgent("Project.Stick-CrossPoint-" CROSSPOINT_VERSION);
+  http.setFollowRedirects(3);
+#endif
+  if (!http.begin(url)) return false;
+  http.addHeader("Authorization", "Bearer " + deviceToken);
+  const int status = http.GET([&http, &onData](const uint8_t* data, size_t length) {
+    if (http.getStatus() != 200) return true;
+    return onData(data, length);
+  });
+#ifdef SIMULATOR
+  const bool complete = true;
+#else
+  const bool complete = http.responseComplete();
+#endif
+  const bool success = status == 200 && complete && !http.callbackAborted();
+  http.end();
+  return success;
 }
 
 bool ProjectStickService::streamScheduleFile(const std::string& path,
@@ -1266,4 +1415,26 @@ uint32_t ProjectStickService::contentRefreshIntervalSeconds() const {
 bool ProjectStickService::isTradingDay() const {
   ProjectStickStateLock lock(projectStickStateMutex);
   return PROJECT_STICK_STORE.tradingDay;
+}
+
+bool ProjectStickService::isBound() const {
+  ProjectStickStateLock lock(projectStickStateMutex);
+  return PROJECT_STICK_STORE.bound;
+}
+
+std::string ProjectStickService::pairingCode() const {
+  ProjectStickStateLock lock(projectStickStateMutex);
+  return PROJECT_STICK_STORE.pairingCode;
+}
+
+ProjectStickService::DisplayPreferences ProjectStickService::displayPreferences() const {
+  ProjectStickStateLock lock(projectStickStateMutex);
+  DisplayPreferences result;
+  result.themeId = PROJECT_STICK_STORE.themeId;
+  result.textScale = PROJECT_STICK_STORE.textScale;
+  result.layout = PROJECT_STICK_STORE.displayLayout;
+  result.showScenario = PROJECT_STICK_STORE.showScenario;
+  result.showTone = PROJECT_STICK_STORE.showTone;
+  result.showSyncTime = PROJECT_STICK_STORE.showSyncTime;
+  return result;
 }

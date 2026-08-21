@@ -5,6 +5,7 @@
 #include <ProjectStickStream.h>
 
 #include <cstdint>
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -20,6 +21,15 @@ class ProjectStickService {
     int64_t copyId = 0;
     bool alert = false;
     project_stick::ShanghaiTime alertUntil;
+  };
+
+  struct DisplayPreferences {
+    std::string themeId = "calm";
+    std::string textScale = "standard";
+    std::string layout = "balanced";
+    bool showScenario = true;
+    bool showTone = false;
+    bool showSyncTime = true;
   };
 
   void begin();
@@ -43,6 +53,9 @@ class ProjectStickService {
   uint32_t contentRefreshIntervalSeconds() const;
   bool isTradingDay() const;
   bool hasClock() const { return serverTime.valid; }
+  bool isBound() const;
+  std::string pairingCode() const;
+  DisplayPreferences displayPreferences() const;
   project_stick::ShanghaiTime now() const;
 
  private:
@@ -55,6 +68,7 @@ class ProjectStickService {
   uint32_t scheduleCacheVersion = 0;
 
   bool ensureIdentity();
+  bool ensurePairing(int& status);
   bool registerDevice(int& status);
   SyncResult syncManifest();
   bool materializeRelease(uint32_t version);
@@ -62,7 +76,9 @@ class ProjectStickService {
   bool downloadObject(uint32_t version, const project_stick::ReleaseFileEntry& file);
   bool validateObject(const project_stick::ReleaseFileEntry& file);
   bool activateSnapshot(uint32_t version);
-  bool loadDisplayConfig(uint32_t version, uint32_t& contentRefreshIntervalSeconds);
+  bool loadDisplayConfig(uint32_t version, uint32_t& contentRefreshIntervalSeconds,
+                         DisplayPreferences* preferences = nullptr,
+                         uint32_t* profileRevision = nullptr);
   void cleanupReleaseStorage(bool keepIncoming = false);
   bool ensureScheduleCache();
   bool loadSchedule(std::vector<project_stick::ScheduleWindow>& windows);
@@ -73,6 +89,8 @@ class ProjectStickService {
   bool fetchToFile(const std::string& url, const std::string& path, size_t maxBytes);
   bool requestPost(const std::string& path, const std::string& body, std::string& response, int& status);
   bool fetchJson(const std::string& url, std::string& response, size_t maxBytes);
+  bool fetchAuthenticated(const std::string& url,
+                          const std::function<bool(const uint8_t*, size_t)>& onData);
   bool fileWithinLimit(const std::string& path, size_t maxBytes);
   bool parseServerTime(const char* value);
   bool hashFile(const std::string& path, std::string& result);

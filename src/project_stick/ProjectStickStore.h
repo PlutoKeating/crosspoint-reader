@@ -26,11 +26,21 @@ class ProjectStickStore : public PersistableStore<ProjectStickStore> {
   static constexpr size_t MAX_PENDING_EVENTS = 32;
 
   std::string deviceId;
+  std::string deviceToken;
+  std::string pairingCode;
+  bool bound = false;
   uint32_t activeVersion = 0;
   uint32_t previousVersion = 0;
   uint32_t pollIntervalSeconds = 300;
   uint32_t alertPollIntervalSeconds = 30;
   uint32_t contentRefreshIntervalSeconds = 600;
+  uint32_t profileRevision = 0;
+  std::string themeId = "calm";
+  std::string textScale = "standard";
+  std::string displayLayout = "balanced";
+  bool showScenario = true;
+  bool showTone = false;
+  bool showSyncTime = true;
   bool tradingDay = false;
   int64_t usedDay = 0;
   project_stick::ShanghaiTime rotationAnchor;

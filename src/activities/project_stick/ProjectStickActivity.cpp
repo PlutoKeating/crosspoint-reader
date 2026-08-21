@@ -14,6 +14,7 @@
 #include "components/icons/project_stick_icons.h"
 #include "fontIds.h"
 #include "ProjectStickCore.h"
+#include "util/QrUtils.h"
 
 namespace {
 constexpr int BODY_LINE_GAP = 4;
@@ -212,7 +213,7 @@ void ProjectStickActivity::updateState(const project_stick::SyncReport& report) 
       break;
     case ProjectStickService::SyncResult::NoContent:
       state = State::Empty;
-      setStatus(tr(STR_PROJECT_STICK_NO_CONTENT));
+      setStatus(service.isBound() ? tr(STR_PROJECT_STICK_NO_CONTENT) : "请用微信小程序绑定设备");
       break;
     case ProjectStickService::SyncResult::Inactive:
       state = State::Inactive;
@@ -336,10 +337,17 @@ void ProjectStickActivity::render(RenderLock&&) {
                        WiFi.status() == WL_CONNECTED);
 
   const auto display = service.displaySnapshot();
+  const auto preferences = service.displayPreferences();
+  const bool minimalTheme = preferences.themeId == "minimal";
+  const bool largeTheme = preferences.themeId == "large";
+  const bool informationTheme = preferences.themeId == "information";
   const int hintTop = height - metrics.buttonHintsHeight;
-  const int contentInset =
+  int contentInset =
       std::max(metrics.contentSidePadding, SIDE_BUTTON_MARGIN + SIDE_BUTTON_WIDTH + SIDE_CONTENT_GAP);
-  const int syncLineHeight = synchronizedAtLine[0] == '\0'
+  if (preferences.layout == "dense") contentInset = std::max(metrics.contentSidePadding, contentInset - 8);
+  if (preferences.layout == "focused" || largeTheme) contentInset += 14;
+  const bool showSyncTime = preferences.showSyncTime && !minimalTheme && !largeTheme;
+  const int syncLineHeight = !showSyncTime || synchronizedAtLine[0] == '\0'
                                  ? 0
                                  : renderer.getTextLineHeight(UI_10_FONT_ID, synchronizedAtLine);
   const int syncLineY = metrics.topPadding + metrics.headerHeight + metrics.verticalSpacing;
@@ -351,9 +359,29 @@ void ProjectStickActivity::render(RenderLock&&) {
   const Rect contentBounds{contentInset, contentTop, width - contentInset * 2,
                            hintTop - metrics.verticalSpacing - contentTop};
 
-  if (!display.text.empty()) {
+  if (!service.isBound()) {
+    const std::string code = service.pairingCode();
+    const char* title = "请在微信小程序绑定设备";
+    const std::string codeLine = code.empty() ? "正在获取绑定码…" : "绑定码  " + code;
+    const int titleHeight = renderer.getTextLineHeight(NOTOSANSSC_13_FONT_ID, title);
+    const int codeHeight = renderer.getTextLineHeight(NOTOSANSSC_13_FONT_ID, codeLine.c_str());
+    const int qrSize = code.empty() ? 0 : 180;
+    const int qrGap = qrSize > 0 ? 18 : 0;
+    const int groupHeight = titleHeight + qrGap + qrSize + 24 + codeHeight;
+    const int groupY = contentBounds.y + (contentBounds.height - groupHeight) / 2;
+    UITheme::drawCenteredText(renderer, contentBounds, NOTOSANSSC_13_FONT_ID, groupY, title, true,
+                              EpdFontFamily::BOLD);
+    if (qrSize > 0) {
+      const Rect qrBounds{(width - qrSize) / 2, groupY + titleHeight + qrGap, qrSize, qrSize};
+      QrUtils::drawQrCode(renderer, qrBounds, "stockstick://bind?code=" + code);
+    }
+    UITheme::drawCenteredText(renderer, contentBounds, NOTOSANSSC_13_FONT_ID,
+                              groupY + titleHeight + qrGap + qrSize + 24, codeLine.c_str(), true,
+                              EpdFontFamily::BOLD);
+  } else if (!display.text.empty()) {
     const std::string bodyText = project_stick::stripWrappingQuotes(display.text);
-    const char* scenarioName = scenarioDisplayName(display.scenario);
+    const bool showScenario = preferences.showScenario && !minimalTheme && !largeTheme;
+    const char* scenarioName = showScenario ? scenarioDisplayName(display.scenario) : "";
     const int scenarioHeight =
         scenarioName[0] == '\0'
             ? 0
@@ -370,17 +398,24 @@ void ProjectStickActivity::render(RenderLock&&) {
             ? std::max(metrics.verticalSpacing,
                        tagHeight * GOLDEN_RATIO_DENOMINATOR / GOLDEN_RATIO_NUMERATOR)
             : 0;
-    const int maxBodyHeight = std::max(1, contentBounds.height - tagHeight - bodyTagGap);
-    const int bodyLineHeight =
-        renderer.getTextLineHeight(NOTOSANSSC_13_FONT_ID, bodyText.c_str());
-    const int bodyLineStep = bodyLineHeight + BODY_LINE_GAP;
+    const bool showTone = preferences.showTone && !display.tone.empty() && !minimalTheme && !largeTheme;
+    const int toneHeight = showTone ? renderer.getTextLineHeight(UI_10_FONT_ID, display.tone.c_str()) : 0;
+    const int toneGap = toneHeight > 0 ? metrics.verticalSpacing : 0;
+    const int maxBodyHeight =
+        std::max(1, contentBounds.height - tagHeight - bodyTagGap - toneHeight - toneGap);
+    const int bodyFont = preferences.textScale == "compact" || preferences.layout == "dense"
+                             ? NOTOSANSSC_12_FONT_ID
+                             : NOTOSANSSC_13_FONT_ID;
+    const int bodyLineHeight = renderer.getTextLineHeight(bodyFont, bodyText.c_str());
+    const int lineGap = largeTheme ? BODY_LINE_GAP + 5 : (informationTheme ? 2 : BODY_LINE_GAP);
+    const int bodyLineStep = bodyLineHeight + lineGap;
     const int maxBodyLines =
-        std::max(1, (maxBodyHeight + BODY_LINE_GAP) / bodyLineStep);
+        std::max(1, (maxBodyHeight + lineGap) / bodyLineStep);
     const auto lines =
-        renderer.wrappedCjkText(NOTOSANSSC_13_FONT_ID, bodyText.c_str(), contentBounds.width, maxBodyLines);
+        renderer.wrappedCjkText(bodyFont, bodyText.c_str(), contentBounds.width, maxBodyLines);
     const int bodyHeight =
-        lines.empty() ? 0 : static_cast<int>(lines.size()) * bodyLineStep - BODY_LINE_GAP;
-    const int groupHeight = bodyHeight + bodyTagGap + tagHeight;
+        lines.empty() ? 0 : static_cast<int>(lines.size()) * bodyLineStep - lineGap;
+    const int groupHeight = bodyHeight + bodyTagGap + tagHeight + toneGap + toneHeight;
     const int freeHeight = std::max(0, contentBounds.height - groupHeight);
     const int bodyY =
         contentBounds.y +
@@ -389,8 +424,13 @@ void ProjectStickActivity::render(RenderLock&&) {
     const Rect bodyBounds{contentBounds.x, bodyY, contentBounds.width, bodyHeight};
 
     int y = bodyY;
+    if (informationTheme) {
+      renderer.drawRoundedRect(contentBounds.x - 8, contentBounds.y - 8,
+                               contentBounds.width + 16, contentBounds.height + 16, 1, 8, true);
+    }
     for (const auto& line : lines) {
-      UITheme::drawCenteredText(renderer, bodyBounds, NOTOSANSSC_13_FONT_ID, y, line.c_str(), true);
+      UITheme::drawCenteredText(renderer, bodyBounds, bodyFont, y, line.c_str(), true,
+                                largeTheme ? EpdFontFamily::BOLD : EpdFontFamily::REGULAR);
       y += bodyLineStep;
     }
     if (scenarioHeight > 0) {
@@ -400,6 +440,11 @@ void ProjectStickActivity::render(RenderLock&&) {
       const Rect tagBounds{tagX, tagY, tagWidth, tagHeight};
       UITheme::drawCenteredText(renderer, tagBounds, NOTOSANSSC_12_FONT_ID,
                                 tagY + SCENARIO_TAG_VERTICAL_PADDING, scenarioName, true);
+    }
+    if (toneHeight > 0) {
+      const int toneY = bodyY + bodyHeight + bodyTagGap + tagHeight + toneGap;
+      UITheme::drawCenteredText(renderer, contentBounds, UI_10_FONT_ID, toneY,
+                                display.tone.c_str(), true);
     }
   } else {
     const bool showOfflineEmptyState = WiFi.status() != WL_CONNECTED && state == State::Offline;

@@ -265,6 +265,22 @@ TEST(ProjectStickStream, SelectsOneCopyUsingTwoStreamingPasses) {
   EXPECT_EQ(select.selected()->tone, "focused");
 }
 
+TEST(ProjectStickStream, AcceptsNegativeIdsForUserOwnedCopies) {
+  constexpr char json[] =
+      R"({"scenario":"market_open","copies":[{"id":-42,"text":"personal","weight":1,"tone":"personal"}]})";
+  const std::vector<int64_t> usedIds;
+  ContentStreamDecoder measure(ContentPassMode::MEASURE, usedIds);
+  measure.feed(json, sizeof(json) - 1);
+  ASSERT_TRUE(measure.finish());
+
+  ContentStreamDecoder select(ContentPassMode::SELECT_ALL, usedIds, 0);
+  select.feed(json, sizeof(json) - 1);
+  ASSERT_TRUE(select.finish());
+  ASSERT_NE(select.selected(), nullptr);
+  EXPECT_EQ(select.selected()->id, -42);
+  EXPECT_EQ(select.selected()->text, "personal");
+}
+
 TEST(ProjectStickStream, FallsBackToAllCopiesAfterEveryCopyWasUsed) {
   constexpr char json[] =
       R"({"scenario":"idle","copies":[{"id":1,"text":"one","weight":1},{"id":2,"text":"two","weight":3}]})";

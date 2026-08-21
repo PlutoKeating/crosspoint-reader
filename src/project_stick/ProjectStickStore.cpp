@@ -5,11 +5,21 @@
 
 void ProjectStickStore::toJson(JsonDocument& doc) const {
   doc["device_id"] = deviceId;
+  if (!deviceToken.empty()) doc["device_token"] = deviceToken;
+  if (!pairingCode.empty()) doc["pairing_code"] = pairingCode;
+  doc["bound"] = bound;
   doc["active_version"] = activeVersion;
   doc["previous_version"] = previousVersion;
   doc["poll_interval_seconds"] = pollIntervalSeconds;
   doc["alert_poll_interval_seconds"] = alertPollIntervalSeconds;
   doc["content_refresh_interval_seconds"] = contentRefreshIntervalSeconds;
+  doc["profile_revision"] = profileRevision;
+  doc["theme_id"] = themeId;
+  doc["text_scale"] = textScale;
+  doc["display_layout"] = displayLayout;
+  doc["show_scenario"] = showScenario;
+  doc["show_tone"] = showTone;
+  doc["show_sync_time"] = showSyncTime;
   doc["is_trading_day"] = tradingDay;
   doc["used_day"] = usedDay;
   if (rotationAnchor.valid) {
@@ -48,6 +58,9 @@ void ProjectStickStore::toJson(JsonDocument& doc) const {
 
 bool ProjectStickStore::fromJson(JsonVariantConst doc) {
   deviceId = doc["device_id"] | "";
+  deviceToken = std::string(doc["device_token"] | "").substr(0, 96);
+  pairingCode = std::string(doc["pairing_code"] | "").substr(0, 8);
+  bound = doc["bound"] | false;
   activeVersion = doc["active_version"] | 0;
   previousVersion = doc["previous_version"] | 0;
   pollIntervalSeconds = std::clamp<uint32_t>(doc["poll_interval_seconds"] | 300, 30, 86400);
@@ -55,6 +68,13 @@ bool ProjectStickStore::fromJson(JsonVariantConst doc) {
   const uint32_t refreshInterval = doc["content_refresh_interval_seconds"] | 600;
   contentRefreshIntervalSeconds =
       refreshInterval == 0 ? 0 : std::clamp<uint32_t>(refreshInterval, 60, 86400);
+  profileRevision = doc["profile_revision"] | 0;
+  themeId = std::string(doc["theme_id"] | "calm").substr(0, 16);
+  textScale = std::string(doc["text_scale"] | "standard").substr(0, 16);
+  displayLayout = std::string(doc["display_layout"] | "balanced").substr(0, 16);
+  showScenario = doc["show_scenario"] | true;
+  showTone = doc["show_tone"] | false;
+  showSyncTime = doc["show_sync_time"] | true;
   tradingDay = doc["is_trading_day"] | false;
   usedDay = doc["used_day"] | 0;
   rotationAnchor.day = doc["rotation_anchor_day"] | 0;

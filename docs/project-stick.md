@@ -12,7 +12,11 @@ multi-device feature.
    and explicit silent-restart targets retain their dedicated routes; holding
    Back during boot remains an escape hatch to the reader Home screen.
 2. The activity opens in offline mode immediately. Wi-Fi is optional; when it
-   is available the service registers the persistent UUID v4 device identity.
+   is available the service creates a persistent UUID v4 identity, obtains a
+   device bearer credential, and shows the short-lived binding code returned by
+   `/api/v2/device/pairing`. The bearer credential is persisted on SD but never
+   written to logs or rendered. After the mini program claims the code, the
+   service registers as the bound device.
 3. The manifest is streamed through a 512-byte parser and written to a
    temporary SD file. Its entries become a compact release snapshot under
    `/.crosspoint/project_stick/snapshots/<version>.idx`.
@@ -71,13 +75,25 @@ build_flags =
   -DPROJECT_STICK_BASE_URL=\"http://192.168.1.10:3000\"
 ```
 
-The HTTP API path prefix (`/api/v1/device`) is appended by the service.
+The authenticated HTTP API path prefix (`/api/v2/device`) is appended by the
+service. Existing firmware releases continue to use the anonymous v1 protocol;
+this firmware sends `Authorization: Bearer <device_token>` on register,
+manifest, Release, alert, and event requests. A device can read only the
+current Release belonging to its bound user.
 
 The active Release `config.json` supplies
 `display.content_refresh_interval_seconds`. Firmware without that field uses
 600 seconds. For fast desktop verification only, set
 `CROSSPOINT_SIM_CONTENT_REFRESH_SECONDS=5`; this also shortens the simulator's
 schedule/deadline check cadence to one second without changing production data.
+
+The same file supplies a finite display schema. Supported theme IDs are
+`calm`, `large`, `minimal`, and `information`; unknown values fall back to
+`calm`. `text_scale` accepts `compact`, `standard`, or `large`, and `layout`
+accepts `focused`, `balanced`, or `dense`. Scenario, tone, and synchronization
+metadata each have explicit visibility flags. The firmware never interprets
+arbitrary CSS or drawing instructions. These preferences are stored with the
+active Release so offline boots render the last synchronized theme.
 
 ## X3 controls
 
@@ -99,6 +115,9 @@ even when the reader shell is set to another locale.
 - Press the front-right button to re-evaluate the current schedule, select
   another copy, and, when online, check for a new release.
 - The front confirm button opens Wi-Fi selection; the front back button returns home.
+- Before binding, the content area shows a clear mini-program instruction and
+  the current eight-character code. The ordinary content UI appears as soon as
+  the next authenticated registration reports `bound=true`.
 
 ## Desktop simulator
 
