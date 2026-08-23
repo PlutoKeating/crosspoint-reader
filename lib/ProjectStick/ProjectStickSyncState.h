@@ -64,4 +64,8 @@ inline bool registrationDue(uint32_t nowMs, uint32_t lastSuccessMs,
   return lastSuccessMs == 0 || nowMs - lastSuccessMs >= intervalMs;
 }
 
+inline bool pairingFailureAllowsRegistration(int status) {
+  return status == 409;
+}
+
 }  // namespace project_stick

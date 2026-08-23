@@ -16,7 +16,10 @@ multi-device feature.
    device bearer credential, and shows the short-lived binding code returned by
    `/api/v2/device/pairing`. The bearer credential is persisted on SD but never
    written to logs or rendered. After the mini program claims the code, the
-   service registers as the bound device.
+   service registers as the bound device. If an older backend reports the
+   pairing as already claimed before local state has observed `bound=true`, the
+   firmware continues to authenticated registration instead of stopping at the
+   pairing response.
 3. The manifest is streamed through a 512-byte parser and written to a
    temporary SD file. Its entries become a compact release snapshot under
    `/.crosspoint/project_stick/snapshots/<version>.idx`.

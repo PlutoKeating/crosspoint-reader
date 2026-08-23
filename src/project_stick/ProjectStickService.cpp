@@ -318,8 +318,14 @@ bool ProjectStickService::registerDevice(int& status) {
     bound = PROJECT_STICK_STORE.bound;
   }
   if (!bound && !ensurePairing(status)) {
-    LOG_ERR("STICK", "Device pairing refresh failed (status=%d)", status);
-    return false;
+    if (!project_stick::pairingFailureAllowsRegistration(status)) {
+      LOG_ERR("STICK", "Device pairing refresh failed (status=%d)", status);
+      return false;
+    }
+    // The claim may already be committed on the server while this device
+    // still has bound=false on SD. Continue with the authenticated register
+    // request so the server can return the authoritative bound state.
+    LOG_INF("STICK", "Pairing already claimed; continuing registration");
   }
   JsonDocument request;
   {

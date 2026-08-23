@@ -69,6 +69,12 @@ TEST(ProjectStickSyncState, FailedRegistrationRemainsDueAtTheNextPoll) {
   EXPECT_TRUE(registrationDue(4UL * 60UL * 60UL * 1000UL + 1, 1));
 }
 
+TEST(ProjectStickSyncState, AlreadyBoundPairingResponseStillProceedsToRegistration) {
+  EXPECT_TRUE(pairingFailureAllowsRegistration(409));
+  EXPECT_FALSE(pairingFailureAllowsRegistration(401));
+  EXPECT_FALSE(pairingFailureAllowsRegistration(500));
+}
+
 TEST(ProjectStickSyncState, NoPublishedContentRequiresNoActiveRelease) {
   EXPECT_EQ(contentSelectionFailureResult(0), SyncResult::NoContent);
   EXPECT_EQ(contentSelectionFailureResult(2), SyncResult::Failed);
