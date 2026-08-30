@@ -54,6 +54,15 @@ constexpr size_t MAX_RELEASE_PATH = 192;
 constexpr uint32_t PARSER_MIN_FREE_HEAP = 12 * 1024;
 constexpr uint32_t PARSER_MIN_MAX_BLOCK = 4 * 1024;
 
+class HttpBurst {
+ public:
+  explicit HttpBurst(freeink::SecureHttpClient& client) : client(client) {}
+  ~HttpBurst() { client.end(); }
+
+ private:
+  freeink::SecureHttpClient& client;
+};
+
 bool equalsIgnoreCase(const std::string& left, const std::string& right) {
   if (left.size() != right.size()) return false;
   for (size_t i = 0; i < left.size(); ++i) {
@@ -184,6 +193,12 @@ class JsonObjectValidator {
 void ProjectStickService::begin() {
   baseUrl = PROJECT_STICK_BASE_URL;
   while (!baseUrl.empty() && baseUrl.back() == '/') baseUrl.pop_back();
+  http.setTimeout(HTTP_TIMEOUT_MS);
+  http.setInsecure();
+#ifndef SIMULATOR
+  http.setUserAgent("Project.Stick-CrossPoint-" CROSSPOINT_VERSION);
+  http.setFollowRedirects(3);
+#endif
   ProjectStickStateLock lock(projectStickStateMutex);
   if (!projectStickStoreInitialized) {
     PROJECT_STICK_STORE.loadFromFile();
@@ -224,6 +239,8 @@ bool ProjectStickService::ensureIdentity() {
 }
 
 ProjectStickService::SyncReport ProjectStickService::sync(bool registerFirst, bool refreshDisplay) {
+  HttpBurst burst(http);
+  const uint32_t syncStartedMs = millis();
   SyncReport report;
   inactive = false;
   {
@@ -257,7 +274,6 @@ ProjectStickService::SyncReport ProjectStickService::sync(bool registerFirst, bo
     }
   }
 
-  flushEvents();
   report.manifestAttempted = true;
   report.result = syncManifest();
   report.manifestCompleted =
@@ -275,8 +291,13 @@ ProjectStickService::SyncReport ProjectStickService::sync(bool registerFirst, bo
     // failure, not evidence that the server has no published release.
     report.result = SyncResult::Failed;
   }
-  if (report.manifestCompleted && currentDisplay.copyId != 0) flushEvents();
+  // Do not put telemetry on the critical path to fresh content. Events that
+  // were already queued and events produced by activation/display selection
+  // are uploaded together after the manifest and objects are complete.
+  flushEvents();
   if (report.manifestCompleted) report.synchronizedAt = now();
+  LOG_INF("STICK", "Sync finished (result=%u total=%ums)",
+          static_cast<unsigned>(report.result), (unsigned)(millis() - syncStartedMs));
   return report;
 }
 
@@ -495,7 +516,6 @@ ProjectStickService::SyncResult ProjectStickService::syncManifest() {
   scheduleCacheVersion = 0;
   cleanupReleaseStorage();
   queueEvent("sync_completed", "", 0);
-  flushEvents();
   LOG_INF("STICK", "Release %u synchronized and activated", (unsigned)version);
   return SyncResult::Updated;
 }
@@ -580,6 +600,7 @@ bool ProjectStickService::downloadObject(uint32_t version, const project_stick::
                           "?device_id=" + deviceId;
   LOG_INF("STICK", "Downloading %s (%u bytes)", file.path.c_str(), (unsigned)file.size);
   for (uint8_t attempt = 0; attempt < 3; ++attempt) {
+    const uint32_t attemptStartedMs = millis();
     Storage.remove(temporary.c_str());
     HalFile output;
     if (!Storage.openFileForWrite("STICK", temporary, output)) return false;
@@ -606,7 +627,8 @@ bool ProjectStickService::downloadObject(uint32_t version, const project_stick::
     if (fetched && received == file.size && equalsIgnoreCase(hex, file.sha256)) {
       Storage.remove(destination.c_str());
       if (Storage.rename(temporary.c_str(), destination.c_str())) {
-        LOG_INF("STICK", "Stored %s", file.path.c_str());
+        LOG_INF("STICK", "Stored %s (%ums)", file.path.c_str(),
+                (unsigned)(millis() - attemptStartedMs));
         return true;
       }
     }
@@ -868,6 +890,7 @@ bool ProjectStickService::pollAlerts() {
 #endif
   if (!eligible) return false;
 
+  HttpBurst burst(http);
   std::string response;
   const std::string url = baseUrl + "/api/v2/device/alerts?device_id=" + deviceId;
   if (!fetchJson(url, response, MAX_ALERT_BYTES)) return false;
@@ -918,7 +941,10 @@ void ProjectStickService::sendFeedback(bool useful, bool canSend) {
       PROJECT_STICK_STORE.saveToFile();
     }
   }
-  if (canSend) flushEvents();
+  if (canSend) {
+    flushEvents();
+    http.end();
+  }
 }
 
 void ProjectStickService::queueManualRefresh() {
@@ -932,7 +958,10 @@ bool ProjectStickService::sendManualRefresh(bool canSend) {
     queueManualRefresh();
     selected = refreshScheduledContent();
   }
-  if (canSend) flushEvents();
+  if (canSend) {
+    flushEvents();
+    http.end();
+  }
   return selected;
 }
 
@@ -998,6 +1027,7 @@ bool ProjectStickService::requestPost(const std::string& path, const std::string
   }
 #endif
   for (uint8_t attempt = 0; attempt < 3; ++attempt) {
+    const uint32_t attemptStartedMs = millis();
 #ifndef SIMULATOR
     LOG_INF("STICK", "POST %s attempt %u/3 (heap=%u max=%u)", path.c_str(),
             (unsigned)attempt + 1, (unsigned)ESP.getFreeHeap(),
@@ -1005,13 +1035,6 @@ bool ProjectStickService::requestPost(const std::string& path, const std::string
 #else
     LOG_INF("STICK", "POST %s attempt %u/3 (simulator OpenSSL)", path.c_str(),
             (unsigned)attempt + 1);
-#endif
-    freeink::SecureHttpClient http;
-    http.setTimeout(HTTP_TIMEOUT_MS);
-    http.setInsecure();
-#ifndef SIMULATOR
-    http.setUserAgent("Project.Stick-CrossPoint-" CROSSPOINT_VERSION);
-    http.setFollowRedirects(3);
 #endif
     if (!http.begin(baseUrl + path)) {
       LOG_ERR("STICK", "POST %s has an invalid URL", path.c_str());
@@ -1033,10 +1056,9 @@ bool ProjectStickService::requestPost(const std::string& path, const std::string
 #else
     const bool complete = http.responseComplete();
 #endif
-    http.end();
     if (status > 0 && complete && status < 500) {
-      LOG_INF("STICK", "POST %s completed (status=%d bytes=%u)", path.c_str(),
-              status, (unsigned)response.size());
+      LOG_INF("STICK", "POST %s completed (status=%d bytes=%u time=%ums)", path.c_str(),
+              status, (unsigned)response.size(), (unsigned)(millis() - attemptStartedMs));
       return true;
     }
     LOG_ERR("STICK", "POST %s failed (status=%d complete=%u bytes=%u)",
@@ -1092,16 +1114,9 @@ bool ProjectStickService::fetchAuthenticated(
     deviceToken = PROJECT_STICK_STORE.deviceToken;
   }
   if (deviceToken.empty()) return HttpDownloader::fetchUrl(url, onData);
-  freeink::SecureHttpClient http;
-  http.setTimeout(HTTP_TIMEOUT_MS);
-  http.setInsecure();
-#ifndef SIMULATOR
-  http.setUserAgent("Project.Stick-CrossPoint-" CROSSPOINT_VERSION);
-  http.setFollowRedirects(3);
-#endif
   if (!http.begin(url)) return false;
   http.addHeader("Authorization", "Bearer " + deviceToken);
-  const int status = http.GET([&http, &onData](const uint8_t* data, size_t length) {
+  const int status = http.GET([this, &onData](const uint8_t* data, size_t length) {
     if (http.getStatus() != 200) return true;
     return onData(data, length);
   });
@@ -1111,7 +1126,6 @@ bool ProjectStickService::fetchAuthenticated(
   const bool complete = http.responseComplete();
 #endif
   const bool success = status == 200 && complete && !http.callbackAborted();
-  http.end();
   return success;
 }
 

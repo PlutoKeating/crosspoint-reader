@@ -2,7 +2,9 @@
 
 > This checkout includes the private Project.Stick integration: authenticated
 > mini-program device binding, per-user v2 Release synchronization, and four
-> e-ink display presets. See [docs/project-stick.md](docs/project-stick.md).
+> e-ink display presets. X3 builds also provide a global 20-second button
+> keyguard and reuse one TLS connection for each cloud synchronization burst.
+> See [docs/project-stick.md](docs/project-stick.md).
 
 [![Fund contributors](https://img.shields.io/badge/%F0%9F%91%91_Fund_contributors-royalty.dev-BB953A?style=for-the-badge&labelColor=1a1a1a)](https://app.royalty.dev/crosspoint-reader/crosspoint-reader)
 

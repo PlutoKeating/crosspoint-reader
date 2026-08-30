@@ -23,7 +23,10 @@ multi-device feature.
 3. The manifest is streamed through a 512-byte parser and written to a
    temporary SD file. Its entries become a compact release snapshot under
    `/.crosspoint/project_stick/snapshots/<version>.idx`.
-4. Release files are processed serially. Each SHA-256 object is stored once at
+4. Register, manifest, changed Release files, and the final event batch reuse
+   one HTTP keep-alive/TLS connection for the synchronization burst. Release
+   files remain serial to respect the ESP32-C3 memory ceiling. Each SHA-256
+   object is stored once at
    `/.crosspoint/project_stick/objects/<sha256>.json`; an already verified SHA
    is reused without another download. Changed objects stream directly to a
    temporary SD file while their byte count and SHA-256 are checked.
@@ -38,7 +41,10 @@ multi-device feature.
    selection, and the foreground clock adopts the Shanghai server time returned
    by each completed background synchronization.
 7. Events are persisted in the same state file and retried after connectivity
-   returns.
+   returns. Pending telemetry does not delay manifest or Release activation:
+   the service combines old and newly produced events into one batch after the
+   content-critical path completes. The TLS connection is then closed so its
+   runtime memory is not retained between polling bursts.
 
 Content rotation is local and independent from manifest polling. The active
 Release's display snapshot, alert expiry, and rotation anchor are persisted as
@@ -105,6 +111,18 @@ labels, synchronization timestamp, and feedback confirmations intentionally use
 the English fallback catalogue so the required Chinese wording remains stable
 even when the reader shell is set to another locale.
 
+- The four protruding front buttons are protected by a global X3 keyguard in
+  every activity. After 20 seconds without button or touch activity, the screen
+  switches to `按键已锁定` and all non-power button events are suppressed.
+- Unlocking follows the Nokia-style physical sequence: release the left side
+  button, then release the right side button. The first step is drawn as
+  completed and the instruction changes to `左侧键已确认，再按右侧边键`.
+  Right-first does nothing; a front-button press during an incomplete sequence
+  resets it to the left step. The right-side release that unlocks is consumed,
+  so it never leaks through as `feedback_useful`. The power button remains
+  available while locked, and cloud synchronization continues in the
+  background.
+
 - Release the left side button (`Up`) to send `feedback_meh`, show a left-origin
   white confirmation box with a thin black rounded outline, and immediately
   select another unused copy from the currently active schedule window.
@@ -148,7 +166,9 @@ CROSSPOINT_SIM_CONTENT_REFRESH_SECONDS=5 pio run -e simulator -t run_simulator
 - Content is read in two 512-byte streaming passes: the first measures weights
   without retaining text, and the second retains only the selected copy.
 - Every HTTP GET completes before the next begins. Manifest, schedule, config,
-  and content downloads therefore never hold two network links concurrently.
+  and content downloads therefore never hold two network links concurrently;
+  completed responses reuse the same clean keep-alive connection during one
+  sync burst to avoid repeated TLS handshakes.
 - Release downloads stream directly to SD; copy/hash helpers use a 1 KiB heap
   buffer. Manifest entries, content copies, used IDs, seen alerts, and pending
   events all have explicit caps.

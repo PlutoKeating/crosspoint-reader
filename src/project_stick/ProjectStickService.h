@@ -3,6 +3,7 @@
 #include <ProjectStickCore.h>
 #include <ProjectStickSyncState.h>
 #include <ProjectStickStream.h>
+#include <SecureHttpClient.h>
 
 #include <cstdint>
 #include <functional>
@@ -66,6 +67,9 @@ class ProjectStickService {
   bool inactive = false;
   std::vector<project_stick::ScheduleWindow> scheduleCache;
   uint32_t scheduleCacheVersion = 0;
+  // One client per service keeps the Cloudflare TLS connection alive across
+  // register, manifest, object, and event requests in the same sync burst.
+  freeink::SecureHttpClient http;
 
   bool ensureIdentity();
   bool ensurePairing(int& status);
