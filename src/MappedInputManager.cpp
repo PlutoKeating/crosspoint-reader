@@ -17,7 +17,37 @@ bool MappedInputManager::isNavDirectionSwapped() const {
          (orientation == GfxRenderer::PortraitInverted || orientation == GfxRenderer::LandscapeCounterClockwise);
 }
 
+bool MappedInputManager::updateKeyguard(const uint32_t nowMs) {
+  suppressButtonsThisFrame = false;
+  if (!gpio.deviceIsX3()) return false;
+  if (!keyguardStarted) {
+    keyguard.begin(nowMs);
+    keyguardStarted = true;
+  }
+
+  if (!keyguard.locked()) {
+    const bool activity = gpio.wasAnyPressed() || gpio.wasAnyReleased() || gpio.wasTouchActivity();
+    return keyguard.update(nowMs, activity ? project_stick::Keyguard::Input::Activity
+                                           : project_stick::Keyguard::Input::None);
+  }
+
+  project_stick::Keyguard::Input input = project_stick::Keyguard::Input::None;
+  if (gpio.wasReleased(HalGPIO::BTN_UP)) {
+    input = project_stick::Keyguard::Input::LeftSide;
+  } else if (gpio.wasReleased(HalGPIO::BTN_DOWN)) {
+    input = project_stick::Keyguard::Input::RightSide;
+  } else if (gpio.wasPressed(HalGPIO::BTN_BACK) || gpio.wasPressed(HalGPIO::BTN_CONFIRM) ||
+             gpio.wasPressed(HalGPIO::BTN_LEFT) || gpio.wasPressed(HalGPIO::BTN_RIGHT) ||
+             gpio.wasReleased(HalGPIO::BTN_BACK) || gpio.wasReleased(HalGPIO::BTN_CONFIRM) ||
+             gpio.wasReleased(HalGPIO::BTN_LEFT) || gpio.wasReleased(HalGPIO::BTN_RIGHT)) {
+    input = project_stick::Keyguard::Input::OtherButton;
+  }
+  suppressButtonsThisFrame = input != project_stick::Keyguard::Input::None;
+  return keyguard.update(nowMs, input);
+}
+
 bool MappedInputManager::mapButton(const Button button, bool (HalGPIO::*fn)(uint8_t) const) const {
+  if (button != Button::Power && (keyguard.locked() || suppressButtonsThisFrame)) return false;
   const auto sideLayout = SETTINGS.sideButtonLayout;
 
   switch (button) {
@@ -284,9 +314,15 @@ bool MappedInputManager::wasReleased(const Button button) const {
 
 bool MappedInputManager::isPressed(const Button button) const { return mapButton(button, &HalGPIO::isPressed); }
 
-bool MappedInputManager::wasAnyPressed() const { return gpio.wasAnyPressed(); }
+bool MappedInputManager::wasAnyPressed() const {
+  if (keyguard.locked() || suppressButtonsThisFrame) return gpio.wasPressed(HalGPIO::BTN_POWER);
+  return gpio.wasAnyPressed();
+}
 
-bool MappedInputManager::wasAnyReleased() const { return gpio.wasAnyReleased(); }
+bool MappedInputManager::wasAnyReleased() const {
+  if (keyguard.locked() || suppressButtonsThisFrame) return gpio.wasReleased(HalGPIO::BTN_POWER);
+  return gpio.wasAnyReleased();
+}
 
 unsigned long MappedInputManager::getHeldTime() const {
   if (!gpio.wasAnyPressed() && !gpio.wasAnyReleased() && touchHeldOverrideValid &&
@@ -327,6 +363,7 @@ MappedInputManager::Labels MappedInputManager::mapLabels(const char* back, const
 }
 
 int MappedInputManager::getPressedFrontButton() const {
+  if (keyguard.locked() || suppressButtonsThisFrame) return -1;
   // Scan the raw front buttons in hardware order.
   // This bypasses remapping so the remap activity can capture physical presses.
   if (gpio.wasPressed(HalGPIO::BTN_BACK)) {

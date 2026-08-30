@@ -7,6 +7,8 @@
 #include <algorithm>
 
 #include "OpdsServerStore.h"
+#include "components/UITheme.h"
+#include "fontIds.h"
 #include "boot_sleep/BootActivity.h"
 #include "boot_sleep/SleepActivity.h"
 #include "browser/OpdsBookBrowserActivity.h"
@@ -50,7 +52,10 @@ void ActivityManager::renderTaskLoop() {
     // Acquire the lock before reading currentActivity to avoid a TOCTOU race
     // where the main task deletes the activity between the null-check and render().
     RenderLock lock;
-    if (currentActivity) {
+    if (mappedInput.isKeyguardLocked()) {
+      HalPowerManager::Lock powerLock;
+      renderKeyguard(std::move(lock));
+    } else if (currentActivity) {
       HalPowerManager::Lock powerLock;  // Ensure we don't go into low-power mode while rendering
       currentActivity->render(std::move(lock));
     }
@@ -64,6 +69,67 @@ void ActivityManager::renderTaskLoop() {
       xTaskNotify(waiter, 1, eIncrement);
     }
   }
+}
+
+void ActivityManager::renderKeyguard(RenderLock&&) {
+  const int width = renderer.getScreenWidth();
+  const int height = renderer.getScreenHeight();
+  const bool leftCompleted =
+      mappedInput.keyguardState() == project_stick::Keyguard::State::AwaitRight;
+  renderer.clearScreen();
+
+  constexpr int lockWidth = 72;
+  constexpr int lockBodyHeight = 58;
+  constexpr int lockXOffset = lockWidth / 2;
+  const int lockX = width / 2 - lockXOffset;
+  const int lockY = height / 2 - 170;
+  renderer.drawRoundedRect(lockX + 15, lockY, lockWidth - 30, 50, 4, 21, true);
+  renderer.fillRoundedRect(lockX, lockY + 32, lockWidth, lockBodyHeight, 8, Color::Black);
+  renderer.fillRect(width / 2 - 4, lockY + 52, 8, 20, false);
+  renderer.fillRoundedRect(width / 2 - 7, lockY + 47, 14, 14, 7, Color::White);
+
+  const Rect page{36, 0, width - 72, height};
+  UITheme::drawCenteredText(renderer, page, NOTOSANSSC_13_FONT_ID, lockY + 118,
+                            "按键已锁定", true, EpdFontFamily::BOLD);
+  UITheme::drawCenteredText(renderer, page, NOTOSANSSC_12_FONT_ID, lockY + 166,
+                            leftCompleted ? "左侧键已确认，再按右侧边键"
+                                          : "先按左侧边键，再按右侧边键",
+                            true);
+
+  constexpr int stepWidth = 94;
+  constexpr int stepHeight = 58;
+  constexpr int stepGap = 62;
+  const int stepsWidth = stepWidth * 2 + stepGap;
+  const int stepsX = (width - stepsWidth) / 2;
+  const int stepsY = lockY + 220;
+  if (leftCompleted) {
+    renderer.fillRoundedRect(stepsX, stepsY, stepWidth, stepHeight, 10, Color::Black);
+    const Rect leftStep{stepsX, stepsY, stepWidth, stepHeight};
+    UITheme::drawCenteredText(renderer, leftStep, NOTOSANSSC_13_FONT_ID, stepsY + 13,
+                              "1  左", false, EpdFontFamily::BOLD);
+  } else {
+    renderer.drawRoundedRect(stepsX, stepsY, stepWidth, stepHeight, 3, 10, true);
+    const Rect leftStep{stepsX, stepsY, stepWidth, stepHeight};
+    UITheme::drawCenteredText(renderer, leftStep, NOTOSANSSC_13_FONT_ID, stepsY + 13,
+                              "1  左", true, EpdFontFamily::BOLD);
+  }
+  renderer.drawLine(stepsX + stepWidth + 12, stepsY + stepHeight / 2,
+                    stepsX + stepWidth + stepGap - 12, stepsY + stepHeight / 2, 2, true);
+  renderer.drawLine(stepsX + stepWidth + stepGap - 23, stepsY + stepHeight / 2 - 10,
+                    stepsX + stepWidth + stepGap - 12, stepsY + stepHeight / 2, 2, true);
+  renderer.drawLine(stepsX + stepWidth + stepGap - 23, stepsY + stepHeight / 2 + 10,
+                    stepsX + stepWidth + stepGap - 12, stepsY + stepHeight / 2, 2, true);
+  renderer.drawRoundedRect(stepsX + stepWidth + stepGap, stepsY, stepWidth, stepHeight,
+                           leftCompleted ? 3 : 1, 10, true);
+  const Rect rightStep{stepsX + stepWidth + stepGap, stepsY, stepWidth, stepHeight};
+  UITheme::drawCenteredText(renderer, rightStep, NOTOSANSSC_13_FONT_ID, stepsY + 13,
+                            "2  右", true, EpdFontFamily::BOLD);
+
+  UITheme::drawCenteredText(renderer, page, UI_10_FONT_ID, height - 82,
+                            "20 秒无操作后自动锁定", true);
+  UITheme::drawCenteredText(renderer, page, UI_10_FONT_ID, height - 50,
+                            "电源键仍可使用", true);
+  renderer.displayBuffer();
 }
 
 void ActivityManager::loop() {

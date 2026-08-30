@@ -1,10 +1,48 @@
 #include <gtest/gtest.h>
 
 #include "ProjectStickCore.h"
+#include "ProjectStickKeyguard.h"
 #include "ProjectStickSyncState.h"
 #include "ProjectStickStream.h"
 
 using namespace project_stick;
+
+TEST(ProjectStickKeyguard, LocksAfterTwentySecondsOfInactivity) {
+  Keyguard keyguard;
+  keyguard.begin(1000);
+  EXPECT_FALSE(keyguard.update(20999));
+  EXPECT_TRUE(keyguard.update(21000));
+  EXPECT_EQ(keyguard.state(), Keyguard::State::AwaitLeft);
+}
+
+TEST(ProjectStickKeyguard, ActivityRestartsTheInactivityWindow) {
+  Keyguard keyguard;
+  keyguard.begin(0);
+  EXPECT_FALSE(keyguard.update(19000, Keyguard::Input::Activity));
+  EXPECT_FALSE(keyguard.update(38999));
+  EXPECT_TRUE(keyguard.update(39000));
+}
+
+TEST(ProjectStickKeyguard, UnlockRequiresLeftThenRight) {
+  Keyguard keyguard;
+  keyguard.begin(0);
+  ASSERT_TRUE(keyguard.update(Keyguard::LOCK_AFTER_MS));
+  EXPECT_FALSE(keyguard.update(21000, Keyguard::Input::RightSide));
+  EXPECT_TRUE(keyguard.locked());
+  EXPECT_TRUE(keyguard.update(22000, Keyguard::Input::LeftSide));
+  EXPECT_EQ(keyguard.state(), Keyguard::State::AwaitRight);
+  EXPECT_TRUE(keyguard.update(23000, Keyguard::Input::RightSide));
+  EXPECT_FALSE(keyguard.locked());
+}
+
+TEST(ProjectStickKeyguard, FrontButtonRestartsAnIncompleteUnlock) {
+  Keyguard keyguard;
+  keyguard.begin(0);
+  ASSERT_TRUE(keyguard.update(Keyguard::LOCK_AFTER_MS));
+  ASSERT_TRUE(keyguard.update(21000, Keyguard::Input::LeftSide));
+  EXPECT_TRUE(keyguard.update(22000, Keyguard::Input::OtherButton));
+  EXPECT_EQ(keyguard.state(), Keyguard::State::AwaitLeft);
+}
 
 TEST(ProjectStickSyncState, FailedFirstSyncDoesNotRecordCompletedStages) {
   const SyncReport failed{
