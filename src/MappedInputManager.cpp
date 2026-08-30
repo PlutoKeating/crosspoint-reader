@@ -27,8 +27,10 @@ bool MappedInputManager::updateKeyguard(const uint32_t nowMs) {
 
   if (!keyguard.locked()) {
     const bool activity = gpio.wasAnyPressed() || gpio.wasAnyReleased() || gpio.wasTouchActivity();
-    return keyguard.update(nowMs, activity ? project_stick::Keyguard::Input::Activity
-                                           : project_stick::Keyguard::Input::None);
+    const bool changed = keyguard.update(nowMs, activity ? project_stick::Keyguard::Input::Activity
+                                                         : project_stick::Keyguard::Input::None);
+    publishedKeyguardState.store(keyguard.state(), std::memory_order_release);
+    return changed;
   }
 
   project_stick::Keyguard::Input input = project_stick::Keyguard::Input::None;
@@ -43,7 +45,9 @@ bool MappedInputManager::updateKeyguard(const uint32_t nowMs) {
     input = project_stick::Keyguard::Input::OtherButton;
   }
   suppressButtonsThisFrame = input != project_stick::Keyguard::Input::None;
-  return keyguard.update(nowMs, input);
+  const bool changed = keyguard.update(nowMs, input);
+  publishedKeyguardState.store(keyguard.state(), std::memory_order_release);
+  return changed;
 }
 
 bool MappedInputManager::mapButton(const Button button, bool (HalGPIO::*fn)(uint8_t) const) const {

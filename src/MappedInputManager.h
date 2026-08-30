@@ -2,6 +2,8 @@
 
 #include <HalGPIO.h>
 
+#include <atomic>
+
 #include "ProjectStickKeyguard.h"
 
 class GfxRenderer;
@@ -24,8 +26,13 @@ class MappedInputManager {
   // Advances the X3-wide Nokia-style keyguard after HalGPIO::update(). Returns
   // true when the lock screen needs repainting.
   bool updateKeyguard(uint32_t nowMs);
-  bool isKeyguardLocked() const { return keyguard.locked(); }
-  project_stick::Keyguard::State keyguardState() const { return keyguard.state(); }
+  bool isKeyguardLocked() const {
+    return publishedKeyguardState.load(std::memory_order_acquire) !=
+           project_stick::Keyguard::State::Unlocked;
+  }
+  project_stick::Keyguard::State keyguardState() const {
+    return publishedKeyguardState.load(std::memory_order_acquire);
+  }
   bool wasPressed(Button button) const;
   bool wasReleased(Button button) const;
   bool isPressed(Button button) const;
@@ -89,6 +96,8 @@ class MappedInputManager {
   mutable unsigned long touchHeldOverrideMs = 0;
   mutable unsigned long touchHeldOverrideAt = 0;
   project_stick::Keyguard keyguard;
+  std::atomic<project_stick::Keyguard::State> publishedKeyguardState{
+      project_stick::Keyguard::State::Unlocked};
   bool keyguardStarted = false;
   bool suppressButtonsThisFrame = false;
 };
