@@ -5,12 +5,11 @@ is outside upstream CrossPoint's temporarily closed scope. Project.Stick targets
 the Xteink X3 (ESP32-C3, no PSRAM) only; it is not proposed as an upstream
 multi-device feature.
 
-The current production firmware release is `1.5.0-project-stick.10`. It
-introduced the X3-wide 20-second physical-button keyguard and reduced cloud
-synchronization latency by reusing one TLS connection per synchronization
-burst. The current development baseline refines that keyguard into the
-non-destructive overlay behavior described below; it is not part of `.10`.
-Release binaries are built with the version string from `platformio.ini`.
+The current production firmware release is `1.5.0-project-stick.11`. It keeps
+the X3-wide 20-second physical-button keyguard and TLS connection reuse from
+`.10`, while refining the keyguard into the non-destructive overlay behavior
+described below. Release binaries are built with the version string from
+`platformio.ini`.
 
 ## Runtime flow
 

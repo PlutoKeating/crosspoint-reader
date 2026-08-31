@@ -5,7 +5,7 @@
 > e-ink display presets. X3 builds also provide a global 20-second button
 > keyguard and reuse one TLS connection for each cloud synchronization burst.
 > See [docs/project-stick.md](docs/project-stick.md).
-> The current Project.Stick firmware release is `1.5.0-project-stick.10`.
+> The current Project.Stick firmware release is `1.5.0-project-stick.11`.
 
 [![Fund contributors](https://img.shields.io/badge/%F0%9F%91%91_Fund_contributors-royalty.dev-BB953A?style=for-the-badge&labelColor=1a1a1a)](https://app.royalty.dev/crosspoint-reader/crosspoint-reader)
 
