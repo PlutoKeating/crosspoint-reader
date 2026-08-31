@@ -30,23 +30,29 @@ bool MappedInputManager::updateKeyguard(const uint32_t nowMs) {
     const bool changed = keyguard.update(nowMs, activity ? project_stick::Keyguard::Input::Activity
                                                          : project_stick::Keyguard::Input::None);
     publishedKeyguardState.store(keyguard.state(), std::memory_order_release);
+    publishedKeyguardPromptVisible.store(keyguard.promptVisible(), std::memory_order_release);
     return changed;
   }
 
   project_stick::Keyguard::Input input = project_stick::Keyguard::Input::None;
-  if (gpio.wasReleased(HalGPIO::BTN_UP)) {
+  if (gpio.wasPressed(HalGPIO::BTN_BACK) || gpio.wasPressed(HalGPIO::BTN_CONFIRM) ||
+      gpio.wasPressed(HalGPIO::BTN_LEFT) || gpio.wasPressed(HalGPIO::BTN_RIGHT) ||
+      gpio.wasReleased(HalGPIO::BTN_BACK) || gpio.wasReleased(HalGPIO::BTN_CONFIRM) ||
+      gpio.wasReleased(HalGPIO::BTN_LEFT) || gpio.wasReleased(HalGPIO::BTN_RIGHT)) {
+    input = project_stick::Keyguard::Input::OtherButton;
+  } else if (gpio.wasReleased(HalGPIO::BTN_UP)) {
     input = project_stick::Keyguard::Input::LeftSide;
   } else if (gpio.wasReleased(HalGPIO::BTN_DOWN)) {
     input = project_stick::Keyguard::Input::RightSide;
-  } else if (gpio.wasPressed(HalGPIO::BTN_BACK) || gpio.wasPressed(HalGPIO::BTN_CONFIRM) ||
-             gpio.wasPressed(HalGPIO::BTN_LEFT) || gpio.wasPressed(HalGPIO::BTN_RIGHT) ||
-             gpio.wasReleased(HalGPIO::BTN_BACK) || gpio.wasReleased(HalGPIO::BTN_CONFIRM) ||
-             gpio.wasReleased(HalGPIO::BTN_LEFT) || gpio.wasReleased(HalGPIO::BTN_RIGHT)) {
-    input = project_stick::Keyguard::Input::OtherButton;
+  } else if (gpio.wasPressed(HalGPIO::BTN_UP) || gpio.wasPressed(HalGPIO::BTN_DOWN)) {
+    // Side-button sequencing is release-based so the unlock edge cannot leak
+    // into the foreground activity. The press edge only reveals the guide.
+    input = project_stick::Keyguard::Input::ButtonActivity;
   }
   suppressButtonsThisFrame = input != project_stick::Keyguard::Input::None;
   const bool changed = keyguard.update(nowMs, input);
   publishedKeyguardState.store(keyguard.state(), std::memory_order_release);
+  publishedKeyguardPromptVisible.store(keyguard.promptVisible(), std::memory_order_release);
   return changed;
 }
 

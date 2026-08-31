@@ -24,7 +24,7 @@ class MappedInputManager {
 
   void update() const { gpio.update(); }
   // Advances the X3-wide Nokia-style keyguard after HalGPIO::update(). Returns
-  // true when the lock screen needs repainting.
+  // true when its non-destructive overlays need repainting.
   bool updateKeyguard(uint32_t nowMs);
   bool isKeyguardLocked() const {
     return publishedKeyguardState.load(std::memory_order_acquire) !=
@@ -32,6 +32,9 @@ class MappedInputManager {
   }
   project_stick::Keyguard::State keyguardState() const {
     return publishedKeyguardState.load(std::memory_order_acquire);
+  }
+  bool isKeyguardPromptVisible() const {
+    return publishedKeyguardPromptVisible.load(std::memory_order_acquire);
   }
   bool wasPressed(Button button) const;
   bool wasReleased(Button button) const;
@@ -98,6 +101,7 @@ class MappedInputManager {
   project_stick::Keyguard keyguard;
   std::atomic<project_stick::Keyguard::State> publishedKeyguardState{
       project_stick::Keyguard::State::Unlocked};
+  std::atomic<bool> publishedKeyguardPromptVisible{false};
   bool keyguardStarted = false;
   bool suppressButtonsThisFrame = false;
 };

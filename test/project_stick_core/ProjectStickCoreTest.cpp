@@ -13,6 +13,19 @@ TEST(ProjectStickKeyguard, LocksAfterTwentySecondsOfInactivity) {
   EXPECT_FALSE(keyguard.update(20999));
   EXPECT_TRUE(keyguard.update(21000));
   EXPECT_EQ(keyguard.state(), Keyguard::State::AwaitLeft);
+  EXPECT_FALSE(keyguard.promptVisible());
+}
+
+TEST(ProjectStickKeyguard, RevealsUnlockPromptOnlyAfterAButtonInteraction) {
+  Keyguard keyguard;
+  keyguard.begin(0);
+  ASSERT_TRUE(keyguard.update(Keyguard::LOCK_AFTER_MS));
+  EXPECT_FALSE(keyguard.promptVisible());
+
+  EXPECT_TRUE(keyguard.update(21000, Keyguard::Input::ButtonActivity));
+  EXPECT_TRUE(keyguard.promptVisible());
+  EXPECT_EQ(keyguard.state(), Keyguard::State::AwaitLeft);
+  EXPECT_FALSE(keyguard.update(22000));
 }
 
 TEST(ProjectStickKeyguard, ActivityRestartsTheInactivityWindow) {
@@ -27,12 +40,14 @@ TEST(ProjectStickKeyguard, UnlockRequiresLeftThenRight) {
   Keyguard keyguard;
   keyguard.begin(0);
   ASSERT_TRUE(keyguard.update(Keyguard::LOCK_AFTER_MS));
-  EXPECT_FALSE(keyguard.update(21000, Keyguard::Input::RightSide));
+  EXPECT_TRUE(keyguard.update(21000, Keyguard::Input::RightSide));
   EXPECT_TRUE(keyguard.locked());
+  EXPECT_TRUE(keyguard.promptVisible());
   EXPECT_TRUE(keyguard.update(22000, Keyguard::Input::LeftSide));
   EXPECT_EQ(keyguard.state(), Keyguard::State::AwaitRight);
   EXPECT_TRUE(keyguard.update(23000, Keyguard::Input::RightSide));
   EXPECT_FALSE(keyguard.locked());
+  EXPECT_FALSE(keyguard.promptVisible());
 }
 
 TEST(ProjectStickKeyguard, FrontButtonRestartsAnIncompleteUnlock) {

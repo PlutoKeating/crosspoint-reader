@@ -5,11 +5,12 @@ is outside upstream CrossPoint's temporarily closed scope. Project.Stick targets
 the Xteink X3 (ESP32-C3, no PSRAM) only; it is not proposed as an upstream
 multi-device feature.
 
-The current production firmware release is `1.5.0-project-stick.10`. It adds
-the X3-wide 20-second physical-button keyguard described below and reduces
-cloud synchronization latency by reusing one TLS connection per synchronization
-burst. Release binaries are built with the same version string from
-`platformio.ini`.
+The current production firmware release is `1.5.0-project-stick.10`. It
+introduced the X3-wide 20-second physical-button keyguard and reduced cloud
+synchronization latency by reusing one TLS connection per synchronization
+burst. The current development baseline refines that keyguard into the
+non-destructive overlay behavior described below; it is not part of `.10`.
+Release binaries are built with the version string from `platformio.ini`.
 
 ## Runtime flow
 
@@ -118,11 +119,15 @@ the English fallback catalogue so the required Chinese wording remains stable
 even when the reader shell is set to another locale.
 
 - The four protruding front buttons are protected by a global X3 keyguard in
-  every activity. After 20 seconds without button or touch activity, the screen
-  switches to `按键已锁定` and all non-power button events are suppressed.
+  every activity. After 20 seconds without button or touch activity, all
+  non-power button events are suppressed. The current activity and its content
+  remain unchanged; locking only adds a 12-pixel-high lock icon at the top left,
+  exactly matching the standard battery icon height.
 - Unlocking follows the Nokia-style physical sequence: release the left side
-  button, then release the right side button. The first step is drawn as
-  completed and the instruction changes to `左侧键已确认，再按右侧边键`.
+  button, then release the right side button. No guide is shown merely because
+  the timeout elapsed. Pressing any non-power button reveals a compact bubble
+  in the bottom chrome with `请依次按左、右侧边键解锁`; after the first step it
+  changes to `左侧键已确认，请按右侧边键解锁`.
   Right-first does nothing; a front-button press during an incomplete sequence
   resets it to the left step. The right-side release that unlocks is consumed,
   so it never leaks through as `feedback_useful`. The power button remains
