@@ -42,6 +42,8 @@ class Activity {
   virtual void requestUpdateAndWait();
 
   virtual bool skipLoopDelay() { return false; }
+  virtual bool handlesKeyguard() { return false; }
+  virtual bool allowIdlePowerSaving() { return false; }
   virtual bool preventAutoSleep() { return false; }
   virtual bool isReaderActivity() const { return false; }
   // Returns true when the activity schedules its own forced refresh.

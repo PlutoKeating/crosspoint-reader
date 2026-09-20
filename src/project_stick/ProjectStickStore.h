@@ -14,6 +14,7 @@ struct ProjectStickEvent {
   std::string scenario;
   int64_t copyId = 0;
   std::string clientTs;
+  std::string studioTask, studioCard;
 };
 
 class ProjectStickStore : public PersistableStore<ProjectStickStore> {
@@ -25,6 +26,7 @@ class ProjectStickStore : public PersistableStore<ProjectStickStore> {
   static constexpr size_t MAX_USED_IDS = 64;
   static constexpr size_t MAX_PENDING_EVENTS = 32;
 
+  std::string ownerId;
   std::string deviceId;
   std::string deviceToken;
   std::string pairingCode;

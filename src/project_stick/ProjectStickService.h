@@ -1,8 +1,8 @@
 #pragma once
 
 #include <ProjectStickCore.h>
-#include <ProjectStickSyncState.h>
 #include <ProjectStickStream.h>
+#include <ProjectStickSyncState.h>
 #include <SecureHttpClient.h>
 
 #include <cstdint>
@@ -37,10 +37,13 @@ class ProjectStickService {
   SyncReport sync(bool registerFirst = true, bool refreshDisplay = true);
   bool pollAlerts();
   void syncStudio();
+  bool refreshOwnership();
+  bool syncStudioCommand();
   bool refreshIfScheduleOrContentDue();
   bool refreshScheduledContent(const char* forcedScenario = nullptr,
                                const project_stick::ShanghaiTime* alertUntil = nullptr);
   void sendFeedback(bool useful, bool canSend);
+  void sendStudioFeedback(const std::string& task, const std::string& card, bool useful);
   bool sendManualRefresh(bool canSend);
   void queueManualRefresh();
 
@@ -61,7 +64,10 @@ class ProjectStickService {
   project_stick::ShanghaiTime now() const;
 
  private:
-  std::string baseUrl;
+  std::string baseUrl, localOwner, studioAttemptTask;
+  uint8_t studioAttempts = 0;
+  uint32_t studioRetryAt = 0;
+  void adoptOwner(const std::string& owner);
   Display currentDisplay;
   project_stick::ShanghaiTime serverTime;
   uint32_t serverTimeCapturedMs = 0;
@@ -82,26 +88,22 @@ class ProjectStickService {
   bool validateObject(const project_stick::ReleaseFileEntry& file);
   bool activateSnapshot(uint32_t version);
   bool loadDisplayConfig(uint32_t version, uint32_t& contentRefreshIntervalSeconds,
-                         DisplayPreferences* preferences = nullptr,
-                         uint32_t* profileRevision = nullptr);
+                         DisplayPreferences* preferences = nullptr, uint32_t* profileRevision = nullptr);
   void cleanupReleaseStorage(bool keepIncoming = false);
   bool ensureScheduleCache();
   bool loadSchedule(std::vector<project_stick::ScheduleWindow>& windows);
-  bool selectContent(const std::string& scenario, uint32_t randomValue,
-                     project_stick::ContentCopy& selected);
+  bool selectContent(const std::string& scenario, uint32_t randomValue, project_stick::ContentCopy& selected);
   bool streamScheduleFile(const std::string& path, project_stick::ScheduleStreamDecoder& decoder);
   bool streamContentFile(const std::string& path, project_stick::ContentStreamDecoder& decoder);
   bool fetchToFile(const std::string& url, const std::string& path, size_t maxBytes);
   bool requestPost(const std::string& path, const std::string& body, std::string& response, int& status);
   bool fetchJson(const std::string& url, std::string& response, size_t maxBytes);
-  bool fetchAuthenticated(const std::string& url,
-                          const std::function<bool(const uint8_t*, size_t)>& onData);
+  bool fetchAuthenticated(const std::string& url, const std::function<bool(const uint8_t*, size_t)>& onData);
   bool fileWithinLimit(const std::string& path, size_t maxBytes);
   bool parseServerTime(const char* value);
   bool hashFile(const std::string& path, std::string& result);
   bool copyFile(const std::string& source, const std::string& destination);
-  bool findSnapshotEntry(uint32_t version, const std::string& path,
-                         project_stick::ReleaseFileEntry& result);
+  bool findSnapshotEntry(uint32_t version, const std::string& path, project_stick::ReleaseFileEntry& result);
   bool snapshotReferencesHash(uint32_t version, const std::string& sha256);
   bool resolveReleaseFile(uint32_t version, const std::string& path, std::string& result);
   std::string snapshotFile(uint32_t version) const;

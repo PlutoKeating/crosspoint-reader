@@ -17,9 +17,17 @@ bool MappedInputManager::isNavDirectionSwapped() const {
          (orientation == GfxRenderer::PortraitInverted || orientation == GfxRenderer::LandscapeCounterClockwise);
 }
 
-bool MappedInputManager::updateKeyguard(const uint32_t nowMs) {
+bool MappedInputManager::updateKeyguard(const uint32_t nowMs, const bool enabled) {
   suppressButtonsThisFrame = false;
   if (!gpio.deviceIsX3()) return false;
+  if (!enabled) {
+    const bool changed = keyguard.locked();
+    keyguard.begin(nowMs);
+    keyguardStarted = true;
+    publishedKeyguardState.store(keyguard.state(), std::memory_order_release);
+    publishedKeyguardPromptVisible.store(false, std::memory_order_release);
+    return changed;
+  }
   if (!keyguardStarted) {
     keyguard.begin(nowMs);
     keyguardStarted = true;
@@ -27,8 +35,8 @@ bool MappedInputManager::updateKeyguard(const uint32_t nowMs) {
 
   if (!keyguard.locked()) {
     const bool activity = gpio.wasAnyPressed() || gpio.wasAnyReleased() || gpio.wasTouchActivity();
-    const bool changed = keyguard.update(nowMs, activity ? project_stick::Keyguard::Input::Activity
-                                                         : project_stick::Keyguard::Input::None);
+    const bool changed = keyguard.update(
+        nowMs, activity ? project_stick::Keyguard::Input::Activity : project_stick::Keyguard::Input::None);
     publishedKeyguardState.store(keyguard.state(), std::memory_order_release);
     publishedKeyguardPromptVisible.store(keyguard.promptVisible(), std::memory_order_release);
     return changed;

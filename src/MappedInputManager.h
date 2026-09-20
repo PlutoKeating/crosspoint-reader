@@ -25,17 +25,14 @@ class MappedInputManager {
   void update() const { gpio.update(); }
   // Advances the X3-wide Nokia-style keyguard after HalGPIO::update(). Returns
   // true when its non-destructive overlays need repainting.
-  bool updateKeyguard(uint32_t nowMs);
+  bool updateKeyguard(uint32_t nowMs, bool enabled = true);
   bool isKeyguardLocked() const {
-    return publishedKeyguardState.load(std::memory_order_acquire) !=
-           project_stick::Keyguard::State::Unlocked;
+    return publishedKeyguardState.load(std::memory_order_acquire) != project_stick::Keyguard::State::Unlocked;
   }
   project_stick::Keyguard::State keyguardState() const {
     return publishedKeyguardState.load(std::memory_order_acquire);
   }
-  bool isKeyguardPromptVisible() const {
-    return publishedKeyguardPromptVisible.load(std::memory_order_acquire);
-  }
+  bool isKeyguardPromptVisible() const { return publishedKeyguardPromptVisible.load(std::memory_order_acquire); }
   bool wasPressed(Button button) const;
   bool wasReleased(Button button) const;
   bool isPressed(Button button) const;
@@ -99,8 +96,7 @@ class MappedInputManager {
   mutable unsigned long touchHeldOverrideMs = 0;
   mutable unsigned long touchHeldOverrideAt = 0;
   project_stick::Keyguard keyguard;
-  std::atomic<project_stick::Keyguard::State> publishedKeyguardState{
-      project_stick::Keyguard::State::Unlocked};
+  std::atomic<project_stick::Keyguard::State> publishedKeyguardState{project_stick::Keyguard::State::Unlocked};
   std::atomic<bool> publishedKeyguardPromptVisible{false};
   bool keyguardStarted = false;
   bool suppressButtonsThisFrame = false;

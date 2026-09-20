@@ -8,6 +8,7 @@ void ProjectStickStore::toJson(JsonDocument& doc) const {
   if (!deviceToken.empty()) doc["device_token"] = deviceToken;
   if (!pairingCode.empty()) doc["pairing_code"] = pairingCode;
   doc["bound"] = bound;
+  doc["owner_id"] = ownerId;
   doc["active_version"] = activeVersion;
   doc["previous_version"] = previousVersion;
   doc["poll_interval_seconds"] = pollIntervalSeconds;
@@ -53,6 +54,10 @@ void ProjectStickStore::toJson(JsonDocument& doc) const {
     if (!event.scenario.empty()) obj["scenario"] = event.scenario;
     if (event.copyId != 0) obj["copy_id"] = event.copyId;
     if (!event.clientTs.empty()) obj["client_ts"] = event.clientTs;
+    if (!event.studioTask.empty()) {
+      obj["studio_task"] = event.studioTask;
+      obj["studio_card"] = event.studioCard;
+    }
   }
 }
 
@@ -61,13 +66,13 @@ bool ProjectStickStore::fromJson(JsonVariantConst doc) {
   deviceToken = std::string(doc["device_token"] | "").substr(0, 96);
   pairingCode = std::string(doc["pairing_code"] | "").substr(0, 8);
   bound = doc["bound"] | false;
+  ownerId = doc["owner_id"] | "";
   activeVersion = doc["active_version"] | 0;
   previousVersion = doc["previous_version"] | 0;
   pollIntervalSeconds = std::clamp<uint32_t>(doc["poll_interval_seconds"] | 300, 30, 86400);
   alertPollIntervalSeconds = std::clamp<uint32_t>(doc["alert_poll_interval_seconds"] | 30, 10, 3600);
   const uint32_t refreshInterval = doc["content_refresh_interval_seconds"] | 600;
-  contentRefreshIntervalSeconds =
-      refreshInterval == 0 ? 0 : std::clamp<uint32_t>(refreshInterval, 60, 86400);
+  contentRefreshIntervalSeconds = refreshInterval == 0 ? 0 : std::clamp<uint32_t>(refreshInterval, 60, 86400);
   profileRevision = doc["profile_revision"] | 0;
   themeId = std::string(doc["theme_id"] | "calm").substr(0, 16);
   textScale = std::string(doc["text_scale"] | "standard").substr(0, 16);
@@ -88,10 +93,8 @@ bool ProjectStickStore::fromJson(JsonVariantConst doc) {
   displayAlert = doc["display_alert"] | false;
   displayAlertUntil.day = doc["display_alert_until_day"] | 0;
   displayAlertUntil.secondOfDay = doc["display_alert_until_second"] | 0;
-  displayAlertUntil.valid =
-      displayAlertUntil.day != 0 && displayAlertUntil.secondOfDay < 86400;
-  if (displayVersion != activeVersion || displayScenario.empty() ||
-      displayText.empty() || displayCopyId == 0) {
+  displayAlertUntil.valid = displayAlertUntil.day != 0 && displayAlertUntil.secondOfDay < 86400;
+  if (displayVersion != activeVersion || displayScenario.empty() || displayText.empty() || displayCopyId == 0) {
     displayVersion = 0;
     displayScenario.clear();
     displayText.clear();
@@ -130,6 +133,8 @@ bool ProjectStickStore::fromJson(JsonVariantConst doc) {
     event.scenario = obj["scenario"] | "";
     event.copyId = obj["copy_id"] | 0;
     event.clientTs = obj["client_ts"] | "";
+    event.studioTask = obj["studio_task"] | "";
+    event.studioCard = obj["studio_card"] | "";
     if (!event.id.empty() && !event.type.empty()) pendingEvents.push_back(std::move(event));
   }
   return true;

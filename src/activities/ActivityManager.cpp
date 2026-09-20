@@ -7,11 +7,11 @@
 #include <algorithm>
 
 #include "OpdsServerStore.h"
-#include "components/UITheme.h"
-#include "fontIds.h"
 #include "boot_sleep/BootActivity.h"
 #include "boot_sleep/SleepActivity.h"
 #include "browser/OpdsBookBrowserActivity.h"
+#include "components/UITheme.h"
+#include "fontIds.h"
 #include "home/CrashActivity.h"
 #include "home/FileBrowserActivity.h"
 #include "home/HomeActivity.h"
@@ -74,8 +74,7 @@ void ActivityManager::renderTaskLoop() {
 void ActivityManager::renderKeyguard(RenderLock&&) {
   const int width = renderer.getScreenWidth();
   const int height = renderer.getScreenHeight();
-  const bool leftCompleted =
-      mappedInput.keyguardState() == project_stick::Keyguard::State::AwaitRight;
+  const bool leftCompleted = mappedInput.keyguardState() == project_stick::Keyguard::State::AwaitRight;
 
   // Preserve the current activity framebuffer. Locking is a status overlay,
   // not a navigation event or a replacement screen.
@@ -98,9 +97,8 @@ void ActivityManager::renderKeyguard(RenderLock&&) {
     renderer.drawRoundedRect(bubbleX, bubbleY, bubbleWidth, bubbleHeight, 2, 10, true);
     const Rect bubble{bubbleX + 12, bubbleY, bubbleWidth - 24, bubbleHeight};
     UITheme::drawCenteredText(renderer, bubble, UI_10_FONT_ID, bubbleY + 10,
-                              leftCompleted ? "左侧键已确认，请按右侧边键解锁"
-                                            : "请依次按左、右侧边键解锁",
-                              true, EpdFontFamily::BOLD);
+                              leftCompleted ? "左侧键已确认，请按右侧边键解锁" : "请依次按左、右侧边键解锁", true,
+                              EpdFontFamily::BOLD);
   }
   renderer.displayBuffer();
 }
@@ -307,6 +305,12 @@ void ActivityManager::popActivity() {
     pendingActivity.reset();
   }
   pendingAction = PendingAction::Pop;
+}
+
+bool ActivityManager::handlesKeyguard() const { return currentActivity && currentActivity->handlesKeyguard(); }
+
+bool ActivityManager::allowIdlePowerSaving() const {
+  return currentActivity && currentActivity->allowIdlePowerSaving();
 }
 
 bool ActivityManager::preventAutoSleep() const { return currentActivity && currentActivity->preventAutoSleep(); }

@@ -1,6 +1,6 @@
 # CrossPoint Reader
 
-> Development: [single-screen Studio and offline BLE protocol](docs/studio-protocol.md). Full product integration and hardware acceptance remain open.
+> Development: [single-screen Studio and offline BLE protocol](docs/studio-protocol.md). Complete playback, offline delivery and ownership integration are implemented; hardware acceptance remains separate.
 
 
 > This checkout includes the private Project.Stick integration: authenticated

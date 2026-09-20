@@ -1,5 +1,3 @@
-#include "project_stick/StudioFrame.h"
-#include "project_stick/StudioBluetooth.h"
 #include "ProjectStickActivity.h"
 
 #include <GfxRenderer.h>
@@ -11,11 +9,13 @@
 #include <cstdio>
 
 #include "MappedInputManager.h"
+#include "ProjectStickCore.h"
 #include "activities/network/WifiSelectionActivity.h"
 #include "components/UITheme.h"
 #include "components/icons/project_stick_icons.h"
 #include "fontIds.h"
-#include "ProjectStickCore.h"
+#include "project_stick/StudioBluetooth.h"
+#include "project_stick/StudioFrame.h"
 #include "util/QrUtils.h"
 
 namespace {
@@ -66,22 +66,17 @@ void drawFeedbackHints(const GfxRenderer& renderer) {
   drawFeedbackIcon(renderer, rightX + iconOffsetX, SIDE_BUTTON_Y + iconOffsetY, true);
 }
 
-void drawNetworkStatusTag(const GfxRenderer& renderer, const Rect& headerBounds, int rightInset,
-                          bool connected) {
-  const char* label =
-      connected ? tr(STR_PROJECT_STICK_STATUS_ONLINE) : tr(STR_PROJECT_STICK_STATUS_OFFLINE);
+void drawNetworkStatusTag(const GfxRenderer& renderer, const Rect& headerBounds, int rightInset, bool connected) {
+  const char* label = connected ? tr(STR_PROJECT_STICK_STATUS_ONLINE) : tr(STR_PROJECT_STICK_STATUS_OFFLINE);
   const int textHeight = renderer.getLineHeight(SMALL_FONT_ID);
   const int tagHeight = textHeight + 4;
-  const int tagWidth = NETWORK_TAG_HORIZONTAL_PADDING * 2 + NETWORK_TAG_DOT_SIZE +
-                       NETWORK_TAG_DOT_GAP + renderer.getTextWidth(SMALL_FONT_ID, label);
+  const int tagWidth = NETWORK_TAG_HORIZONTAL_PADDING * 2 + NETWORK_TAG_DOT_SIZE + NETWORK_TAG_DOT_GAP +
+                       renderer.getTextWidth(SMALL_FONT_ID, label);
   const bool hasSecondHeaderRow = headerBounds.height >= 60;
-  const int safeRightInset =
-      hasSecondHeaderRow ? rightInset : std::max(rightInset, COMPACT_HEADER_BATTERY_RESERVE);
+  const int safeRightInset = hasSecondHeaderRow ? rightInset : std::max(rightInset, COMPACT_HEADER_BATTERY_RESERVE);
   const int tagX = renderer.getScreenWidth() - safeRightInset - tagWidth;
-  const int tagY =
-      hasSecondHeaderRow
-          ? headerBounds.y + headerBounds.height - tagHeight - NETWORK_TAG_BOTTOM_GAP
-          : headerBounds.y + (headerBounds.height - tagHeight) / 2;
+  const int tagY = hasSecondHeaderRow ? headerBounds.y + headerBounds.height - tagHeight - NETWORK_TAG_BOTTOM_GAP
+                                      : headerBounds.y + (headerBounds.height - tagHeight) / 2;
   const int dotX = tagX + NETWORK_TAG_HORIZONTAL_PADDING;
   const int dotY = tagY + (tagHeight - NETWORK_TAG_DOT_SIZE) / 2;
 
@@ -91,8 +86,7 @@ void drawNetworkStatusTag(const GfxRenderer& renderer, const Rect& headerBounds,
   } else {
     renderer.drawRect(dotX, dotY, NETWORK_TAG_DOT_SIZE, NETWORK_TAG_DOT_SIZE);
   }
-  renderer.drawText(SMALL_FONT_ID, dotX + NETWORK_TAG_DOT_SIZE + NETWORK_TAG_DOT_GAP, tagY + 2,
-                    label);
+  renderer.drawText(SMALL_FONT_ID, dotX + NETWORK_TAG_DOT_SIZE + NETWORK_TAG_DOT_GAP, tagY + 2, label);
 }
 
 const char* scenarioDisplayName(const std::string& scenario) {
@@ -120,8 +114,7 @@ void ProjectStickActivity::onEnter() {
   }
   if (WiFi.status() == WL_CONNECTED) {
     state = haveLocalContent ? State::Online : State::Connecting;
-    setStatus(haveLocalContent ? tr(STR_PROJECT_STICK_ONLINE)
-                               : tr(STR_PROJECT_STICK_SYNCING));
+    setStatus(haveLocalContent ? tr(STR_PROJECT_STICK_ONLINE) : tr(STR_PROJECT_STICK_SYNCING));
     requestCloudSync(true);
   } else {
     state = State::Offline;
@@ -168,7 +161,9 @@ void ProjectStickActivity::applyBackgroundResult() {
     return;
   }
 
-  if (result.kind == ProjectStickBackgroundSync::WorkKind::StudioPoll) { return; }
+  if (result.kind == ProjectStickBackgroundSync::WorkKind::StudioPoll) {
+    return;
+  }
   const auto& report = result.syncReport;
   service.adoptServerTime(report.synchronizedAt);
   recordSynchronizedAt(report.synchronizedAt);
@@ -178,19 +173,16 @@ void ProjectStickActivity::applyBackgroundResult() {
   lastScheduleCheckMs = millis();
   if ((report.result == ProjectStickService::SyncResult::Updated ||
        report.result == ProjectStickService::SyncResult::Unchanged) &&
-      (report.result == ProjectStickService::SyncResult::Updated ||
-       service.display().copyId == 0)) {
+      (report.result == ProjectStickService::SyncResult::Updated || service.display().copyId == 0)) {
     service.refreshScheduledContent();
   }
   updateState(report);
 #ifdef SIMULATOR
-  simulatorRecoveryPending =
-      report.result == ProjectStickService::SyncResult::Failed &&
-      std::getenv("CROSSPOINT_SIM_RECOVER_AFTER_FIRST_FAILURE") != nullptr;
-  simulatorAlertPollPending =
-      (report.result == ProjectStickService::SyncResult::Updated ||
-       report.result == ProjectStickService::SyncResult::Unchanged) &&
-      std::getenv("CROSSPOINT_SIM_POLL_ALERT_ONCE") != nullptr;
+  simulatorRecoveryPending = report.result == ProjectStickService::SyncResult::Failed &&
+                             std::getenv("CROSSPOINT_SIM_RECOVER_AFTER_FIRST_FAILURE") != nullptr;
+  simulatorAlertPollPending = (report.result == ProjectStickService::SyncResult::Updated ||
+                               report.result == ProjectStickService::SyncResult::Unchanged) &&
+                              std::getenv("CROSSPOINT_SIM_POLL_ALERT_ONCE") != nullptr;
 #endif
 }
 
@@ -231,13 +223,24 @@ void ProjectStickActivity::updateState(const project_stick::SyncReport& report) 
   requestUpdate();
 }
 
+bool ProjectStickActivity::handlesKeyguard() { return !StudioFrame::instance().snapshot().hash.empty(); }
+
 void ProjectStickActivity::loop() {
   studio_ble::tick();
+  if (service.refreshOwnership()) requestUpdate();
   auto& frame = StudioFrame::instance();
   const auto studio = frame.snapshot();
   const auto clock = service.now();
-  if (studio.expires > 0 && clock.valid && clock.day * 86400 + clock.secondOfDay - 8 * 3600 >= studio.expires) frame.clear();
-  if (studioGeneration != frame.generation()) { studioGeneration = frame.generation(); requestUpdate(); }
+  const int64_t studioNow = clock.valid ? clock.day * 86400LL + clock.secondOfDay - 8 * 3600 : 0;
+  const auto display = service.displaySnapshot();
+  const int64_t alertUntil = display.alert && display.alertUntil.valid
+                                 ? display.alertUntil.day * 86400LL + display.alertUntil.secondOfDay - 8 * 3600
+                                 : 0;
+  frame.tick(studioNow, 0, alertUntil);
+  if (studioGeneration != frame.generation()) {
+    studioGeneration = frame.generation();
+    requestUpdate();
+  }
   if (!studio_ble::connected() && WiFi.status() == WL_CONNECTED && millis() - lastStudioPollMs >= 5000) {
     if (PROJECT_STICK_BACKGROUND_SYNC.requestStudioPoll()) lastStudioPollMs = millis();
   }
@@ -261,6 +264,12 @@ void ProjectStickActivity::loop() {
   // X3 side buttons are fixed physical controls: BTN_UP is on the left edge
   // and BTN_DOWN is on the right edge.
   if (mappedInput.wasReleased(MappedInputManager::Button::Up)) {
+    if (!studio.hash.empty()) {
+      frame.tick(studioNow, 1, alertUntil);
+      if (frame.feedback() != 1) service.sendStudioFeedback(studio.task, studio.card, false);
+      requestUpdate();
+      return;
+    }
     if (service.display().copyId != 0) {
       service.sendFeedback(false, false);
       service.refreshScheduledContent();
@@ -272,6 +281,13 @@ void ProjectStickActivity::loop() {
   }
 
   if (mappedInput.wasReleased(MappedInputManager::Button::Down)) {
+    if (!studio.hash.empty()) {
+      frame.tick(studioNow, 2, alertUntil);
+      if (frame.feedback() != 1)
+        service.sendStudioFeedback(frame.displaySnapshot().task, frame.displaySnapshot().card, true);
+      requestUpdate();
+      return;
+    }
     if (service.display().copyId != 0) {
       service.sendFeedback(true, false);
       showFeedbackBubble(FeedbackBubble::Useful);
@@ -284,6 +300,10 @@ void ProjectStickActivity::loop() {
   // Project.Stick intentionally uses fixed physical front-button positions:
   // Back / Wi-Fi / unassigned / Refresh.
   const int frontButton = mappedInput.getPressedFrontButton();
+  if (frontButton >= 0 && !studio.hash.empty() && frame.guardKey(studioNow)) {
+    requestUpdate();
+    return;
+  }
   if (frontButton == HalGPIO::BTN_BACK) {
     onGoHome(HomeMenuItem::PROJECT_STICK);
     return;
@@ -293,6 +313,12 @@ void ProjectStickActivity::loop() {
     return;
   }
   if (frontButton == HalGPIO::BTN_RIGHT) {
+    if (!studio.hash.empty()) {
+      frame.tick(studioNow, 1, alertUntil);
+      requestUpdate();
+      requestCloudSync(project_stick::registrationDue(millis(), lastRegisterMs));
+      return;
+    }
     runManualRefresh();
     return;
   }
@@ -324,19 +350,18 @@ void ProjectStickActivity::loop() {
 }
 
 void ProjectStickActivity::launchWifiSelection() {
-  startActivityForResult(
-      std::make_unique<WifiSelectionActivity>(renderer, mappedInput, false),
-      [this](const ActivityResult&) {
-        if (WiFi.status() == WL_CONNECTED) {
-          state = State::Connecting;
-          setStatus(tr(STR_PROJECT_STICK_SYNCING));
-          requestCloudSync(true);
-        } else {
-          service.refreshScheduledContent();
-          state = State::Offline;
-          setStatus(tr(STR_PROJECT_STICK_OFFLINE));
-        }
-      });
+  startActivityForResult(std::make_unique<WifiSelectionActivity>(renderer, mappedInput, false),
+                         [this](const ActivityResult&) {
+                           if (WiFi.status() == WL_CONNECTED) {
+                             state = State::Connecting;
+                             setStatus(tr(STR_PROJECT_STICK_SYNCING));
+                             requestCloudSync(true);
+                           } else {
+                             service.refreshScheduledContent();
+                             state = State::Offline;
+                             setStatus(tr(STR_PROJECT_STICK_OFFLINE));
+                           }
+                         });
 }
 
 void ProjectStickActivity::render(RenderLock&&) {
@@ -345,14 +370,14 @@ void ProjectStickActivity::render(RenderLock&&) {
     StudioFrame::instance().displayed();
     return;
   }
+  if (!StudioFrame::instance().snapshot().hash.empty()) return;
   const auto& metrics = UITheme::getInstance().getMetrics();
   const int width = renderer.getScreenWidth();
   const int height = renderer.getScreenHeight();
   renderer.clearScreen();
   const Rect headerBounds{0, metrics.topPadding, width, metrics.headerHeight};
   GUI.drawHeader(renderer, headerBounds, tr(STR_PROJECT_STICK));
-  drawNetworkStatusTag(renderer, headerBounds, metrics.contentSidePadding,
-                       WiFi.status() == WL_CONNECTED);
+  drawNetworkStatusTag(renderer, headerBounds, metrics.contentSidePadding, WiFi.status() == WL_CONNECTED);
 
   const auto display = service.displaySnapshot();
   const auto preferences = service.displayPreferences();
@@ -360,8 +385,7 @@ void ProjectStickActivity::render(RenderLock&&) {
   const bool largeTheme = preferences.themeId == "large";
   const bool informationTheme = preferences.themeId == "information";
   const int hintTop = height - metrics.buttonHintsHeight;
-  int contentInset =
-      std::max(metrics.contentSidePadding, SIDE_BUTTON_MARGIN + SIDE_BUTTON_WIDTH + SIDE_CONTENT_GAP);
+  int contentInset = std::max(metrics.contentSidePadding, SIDE_BUTTON_MARGIN + SIDE_BUTTON_WIDTH + SIDE_CONTENT_GAP);
   if (preferences.layout == "dense") contentInset = std::max(metrics.contentSidePadding, contentInset - 8);
   if (preferences.layout == "focused" || largeTheme) contentInset += 14;
   const bool showSyncTime = preferences.showSyncTime && !minimalTheme && !largeTheme;
@@ -372,8 +396,7 @@ void ProjectStickActivity::render(RenderLock&&) {
   if (syncLineHeight > 0) {
     renderer.drawCenteredText(UI_10_FONT_ID, syncLineY, synchronizedAtLine);
   }
-  const int contentTop = syncLineY + syncLineHeight +
-                         (syncLineHeight > 0 ? metrics.verticalSpacing : 0);
+  const int contentTop = syncLineY + syncLineHeight + (syncLineHeight > 0 ? metrics.verticalSpacing : 0);
   const Rect contentBounds{contentInset, contentTop, width - contentInset * 2,
                            hintTop - metrics.verticalSpacing - contentTop};
 
@@ -387,64 +410,48 @@ void ProjectStickActivity::render(RenderLock&&) {
     const int qrGap = qrSize > 0 ? 18 : 0;
     const int groupHeight = titleHeight + qrGap + qrSize + 24 + codeHeight;
     const int groupY = contentBounds.y + (contentBounds.height - groupHeight) / 2;
-    UITheme::drawCenteredText(renderer, contentBounds, NOTOSANSSC_13_FONT_ID, groupY, title, true,
-                              EpdFontFamily::BOLD);
+    UITheme::drawCenteredText(renderer, contentBounds, NOTOSANSSC_13_FONT_ID, groupY, title, true, EpdFontFamily::BOLD);
     if (qrSize > 0) {
       const Rect qrBounds{(width - qrSize) / 2, groupY + titleHeight + qrGap, qrSize, qrSize};
       QrUtils::drawQrCode(renderer, qrBounds, "stockstick://bind?code=" + code);
     }
     UITheme::drawCenteredText(renderer, contentBounds, NOTOSANSSC_13_FONT_ID,
-                              groupY + titleHeight + qrGap + qrSize + 24, codeLine.c_str(), true,
-                              EpdFontFamily::BOLD);
+                              groupY + titleHeight + qrGap + qrSize + 24, codeLine.c_str(), true, EpdFontFamily::BOLD);
   } else if (!display.text.empty()) {
     const std::string bodyText = project_stick::stripWrappingQuotes(display.text);
     const bool showScenario = preferences.showScenario && !minimalTheme && !largeTheme;
     const char* scenarioName = showScenario ? scenarioDisplayName(display.scenario) : "";
     const int scenarioHeight =
-        scenarioName[0] == '\0'
-            ? 0
-            : renderer.getTextLineHeight(NOTOSANSSC_12_FONT_ID, scenarioName);
-    const int tagHeight =
-        scenarioHeight > 0 ? scenarioHeight + SCENARIO_TAG_VERTICAL_PADDING * 2 : 0;
-    const int tagWidth =
-        scenarioHeight > 0
-            ? renderer.getTextWidth(NOTOSANSSC_12_FONT_ID, scenarioName) +
-                  SCENARIO_TAG_HORIZONTAL_PADDING * 2
-            : 0;
-    const int bodyTagGap =
-        scenarioHeight > 0
-            ? std::max(metrics.verticalSpacing,
-                       tagHeight * GOLDEN_RATIO_DENOMINATOR / GOLDEN_RATIO_NUMERATOR)
-            : 0;
+        scenarioName[0] == '\0' ? 0 : renderer.getTextLineHeight(NOTOSANSSC_12_FONT_ID, scenarioName);
+    const int tagHeight = scenarioHeight > 0 ? scenarioHeight + SCENARIO_TAG_VERTICAL_PADDING * 2 : 0;
+    const int tagWidth = scenarioHeight > 0 ? renderer.getTextWidth(NOTOSANSSC_12_FONT_ID, scenarioName) +
+                                                  SCENARIO_TAG_HORIZONTAL_PADDING * 2
+                                            : 0;
+    const int bodyTagGap = scenarioHeight > 0 ? std::max(metrics.verticalSpacing,
+                                                         tagHeight * GOLDEN_RATIO_DENOMINATOR / GOLDEN_RATIO_NUMERATOR)
+                                              : 0;
     const bool showTone = preferences.showTone && !display.tone.empty() && !minimalTheme && !largeTheme;
     const int toneHeight = showTone ? renderer.getTextLineHeight(UI_10_FONT_ID, display.tone.c_str()) : 0;
     const int toneGap = toneHeight > 0 ? metrics.verticalSpacing : 0;
-    const int maxBodyHeight =
-        std::max(1, contentBounds.height - tagHeight - bodyTagGap - toneHeight - toneGap);
-    const int bodyFont = preferences.textScale == "compact" || preferences.layout == "dense"
-                             ? NOTOSANSSC_12_FONT_ID
-                             : NOTOSANSSC_13_FONT_ID;
+    const int maxBodyHeight = std::max(1, contentBounds.height - tagHeight - bodyTagGap - toneHeight - toneGap);
+    const int bodyFont = preferences.textScale == "compact" || preferences.layout == "dense" ? NOTOSANSSC_12_FONT_ID
+                                                                                             : NOTOSANSSC_13_FONT_ID;
     const int bodyLineHeight = renderer.getTextLineHeight(bodyFont, bodyText.c_str());
     const int lineGap = largeTheme ? BODY_LINE_GAP + 5 : (informationTheme ? 2 : BODY_LINE_GAP);
     const int bodyLineStep = bodyLineHeight + lineGap;
-    const int maxBodyLines =
-        std::max(1, (maxBodyHeight + lineGap) / bodyLineStep);
-    const auto lines =
-        renderer.wrappedCjkText(bodyFont, bodyText.c_str(), contentBounds.width, maxBodyLines);
-    const int bodyHeight =
-        lines.empty() ? 0 : static_cast<int>(lines.size()) * bodyLineStep - lineGap;
+    const int maxBodyLines = std::max(1, (maxBodyHeight + lineGap) / bodyLineStep);
+    const auto lines = renderer.wrappedCjkText(bodyFont, bodyText.c_str(), contentBounds.width, maxBodyLines);
+    const int bodyHeight = lines.empty() ? 0 : static_cast<int>(lines.size()) * bodyLineStep - lineGap;
     const int groupHeight = bodyHeight + bodyTagGap + tagHeight + toneGap + toneHeight;
     const int freeHeight = std::max(0, contentBounds.height - groupHeight);
     const int bodyY =
-        contentBounds.y +
-        freeHeight * (GOLDEN_RATIO_NUMERATOR - GOLDEN_RATIO_DENOMINATOR) /
-            GOLDEN_RATIO_NUMERATOR;
+        contentBounds.y + freeHeight * (GOLDEN_RATIO_NUMERATOR - GOLDEN_RATIO_DENOMINATOR) / GOLDEN_RATIO_NUMERATOR;
     const Rect bodyBounds{contentBounds.x, bodyY, contentBounds.width, bodyHeight};
 
     int y = bodyY;
     if (informationTheme) {
-      renderer.drawRoundedRect(contentBounds.x - 8, contentBounds.y - 8,
-                               contentBounds.width + 16, contentBounds.height + 16, 1, 8, true);
+      renderer.drawRoundedRect(contentBounds.x - 8, contentBounds.y - 8, contentBounds.width + 16,
+                               contentBounds.height + 16, 1, 8, true);
     }
     for (const auto& line : lines) {
       UITheme::drawCenteredText(renderer, bodyBounds, bodyFont, y, line.c_str(), true,
@@ -456,29 +463,26 @@ void ProjectStickActivity::render(RenderLock&&) {
       const int tagY = bodyY + bodyHeight + bodyTagGap;
       renderer.drawRoundedRect(tagX, tagY, tagWidth, tagHeight, 1, tagHeight / 2, true);
       const Rect tagBounds{tagX, tagY, tagWidth, tagHeight};
-      UITheme::drawCenteredText(renderer, tagBounds, NOTOSANSSC_12_FONT_ID,
-                                tagY + SCENARIO_TAG_VERTICAL_PADDING, scenarioName, true);
+      UITheme::drawCenteredText(renderer, tagBounds, NOTOSANSSC_12_FONT_ID, tagY + SCENARIO_TAG_VERTICAL_PADDING,
+                                scenarioName, true);
     }
     if (toneHeight > 0) {
       const int toneY = bodyY + bodyHeight + bodyTagGap + tagHeight + toneGap;
-      UITheme::drawCenteredText(renderer, contentBounds, UI_10_FONT_ID, toneY,
-                                display.tone.c_str(), true);
+      UITheme::drawCenteredText(renderer, contentBounds, UI_10_FONT_ID, toneY, display.tone.c_str(), true);
     }
   } else {
     const bool showOfflineEmptyState = WiFi.status() != WL_CONNECTED && state == State::Offline;
     if (showOfflineEmptyState) {
       const char* title = tr(STR_PROJECT_STICK_NO_LOCAL_CONTENT);
       const char* helper = tr(STR_PROJECT_STICK_CONNECT_TO_SYNC);
-      const int titleHeight =
-          renderer.getTextLineHeight(UI_12_FONT_ID, title, EpdFontFamily::BOLD);
+      const int titleHeight = renderer.getTextLineHeight(UI_12_FONT_ID, title, EpdFontFamily::BOLD);
       const int helperHeight = renderer.getTextLineHeight(UI_10_FONT_ID, helper);
       constexpr int emptyStateGap = 12;
       const int groupHeight = titleHeight + emptyStateGap + helperHeight;
       const int groupY = contentBounds.y + (contentBounds.height - groupHeight) / 2;
-      UITheme::drawCenteredText(renderer, contentBounds, UI_12_FONT_ID, groupY, title, true,
-                                EpdFontFamily::BOLD);
-      UITheme::drawCenteredText(renderer, contentBounds, UI_10_FONT_ID,
-                                groupY + titleHeight + emptyStateGap, helper, true);
+      UITheme::drawCenteredText(renderer, contentBounds, UI_12_FONT_ID, groupY, title, true, EpdFontFamily::BOLD);
+      UITheme::drawCenteredText(renderer, contentBounds, UI_10_FONT_ID, groupY + titleHeight + emptyStateGap, helper,
+                                true);
     } else {
       UITheme::drawCenteredWrappedText(renderer, contentBounds, UI_12_FONT_ID, statusLine, 4, true,
                                        EpdFontFamily::BOLD);
@@ -487,8 +491,7 @@ void ProjectStickActivity::render(RenderLock&&) {
 
   drawFeedbackHints(renderer);
   drawFeedbackBubble(width);
-  GUI.drawButtonHints(renderer, tr(STR_BACK), tr(STR_PROJECT_STICK_CONNECT_WIFI), "",
-                      tr(STR_PROJECT_STICK_REFRESH));
+  GUI.drawButtonHints(renderer, tr(STR_BACK), tr(STR_PROJECT_STICK_CONNECT_WIFI), "", tr(STR_PROJECT_STICK_REFRESH));
   renderer.displayBuffer();
 }
 
@@ -502,8 +505,7 @@ void ProjectStickActivity::recordSynchronizedAt(const project_stick::ShanghaiTim
   const unsigned hour = time.secondOfDay / 3600;
   const unsigned minute = (time.secondOfDay / 60) % 60;
   RenderLock lock;
-  snprintf(synchronizedAtLine, sizeof(synchronizedAtLine), tr(STR_PROJECT_STICK_SYNCED_AT), hour,
-           minute);
+  snprintf(synchronizedAtLine, sizeof(synchronizedAtLine), tr(STR_PROJECT_STICK_SYNCED_AT), hour, minute);
 }
 
 void ProjectStickActivity::showFeedbackBubble(FeedbackBubble bubble) {
@@ -526,8 +528,7 @@ void ProjectStickActivity::updateFeedbackBubble() {
       feedbackBubble = FeedbackBubble::None;
       repaint = true;
     } else {
-      const uint8_t nextFrame =
-          std::min<uint8_t>(FEEDBACK_BUBBLE_FINAL_FRAME, elapsed / FEEDBACK_BUBBLE_FRAME_MS);
+      const uint8_t nextFrame = std::min<uint8_t>(FEEDBACK_BUBBLE_FINAL_FRAME, elapsed / FEEDBACK_BUBBLE_FRAME_MS);
       if (nextFrame != feedbackBubbleFrame) {
         feedbackBubbleFrame = nextFrame;
         repaint = true;
@@ -539,9 +540,8 @@ void ProjectStickActivity::updateFeedbackBubble() {
 
 void ProjectStickActivity::drawFeedbackBubble(int screenWidth) const {
   if (feedbackBubble == FeedbackBubble::None) return;
-  const char* text = feedbackBubble == FeedbackBubble::Meh
-                         ? tr(STR_PROJECT_STICK_MEH_BUBBLE)
-                         : tr(STR_PROJECT_STICK_USEFUL_BUBBLE);
+  const char* text =
+      feedbackBubble == FeedbackBubble::Meh ? tr(STR_PROJECT_STICK_MEH_BUBBLE) : tr(STR_PROJECT_STICK_USEFUL_BUBBLE);
   constexpr int horizontalPadding = 18;
   constexpr int verticalPadding = 11;
   constexpr int sideGap = 8;
@@ -555,14 +555,17 @@ void ProjectStickActivity::drawFeedbackBubble(int screenWidth) const {
   const int finalX = (screenWidth - bubbleWidth) / 2;
   const bool fromLeft = feedbackBubble == FeedbackBubble::Meh;
   const int startX = fromLeft ? SIDE_BUTTON_MARGIN + SIDE_BUTTON_WIDTH + sideGap
-                              : screenWidth - SIDE_BUTTON_MARGIN - SIDE_BUTTON_WIDTH - sideGap -
-                                    bubbleWidth;
-  const int x = startX + (finalX - startX) * feedbackBubbleFrame /
-                             FEEDBACK_BUBBLE_FINAL_FRAME;
+                              : screenWidth - SIDE_BUTTON_MARGIN - SIDE_BUTTON_WIDTH - sideGap - bubbleWidth;
+  const int x = startX + (finalX - startX) * feedbackBubbleFrame / FEEDBACK_BUBBLE_FINAL_FRAME;
   const int y = SIDE_BUTTON_Y + (SIDE_BUTTON_HEIGHT - bubbleHeight) / 2;
   renderer.fillRoundedRect(x, y, bubbleWidth, bubbleHeight, cornerRadius, Color::White);
   renderer.drawRoundedRect(x, y, bubbleWidth, bubbleHeight, borderWidth, cornerRadius, true);
   const Rect bounds{x, y, bubbleWidth, bubbleHeight};
-  UITheme::drawCenteredText(renderer, bounds, NOTOSANSSC_13_FONT_ID, y + verticalPadding, text,
-                            true, EpdFontFamily::BOLD);
+  UITheme::drawCenteredText(renderer, bounds, NOTOSANSSC_13_FONT_ID, y + verticalPadding, text, true,
+                            EpdFontFamily::BOLD);
 }
+
+bool ProjectStickActivity::allowIdlePowerSaving() {
+  return StudioFrame::instance().portable() && !studio_ble::connected() && !StudioFrame::instance().busy();
+}
+bool ProjectStickActivity::skipLoopDelay() { return !allowIdlePowerSaving(); }

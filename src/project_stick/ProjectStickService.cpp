@@ -1,16 +1,21 @@
 #include "ProjectStickService.h"
-#include "StudioFrame.h"
+
+#include <HalPowerManager.h>
+
 #include "StudioBluetooth.h"
+#include "StudioFrame.h"
+#include "network/FirmwareFlasher.h"
 #ifndef SIMULATOR
-#include "StudioTrust.h"
 #include <WiFi.h>
 #include <sys/time.h>
+
+#include "StudioTrust.h"
 #endif
 
 #include <Arduino.h>
 #include <ArduinoJson.h>
-#include <HalStorage.h>
 #include <HalClock.h>
+#include <HalStorage.h>
 #include <Logging.h>
 #include <Memory.h>
 #include <SecureHttpClient.h>
@@ -20,8 +25,8 @@
 #include <algorithm>
 #include <cctype>
 #include <cstdio>
-#include <cstring>
 #include <cstdlib>
+#include <cstring>
 #include <ctime>
 #include <mutex>
 #ifdef SIMULATOR
@@ -45,7 +50,10 @@ bool trustedClockReady() {
 #ifndef SIMULATOR
   if (std::time(nullptr) >= 1735689600) return true;
   static bool requested = false;
-  if (!requested) { configTime(0, 0, "time.cloudflare.com", "time.google.com"); requested = true; }
+  if (!requested) {
+    configTime(0, 0, "time.cloudflare.com", "time.google.com");
+    requested = true;
+  }
   const uint32_t deadline = millis() + 10000;
   while (std::time(nullptr) < 1735689600 && static_cast<int32_t>(millis() - deadline) < 0) delay(100);
   return std::time(nullptr) >= 1735689600;
@@ -126,8 +134,7 @@ bool readSnapshotEntry(HalFile& file, project_stick::ReleaseFileEntry& entry) {
     if (destination->size() >= limit) return false;
     destination->push_back(value);
   }
-  if (field != 2 || !validSha256(entry.sha256) || sizeText.empty() ||
-      !project_stick::isSafeReleasePath(entry.path)) {
+  if (field != 2 || !validSha256(entry.sha256) || sizeText.empty() || !project_stick::isSafeReleasePath(entry.path)) {
     return false;
   }
   char* end = nullptr;
@@ -170,8 +177,8 @@ bool writeSnapshotEntry(void* context, const project_stick::ReleaseFileEntry& en
 class JsonObjectValidator {
  public:
   JsonObjectValidator()
-      : callbacks{this, nullptr, nullptr, nullptr, nullptr, nullptr, onObjectStart, onContainerEnd,
-                  onArrayStart, onContainerEnd},
+      : callbacks{this,    nullptr,       nullptr,        nullptr,      nullptr,
+                  nullptr, onObjectStart, onContainerEnd, onArrayStart, onContainerEnd},
         parser(callbacks) {}
 
   void feed(const char* data, size_t length) { parser.feed(data, length); }
@@ -214,11 +221,11 @@ void ProjectStickService::begin() {
   baseUrl = PROJECT_STICK_BASE_URL;
   while (!baseUrl.empty() && baseUrl.back() == '/') baseUrl.pop_back();
   http.setTimeout(HTTP_TIMEOUT_MS);
-  #ifdef SIMULATOR
+#ifdef SIMULATOR
   http.setInsecure();
-  #else
+#else
   http.setCACert(PROJECT_STICK_ROOT_CA);
-  #endif
+#endif
 #ifndef SIMULATOR
   http.setUserAgent("Project.Stick-CrossPoint-" CROSSPOINT_VERSION);
   http.setFollowRedirects(3);
@@ -231,8 +238,7 @@ void ProjectStickService::begin() {
       uint32_t refreshInterval = 600;
       DisplayPreferences preferences;
       uint32_t profileRevision = 0;
-      if (loadDisplayConfig(PROJECT_STICK_STORE.activeVersion, refreshInterval, &preferences,
-                            &profileRevision)) {
+      if (loadDisplayConfig(PROJECT_STICK_STORE.activeVersion, refreshInterval, &preferences, &profileRevision)) {
         PROJECT_STICK_STORE.contentRefreshIntervalSeconds = refreshInterval;
         PROJECT_STICK_STORE.profileRevision = profileRevision;
         PROJECT_STICK_STORE.themeId = preferences.themeId;
@@ -247,6 +253,7 @@ void ProjectStickService::begin() {
     cleanupReleaseStorage();
     projectStickStoreInitialized = true;
   }
+  localOwner = PROJECT_STICK_STORE.ownerId;
   StudioFrame::instance().load();
   currentDisplay.scenario = PROJECT_STICK_STORE.displayScenario;
   currentDisplay.text = PROJECT_STICK_STORE.displayText;
@@ -281,10 +288,8 @@ ProjectStickService::SyncReport ProjectStickService::sync(bool registerFirst, bo
         report.result = SyncResult::Inactive;
         return report;
       }
-      report.result =
-          refreshDisplay
-              ? (refreshScheduledContent() ? SyncResult::OfflineCache : SyncResult::Failed)
-              : (activeVersion() != 0 ? SyncResult::OfflineCache : SyncResult::Failed);
+      report.result = refreshDisplay ? (refreshScheduledContent() ? SyncResult::OfflineCache : SyncResult::Failed)
+                                     : (activeVersion() != 0 ? SyncResult::OfflineCache : SyncResult::Failed);
       return report;
     }
     report.registerSucceeded = true;
@@ -293,8 +298,7 @@ ProjectStickService::SyncReport ProjectStickService::sync(bool registerFirst, bo
   {
     ProjectStickStateLock lock(projectStickStateMutex);
     if (!PROJECT_STICK_STORE.bound) {
-      report.result = PROJECT_STICK_STORE.activeVersion != 0 ? SyncResult::OfflineCache
-                                                             : SyncResult::NoContent;
+      report.result = PROJECT_STICK_STORE.activeVersion != 0 ? SyncResult::OfflineCache : SyncResult::NoContent;
       return report;
     }
   }
@@ -302,14 +306,11 @@ ProjectStickService::SyncReport ProjectStickService::sync(bool registerFirst, bo
   syncStudio();
   report.manifestAttempted = true;
   report.result = syncManifest();
-  report.manifestCompleted =
-      report.result == SyncResult::Updated || report.result == SyncResult::Unchanged;
-  if (refreshDisplay &&
-      (report.result == SyncResult::Updated ||
-       (report.result == SyncResult::Unchanged && currentDisplay.copyId == 0))) {
+  report.manifestCompleted = report.result == SyncResult::Updated || report.result == SyncResult::Unchanged;
+  if (refreshDisplay && (report.result == SyncResult::Updated ||
+                         (report.result == SyncResult::Unchanged && currentDisplay.copyId == 0))) {
     if (!refreshScheduledContent()) {
-      report.result =
-          project_stick::contentSelectionFailureResult(PROJECT_STICK_STORE.activeVersion);
+      report.result = project_stick::contentSelectionFailureResult(PROJECT_STICK_STORE.activeVersion);
     }
   } else if (refreshDisplay && report.result == SyncResult::OfflineCache && currentDisplay.copyId == 0 &&
              !refreshScheduledContent()) {
@@ -322,8 +323,8 @@ ProjectStickService::SyncReport ProjectStickService::sync(bool registerFirst, bo
   // are uploaded together after the manifest and objects are complete.
   flushEvents();
   if (report.manifestCompleted) report.synchronizedAt = now();
-  LOG_INF("STICK", "Sync finished (result=%u total=%ums)",
-          static_cast<unsigned>(report.result), (unsigned)(millis() - syncStartedMs));
+  LOG_INF("STICK", "Sync finished (result=%u total=%ums)", static_cast<unsigned>(report.result),
+          (unsigned)(millis() - syncStartedMs));
   return report;
 }
 
@@ -341,6 +342,8 @@ bool ProjectStickService::ensurePairing(int& status) {
   JsonObject capabilities = request["capabilities"].to<JsonObject>();
   capabilities["protocol"] = 2;
   capabilities["studio"] = 1;
+  capabilities["studio_program"] = 1;
+  capabilities["studio_ota"] = 1;
   capabilities["themes"] = true;
   capabilities["panel"] = "xteink_x3";
   std::string body;
@@ -385,6 +388,8 @@ bool ProjectStickService::registerDevice(int& status) {
   JsonObject capabilities = request["capabilities"].to<JsonObject>();
   capabilities["protocol"] = 2;
   capabilities["studio"] = 1;
+  capabilities["studio_program"] = 1;
+  capabilities["studio_ota"] = 1;
   capabilities["themes"] = true;
   capabilities["panel"] = "xteink_x3";
   std::string body;
@@ -405,14 +410,18 @@ bool ProjectStickService::registerDevice(int& status) {
   uint32_t alertSeconds = 30;
   {
     ProjectStickStateLock lock(projectStickStateMutex);
-    PROJECT_STICK_STORE.pollIntervalSeconds =
-        std::clamp<uint32_t>(doc["poll_interval_seconds"] | 300, 30, 86400);
+    PROJECT_STICK_STORE.pollIntervalSeconds = std::clamp<uint32_t>(doc["poll_interval_seconds"] | 300, 30, 86400);
     PROJECT_STICK_STORE.alertPollIntervalSeconds =
         std::clamp<uint32_t>(doc["alert_poll_interval_seconds"] | 30, 10, 3600);
     PROJECT_STICK_STORE.tradingDay = doc["is_trading_day"] | false;
+    adoptOwner(doc["owner_id"] | "");
     PROJECT_STICK_STORE.bound = doc["bound"] | false;
-    if (PROJECT_STICK_STORE.bound) PROJECT_STICK_STORE.pairingCode.clear();
-    else { StudioFrame::instance().clear(); studio_ble::revoke(); }
+    if (PROJECT_STICK_STORE.bound)
+      PROJECT_STICK_STORE.pairingCode.clear();
+    else {
+      StudioFrame::instance().clear();
+      studio_ble::revoke();
+    }
     parseServerTime(doc["server_time"] | "");
     pollSeconds = PROJECT_STICK_STORE.pollIntervalSeconds;
     alertSeconds = PROJECT_STICK_STORE.alertPollIntervalSeconds;
@@ -421,8 +430,7 @@ bool ProjectStickService::registerDevice(int& status) {
       return false;
     }
   }
-  LOG_INF("STICK", "Device registered (release=%u poll=%us alerts=%us)",
-          (unsigned)(doc["current_release_version"] | 0),
+  LOG_INF("STICK", "Device registered (release=%u poll=%us alerts=%us)", (unsigned)(doc["current_release_version"] | 0),
           (unsigned)pollSeconds, (unsigned)alertSeconds);
   return true;
 }
@@ -435,8 +443,8 @@ ProjectStickService::SyncResult ProjectStickService::syncManifest() {
     deviceId = PROJECT_STICK_STORE.deviceId;
     activeVersion = PROJECT_STICK_STORE.activeVersion;
   }
-  const std::string path = "/api/v2/device/manifest?device_id=" + deviceId +
-                           "&current_version=" + std::to_string(activeVersion);
+  const std::string path =
+      "/api/v2/device/manifest?device_id=" + deviceId + "&current_version=" + std::to_string(activeVersion);
   if ((!Storage.mkdir(DATA_ROOT, true) && !Storage.exists(DATA_ROOT)) ||
       (!Storage.mkdir(SNAPSHOT_ROOT, true) && !Storage.exists(SNAPSHOT_ROOT))) {
     return SyncResult::Failed;
@@ -463,8 +471,7 @@ ProjectStickService::SyncResult ProjectStickService::syncManifest() {
     Storage.remove(SNAPSHOT_TEMP);
     return SyncResult::Failed;
   }
-  auto decoder =
-      makeUniqueNoThrow<project_stick::ReleaseManifestDecoder>(writeSnapshotEntry, &writer);
+  auto decoder = makeUniqueNoThrow<project_stick::ReleaseManifestDecoder>(writeSnapshotEntry, &writer);
   auto buffer = makeUniqueNoThrow<char[]>(512);
   if (!decoder || !buffer) {
     LOG_ERR("STICK", "OOM: manifest stream parser");
@@ -493,8 +500,7 @@ ProjectStickService::SyncResult ProjectStickService::syncManifest() {
     ProjectStickStateLock lock(projectStickStateMutex);
     if (!decoder->serverTime().empty()) parseServerTime(decoder->serverTime().c_str());
     if (decoder->pollIntervalSeconds() != 0) {
-      PROJECT_STICK_STORE.pollIntervalSeconds =
-          std::clamp<uint32_t>(decoder->pollIntervalSeconds(), 30, 86400);
+      PROJECT_STICK_STORE.pollIntervalSeconds = std::clamp<uint32_t>(decoder->pollIntervalSeconds(), 30, 86400);
     }
     if (decoder->alertPollIntervalSeconds() != 0) {
       PROJECT_STICK_STORE.alertPollIntervalSeconds =
@@ -555,8 +561,8 @@ bool ProjectStickService::materializeRelease(uint32_t version) {
   if (!Storage.openFileForRead("STICK", snapshotFile(version), snapshot)) return false;
   while (snapshot.available()) {
     project_stick::ReleaseFileEntry entry;
-    if (!readSnapshotEntry(snapshot, entry) || entry.size > MAX_RELEASE_FILE_SIZE ||
-        !ensureObject(version, entry) || !validateObject(entry)) {
+    if (!readSnapshotEntry(snapshot, entry) || entry.size > MAX_RELEASE_FILE_SIZE || !ensureObject(version, entry) ||
+        !validateObject(entry)) {
       return false;
     }
   }
@@ -574,15 +580,14 @@ bool ProjectStickService::materializeRelease(uint32_t version) {
     if (!window.enabled) continue;
     const std::string contentPath = "content/" + window.scenario + ".json";
     project_stick::ReleaseFileEntry contentEntry;
-    if (!project_stick::isSafeReleasePath(contentPath) ||
-        !findSnapshotEntry(version, contentPath, contentEntry) ||
+    if (!project_stick::isSafeReleasePath(contentPath) || !findSnapshotEntry(version, contentPath, contentEntry) ||
         !Storage.exists(objectFile(contentEntry.sha256).c_str())) {
       LOG_ERR("STICK", "Release missing scheduled content: %s", contentPath.c_str());
       return false;
     }
     const std::vector<int64_t> noUsedIds;
-    auto content = makeUniqueNoThrow<project_stick::ContentStreamDecoder>(
-        project_stick::ContentPassMode::MEASURE, noUsedIds);
+    auto content =
+        makeUniqueNoThrow<project_stick::ContentStreamDecoder>(project_stick::ContentPassMode::MEASURE, noUsedIds);
     if (!content || !streamContentFile(objectFile(contentEntry.sha256), *content) || !content->finish()) {
       LOG_ERR("STICK", "Release has no displayable scheduled content: %s", contentPath.c_str());
       return false;
@@ -606,9 +611,8 @@ bool ProjectStickService::ensureObject(uint32_t version, const project_stick::Re
     currentVersion = PROJECT_STICK_STORE.activeVersion;
   }
   const std::string legacy = releaseFile(currentVersion, file.path);
-  if (currentVersion != 0 && Storage.exists(legacy.c_str()) &&
-      fileWithinLimit(legacy, file.size) && hashFile(legacy, existingHash) &&
-      equalsIgnoreCase(existingHash, file.sha256)) {
+  if (currentVersion != 0 && Storage.exists(legacy.c_str()) && fileWithinLimit(legacy, file.size) &&
+      hashFile(legacy, existingHash) && equalsIgnoreCase(existingHash, file.sha256)) {
     const std::string temporary = destination + ".tmp";
     Storage.remove(temporary.c_str());
     if (copyFile(legacy, temporary) && Storage.rename(temporary.c_str(), destination.c_str())) return true;
@@ -625,8 +629,8 @@ bool ProjectStickService::downloadObject(uint32_t version, const project_stick::
     ProjectStickStateLock lock(projectStickStateMutex);
     deviceId = PROJECT_STICK_STORE.deviceId;
   }
-  const std::string url = baseUrl + "/api/v2/device/releases/" + std::to_string(version) + "/" + file.path +
-                          "?device_id=" + deviceId;
+  const std::string url =
+      baseUrl + "/api/v2/device/releases/" + std::to_string(version) + "/" + file.path + "?device_id=" + deviceId;
   LOG_INF("STICK", "Downloading %s (%u bytes)", file.path.c_str(), (unsigned)file.size);
   for (uint8_t attempt = 0; attempt < 3; ++attempt) {
     const uint32_t attemptStartedMs = millis();
@@ -637,14 +641,14 @@ bool ProjectStickService::downloadObject(uint32_t version, const project_stick::
     mbedtls_sha256_context context;
     mbedtls_sha256_init(&context);
     mbedtls_sha256_starts(&context, 0);
-    const bool fetched = fetchAuthenticated(url, [&output, &received, &context, &file](
-                                                           const uint8_t* data, size_t length) {
-      if (received > file.size || length > file.size - received) return false;
-      if (output.write(data, length) != length) return false;
-      mbedtls_sha256_update(&context, data, length);
-      received += length;
-      return true;
-    });
+    const bool fetched =
+        fetchAuthenticated(url, [&output, &received, &context, &file](const uint8_t* data, size_t length) {
+          if (received > file.size || length > file.size - received) return false;
+          if (output.write(data, length) != length) return false;
+          mbedtls_sha256_update(&context, data, length);
+          received += length;
+          return true;
+        });
     output.flush();
     output.close();
     uint8_t digest[32];
@@ -656,8 +660,7 @@ bool ProjectStickService::downloadObject(uint32_t version, const project_stick::
     if (fetched && received == file.size && equalsIgnoreCase(hex, file.sha256)) {
       Storage.remove(destination.c_str());
       if (Storage.rename(temporary.c_str(), destination.c_str())) {
-        LOG_INF("STICK", "Stored %s (%ums)", file.path.c_str(),
-                (unsigned)(millis() - attemptStartedMs));
+        LOG_INF("STICK", "Stored %s (%ums)", file.path.c_str(), (unsigned)(millis() - attemptStartedMs));
         return true;
       }
     }
@@ -679,8 +682,8 @@ bool ProjectStickService::validateObject(const project_stick::ReleaseFileEntry& 
   if (file.path.rfind("content/", 0) == 0) {
     if (file.size > MAX_CONTENT_BYTES) return false;
     const std::vector<int64_t> noUsedIds;
-    auto decoder = makeUniqueNoThrow<project_stick::ContentStreamDecoder>(
-        project_stick::ContentPassMode::MEASURE, noUsedIds);
+    auto decoder =
+        makeUniqueNoThrow<project_stick::ContentStreamDecoder>(project_stick::ContentPassMode::MEASURE, noUsedIds);
     return decoder && streamContentFile(path, *decoder) && decoder->finishAllowEmpty();
   }
 
@@ -737,13 +740,10 @@ bool ProjectStickService::activateSnapshot(uint32_t version) {
   return false;
 }
 
-bool ProjectStickService::loadDisplayConfig(uint32_t version,
-                                            uint32_t& contentRefreshIntervalSeconds,
-                                            DisplayPreferences* preferences,
-                                            uint32_t* profileRevision) {
+bool ProjectStickService::loadDisplayConfig(uint32_t version, uint32_t& contentRefreshIntervalSeconds,
+                                            DisplayPreferences* preferences, uint32_t* profileRevision) {
   std::string path;
-  if (!resolveReleaseFile(version, "config.json", path) ||
-      !fileWithinLimit(path, MAX_CONFIG_BYTES)) {
+  if (!resolveReleaseFile(version, "config.json", path) || !fileWithinLimit(path, MAX_CONFIG_BYTES)) {
     return false;
   }
   HalFile input;
@@ -753,21 +753,16 @@ bool ProjectStickService::loadDisplayConfig(uint32_t version,
   input.close();
   if (error) return false;
   const uint32_t configured = doc["display"]["content_refresh_interval_seconds"] | 600;
-  contentRefreshIntervalSeconds =
-      configured == 0 ? 0 : std::clamp<uint32_t>(configured, 60, 86400);
+  contentRefreshIntervalSeconds = configured == 0 ? 0 : std::clamp<uint32_t>(configured, 60, 86400);
   if (profileRevision) *profileRevision = doc["profile_revision"] | 0;
   if (preferences) {
     const std::string theme = doc["display"]["theme"]["id"] | "calm";
     const std::string scale = doc["display"]["text_scale"] | "standard";
     const std::string layout = doc["display"]["layout"] | "balanced";
     preferences->themeId =
-        (theme == "calm" || theme == "large" || theme == "minimal" || theme == "information")
-            ? theme
-            : "calm";
-    preferences->textScale =
-        (scale == "compact" || scale == "standard" || scale == "large") ? scale : "standard";
-    preferences->layout =
-        (layout == "focused" || layout == "balanced" || layout == "dense") ? layout : "balanced";
+        (theme == "calm" || theme == "large" || theme == "minimal" || theme == "information") ? theme : "calm";
+    preferences->textScale = (scale == "compact" || scale == "standard" || scale == "large") ? scale : "standard";
+    preferences->layout = (layout == "focused" || layout == "balanced" || layout == "dense") ? layout : "balanced";
     preferences->showScenario = doc["display"]["show_scenario"] | true;
     preferences->showTone = doc["display"]["show_tone"] | false;
     preferences->showSyncTime = doc["display"]["show_sync_time"] | true;
@@ -790,8 +785,7 @@ bool ProjectStickService::loadSchedule(std::vector<project_stick::ScheduleWindow
 
 bool ProjectStickService::ensureScheduleCache() {
   const uint32_t activeVersion = PROJECT_STICK_STORE.activeVersion;
-  if (!project_stick::scheduleCacheNeedsReload(scheduleCacheVersion, activeVersion,
-                                                scheduleCache.empty())) {
+  if (!project_stick::scheduleCacheNeedsReload(scheduleCacheVersion, activeVersion, scheduleCache.empty())) {
     return true;
   }
   scheduleCache.clear();
@@ -811,8 +805,8 @@ bool ProjectStickService::selectContent(const std::string& scenario, uint32_t ra
     return false;
   }
   if (!hasParserHeap()) return false;
-  auto measure = makeUniqueNoThrow<project_stick::ContentStreamDecoder>(
-      project_stick::ContentPassMode::MEASURE, PROJECT_STICK_STORE.usedCopyIds);
+  auto measure = makeUniqueNoThrow<project_stick::ContentStreamDecoder>(project_stick::ContentPassMode::MEASURE,
+                                                                        PROJECT_STICK_STORE.usedCopyIds);
   if (!measure || !streamContentFile(path, *measure) || !measure->finish()) return false;
   const bool useAll = measure->unusedWeight() == 0;
   const uint32_t total = useAll ? measure->totalWeight() : measure->unusedWeight();
@@ -827,8 +821,8 @@ bool ProjectStickService::selectContent(const std::string& scenario, uint32_t ra
   return true;
 }
 
-bool ProjectStickService::refreshScheduledContent(
-    const char* forcedScenario, const project_stick::ShanghaiTime* alertUntil) {
+bool ProjectStickService::refreshScheduledContent(const char* forcedScenario,
+                                                  const project_stick::ShanghaiTime* alertUntil) {
   ProjectStickStateLock lock(projectStickStateMutex);
   if (PROJECT_STICK_STORE.activeVersion == 0) return false;
   const project_stick::ShanghaiTime current = now();
@@ -837,9 +831,8 @@ bool ProjectStickService::refreshScheduledContent(
     scenario = forcedScenario;
   } else {
     if (!ensureScheduleCache()) return false;
-    const auto* selected =
-        project_stick::selectSchedule(scheduleCache, current.valid ? current.minuteOfDay() : 0,
-                                      PROJECT_STICK_STORE.tradingDay);
+    const auto* selected = project_stick::selectSchedule(scheduleCache, current.valid ? current.minuteOfDay() : 0,
+                                                         PROJECT_STICK_STORE.tradingDay);
     if (!selected) return false;
     scenario = selected->scenario;
   }
@@ -861,8 +854,7 @@ bool ProjectStickService::refreshScheduledContent(
   currentDisplay.tone = std::move(selected.tone);
   currentDisplay.copyId = selected.id;
   currentDisplay.alert = forcedScenario && strcmp(forcedScenario, "volatility_alert") == 0;
-  currentDisplay.alertUntil =
-      currentDisplay.alert && alertUntil ? *alertUntil : project_stick::ShanghaiTime{};
+  currentDisplay.alertUntil = currentDisplay.alert && alertUntil ? *alertUntil : project_stick::ShanghaiTime{};
   PROJECT_STICK_STORE.displayVersion = PROJECT_STICK_STORE.activeVersion;
   PROJECT_STICK_STORE.displayScenario = currentDisplay.scenario;
   PROJECT_STICK_STORE.displayText = currentDisplay.text;
@@ -883,20 +875,18 @@ bool ProjectStickService::refreshIfScheduleOrContentDue() {
   if (PROJECT_STICK_STORE.activeVersion == 0) return false;
   if (!ensureScheduleCache()) return false;
   const project_stick::ShanghaiTime current = now();
-  const auto* selected =
-      project_stick::selectSchedule(scheduleCache, current.valid ? current.minuteOfDay() : 0,
-                                    PROJECT_STICK_STORE.tradingDay);
+  const auto* selected = project_stick::selectSchedule(scheduleCache, current.valid ? current.minuteOfDay() : 0,
+                                                       PROJECT_STICK_STORE.tradingDay);
   if (!selected) return false;
   if (currentDisplay.alert && currentDisplay.alertUntil.valid && current.valid) {
-    const bool alertActive = current.day < currentDisplay.alertUntil.day ||
-                             (current.day == currentDisplay.alertUntil.day &&
-                              current.secondOfDay < currentDisplay.alertUntil.secondOfDay);
+    const bool alertActive =
+        current.day < currentDisplay.alertUntil.day ||
+        (current.day == currentDisplay.alertUntil.day && current.secondOfDay < currentDisplay.alertUntil.secondOfDay);
     if (alertActive) return false;
   }
   const bool scenarioChanged = selected->scenario != currentDisplay.scenario;
-  const bool rotationDue = project_stick::contentRotationDue(
-      current, PROJECT_STICK_STORE.rotationAnchor,
-      contentRefreshIntervalSeconds());
+  const bool rotationDue =
+      project_stick::contentRotationDue(current, PROJECT_STICK_STORE.rotationAnchor, contentRefreshIntervalSeconds());
   if (!scenarioChanged && !rotationDue) return false;
   return refreshScheduledContent(selected->scenario.c_str());
 }
@@ -912,8 +902,7 @@ bool ProjectStickService::pollAlerts() {
     deviceId = PROJECT_STICK_STORE.deviceId;
   }
   const uint16_t minute = current.minuteOfDay();
-  eligible =
-      eligible && ((minute >= 570 && minute < 690) || (minute >= 780 && minute < 900));
+  eligible = eligible && ((minute >= 570 && minute < 690) || (minute >= 780 && minute < 900));
 #ifdef SIMULATOR
   eligible = eligible || std::getenv("CROSSPOINT_SIM_FORCE_ALERT_WINDOW") != nullptr;
 #endif
@@ -1025,6 +1014,10 @@ bool ProjectStickService::flushEvents() {
     if (!event.scenario.empty()) obj["scenario"] = event.scenario;
     if (event.copyId != 0) obj["copy_id"] = event.copyId;
     if (!event.clientTs.empty()) obj["client_ts"] = event.clientTs;
+    if (!event.studioTask.empty()) {
+      obj["payload"]["task_id"] = event.studioTask;
+      obj["payload"]["card_id"] = event.studioCard;
+    }
   }
   std::string body;
   serializeJson(request, body);
@@ -1035,9 +1028,7 @@ bool ProjectStickService::flushEvents() {
   for (const auto& sent : pending) {
     auto& events = PROJECT_STICK_STORE.pendingEvents;
     events.erase(std::remove_if(events.begin(), events.end(),
-                                [&sent](const ProjectStickEvent& event) {
-                                  return event.id == sent.id;
-                                }),
+                                [&sent](const ProjectStickEvent& event) { return event.id == sent.id; }),
                  events.end());
   }
   return PROJECT_STICK_STORE.saveToFile();
@@ -1059,12 +1050,10 @@ bool ProjectStickService::requestPost(const std::string& path, const std::string
   for (uint8_t attempt = 0; attempt < 3; ++attempt) {
     const uint32_t attemptStartedMs = millis();
 #ifndef SIMULATOR
-    LOG_INF("STICK", "POST %s attempt %u/3 (heap=%u max=%u)", path.c_str(),
-            (unsigned)attempt + 1, (unsigned)ESP.getFreeHeap(),
-            (unsigned)ESP.getMaxAllocHeap());
+    LOG_INF("STICK", "POST %s attempt %u/3 (heap=%u max=%u)", path.c_str(), (unsigned)attempt + 1,
+            (unsigned)ESP.getFreeHeap(), (unsigned)ESP.getMaxAllocHeap());
 #else
-    LOG_INF("STICK", "POST %s attempt %u/3 (simulator OpenSSL)", path.c_str(),
-            (unsigned)attempt + 1);
+    LOG_INF("STICK", "POST %s attempt %u/3 (simulator OpenSSL)", path.c_str(), (unsigned)attempt + 1);
 #endif
     if (!http.begin(baseUrl + path)) {
       LOG_ERR("STICK", "POST %s has an invalid URL", path.c_str());
@@ -1087,12 +1076,12 @@ bool ProjectStickService::requestPost(const std::string& path, const std::string
     const bool complete = http.responseComplete();
 #endif
     if (status > 0 && complete && status < 500) {
-      LOG_INF("STICK", "POST %s completed (status=%d bytes=%u time=%ums)", path.c_str(),
-              status, (unsigned)response.size(), (unsigned)(millis() - attemptStartedMs));
+      LOG_INF("STICK", "POST %s completed (status=%d bytes=%u time=%ums)", path.c_str(), status,
+              (unsigned)response.size(), (unsigned)(millis() - attemptStartedMs));
       return true;
     }
-    LOG_ERR("STICK", "POST %s failed (status=%d complete=%u bytes=%u)",
-            path.c_str(), status, complete ? 1u : 0u, (unsigned)response.size());
+    LOG_ERR("STICK", "POST %s failed (status=%d complete=%u bytes=%u)", path.c_str(), status, complete ? 1u : 0u,
+            (unsigned)response.size());
     if (attempt < 2) delay(250UL << attempt);
   }
   return false;
@@ -1120,8 +1109,7 @@ bool ProjectStickService::fetchToFile(const std::string& url, const std::string&
     HalFile output;
     if (!Storage.openFileForWrite("STICK", path, output)) return false;
     size_t received = 0;
-    const bool ok = fetchAuthenticated(url, [&output, &received, maxBytes](const uint8_t* data,
-                                                                                size_t length) {
+    const bool ok = fetchAuthenticated(url, [&output, &received, maxBytes](const uint8_t* data, size_t length) {
       if (received > maxBytes || length > maxBytes - received) return false;
       if (output.write(data, length) != length) return false;
       received += length;
@@ -1136,8 +1124,8 @@ bool ProjectStickService::fetchToFile(const std::string& url, const std::string&
   return false;
 }
 
-bool ProjectStickService::fetchAuthenticated(
-    const std::string& url, const std::function<bool(const uint8_t*, size_t)>& onData) {
+bool ProjectStickService::fetchAuthenticated(const std::string& url,
+                                             const std::function<bool(const uint8_t*, size_t)>& onData) {
   std::string deviceToken;
   {
     ProjectStickStateLock lock(projectStickStateMutex);
@@ -1160,8 +1148,7 @@ bool ProjectStickService::fetchAuthenticated(
   return success;
 }
 
-bool ProjectStickService::streamScheduleFile(const std::string& path,
-                                             project_stick::ScheduleStreamDecoder& decoder) {
+bool ProjectStickService::streamScheduleFile(const std::string& path, project_stick::ScheduleStreamDecoder& decoder) {
   HalFile input;
   if (!Storage.openFileForRead("STICK", path, input)) return false;
   auto buffer = makeUniqueNoThrow<char[]>(512);
@@ -1174,8 +1161,7 @@ bool ProjectStickService::streamScheduleFile(const std::string& path,
   return true;
 }
 
-bool ProjectStickService::streamContentFile(const std::string& path,
-                                            project_stick::ContentStreamDecoder& decoder) {
+bool ProjectStickService::streamContentFile(const std::string& path, project_stick::ContentStreamDecoder& decoder) {
   HalFile input;
   if (!Storage.openFileForRead("STICK", path, input)) return false;
   auto buffer = makeUniqueNoThrow<char[]>(512);
@@ -1221,11 +1207,20 @@ project_stick::ShanghaiTime ProjectStickService::now() const {
   minute = static_cast<uint8_t>(utcTime.tm_min);
   second = static_cast<uint8_t>(utcTime.tm_sec);
 #else
-  if (!halClock.getDateTime(year, month, day, hour, minute, second)) return {};
+  if (!halClock.getDateTime(year, month, day, hour, minute, second)) {
+    const std::time_t wall = std::time(nullptr);
+    std::tm utc{};
+    if (wall < 1735689600 || !gmtime_r(&wall, &utc)) return {};
+    year = utc.tm_year + 1900;
+    month = utc.tm_mon + 1;
+    day = utc.tm_mday;
+    hour = utc.tm_hour;
+    minute = utc.tm_min;
+    second = utc.tm_sec;
+  }
 #endif
   char utc[32];
-  snprintf(utc, sizeof(utc), "%04u-%02u-%02uT%02u:%02u:%02uZ", year, month, day,
-           hour, minute, second);
+  snprintf(utc, sizeof(utc), "%04u-%02u-%02uT%02u:%02u:%02uZ", year, month, day, hour, minute, second);
   project_stick::ShanghaiTime rtcTime;
   project_stick::parseIso8601ToShanghai(utc, rtcTime);
   return rtcTime;
@@ -1234,8 +1229,7 @@ project_stick::ShanghaiTime ProjectStickService::now() const {
 bool ProjectStickService::copyFile(const std::string& source, const std::string& destination) {
   HalFile input;
   HalFile output;
-  if (!Storage.openFileForRead("STICK", source, input) ||
-      !Storage.openFileForWrite("STICK", destination, output)) {
+  if (!Storage.openFileForRead("STICK", source, input) || !Storage.openFileForWrite("STICK", destination, output)) {
     return false;
   }
   auto buffer = makeUniqueNoThrow<uint8_t[]>(IO_CHUNK);
@@ -1245,7 +1239,8 @@ bool ProjectStickService::copyFile(const std::string& source, const std::string&
   }
   while (input.available()) {
     const int count = input.read(buffer.get(), IO_CHUNK);
-    if (count <= 0 || output.write(buffer.get(), static_cast<size_t>(count)) != static_cast<size_t>(count)) return false;
+    if (count <= 0 || output.write(buffer.get(), static_cast<size_t>(count)) != static_cast<size_t>(count))
+      return false;
   }
   output.flush();
   return true;
@@ -1369,9 +1364,8 @@ void ProjectStickService::cleanupReleaseStorage(bool keepIncoming) {
       const std::string fileName(base);
       const bool object = fileName.size() == 69 && fileName.compare(64, 5, ".json") == 0;
       const std::string sha256 = object ? fileName.substr(0, 64) : "";
-      if (!object ||
-          (!snapshotReferencesHash(PROJECT_STICK_STORE.activeVersion, sha256) &&
-           !snapshotReferencesHash(PROJECT_STICK_STORE.previousVersion, sha256))) {
+      if (!object || (!snapshotReferencesHash(PROJECT_STICK_STORE.activeVersion, sha256) &&
+                      !snapshotReferencesHash(PROJECT_STICK_STORE.previousVersion, sha256))) {
         const std::string full = std::string(OBJECT_ROOT) + "/" + fileName;
         Storage.remove(full.c_str());
       }
@@ -1413,10 +1407,9 @@ std::string ProjectStickService::makeUuid() {
   bytes[6] = static_cast<uint8_t>((bytes[6] & 0x0f) | 0x40);
   bytes[8] = static_cast<uint8_t>((bytes[8] & 0x3f) | 0x80);
   char value[37];
-  snprintf(value, sizeof(value),
-           "%02x%02x%02x%02x-%02x%02x-%02x%02x-%02x%02x-%02x%02x%02x%02x%02x%02x", bytes[0], bytes[1],
-           bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7], bytes[8], bytes[9], bytes[10], bytes[11],
-           bytes[12], bytes[13], bytes[14], bytes[15]);
+  snprintf(value, sizeof(value), "%02x%02x%02x%02x-%02x%02x-%02x%02x-%02x%02x-%02x%02x%02x%02x%02x%02x", bytes[0],
+           bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7], bytes[8], bytes[9], bytes[10],
+           bytes[11], bytes[12], bytes[13], bytes[14], bytes[15]);
   return value;
 }
 
@@ -1493,38 +1486,207 @@ ProjectStickService::DisplayPreferences ProjectStickService::displayPreferences(
 void ProjectStickService::syncStudio() {
   HttpBurst burst(http);
   if (!isBound() || studio_ble::connected()) return;
+
   auto& frame = StudioFrame::instance();
   auto active = frame.snapshot();
   auto report = [&](const std::string& task, const char* state, const std::string& hash, const char* error = "") {
     JsonDocument doc;
-    doc["device_id"] = PROJECT_STICK_STORE.deviceId; doc["task_id"] = task;
-    doc["state"] = state; doc["sha256"] = hash; doc["received_bytes"] = frame.received(); doc["error"] = error;
-    std::string body, response; serializeJson(doc, body); int status = 0;
+    doc["device_id"] = PROJECT_STICK_STORE.deviceId;
+    doc["task_id"] = task;
+    doc["state"] = state;
+    doc["card_id"] = frame.displaySnapshot().card;
+    if (frame.snapshot().task != task) doc["override_task_id"] = frame.snapshot().task;
+    doc["sha256"] = hash;
+    doc["received_bytes"] = std::string(state) == "failed"         ? 0
+                            : frame.displaySnapshot().task == task ? frame.displaySnapshot().size
+                                                                   : frame.received();
+    doc["error"] = error;
+    std::string body, response;
+    serializeJson(doc, body);
+    int status = 0;
     return requestPost("/api/v2/device/studio", body, response, status) && status == 200;
   };
-  if (frame.needsReport() && active.origin == "cloud" && report(active.task, "displayed", active.hash)) frame.acknowledge(active.task);
+  const auto visual = frame.displaySnapshot();
+  if (frame.needsReport() && visual.origin == "cloud" && report(visual.task, "displayed", visual.hash))
+    frame.acknowledge(visual.task);
   std::string response;
   std::string url = baseUrl + "/api/v2/device/studio?device_id=" + PROJECT_STICK_STORE.deviceId;
 #ifndef SIMULATOR
   url += "&heap_free=" + std::to_string(ESP.getFreeHeap()) + "&heap_min=" + std::to_string(ESP.getMinFreeHeap()) +
+         "&sd_total=" + std::to_string(Storage.totalBytes()) + "&sd_used=" + std::to_string(Storage.usedBytes()) +
+         "&battery_percent=" + std::to_string(powerManager.getBatteryPercentage()) +
          "&uptime_ms=" + std::to_string(millis()) + "&wifi_rssi=" + std::to_string(WiFi.RSSI());
 #endif
   if (!fetchJson(url, response, 4096)) return;
   JsonDocument doc;
   if (deserializeJson(doc, response)) return;
-  if (!doc["bluetooth"].isNull()) studio_ble::configure(PROJECT_STICK_STORE.deviceId, doc["bluetooth"]["secret"] | "", doc["bluetooth"]["epoch"] | 0);
-  if (frame.reconciled(doc["accepted_ble_task"] | "")) active = frame.snapshot();
-  if (doc["target"].isNull()) { if (active.origin == "cloud") frame.clear(); return; }
+  adoptOwner(doc["owner_id"] | "");
+  flushEvents();
+  if (syncStudioCommand()) return;
+  if (!doc["bluetooth"].isNull())
+    studio_ble::configure(PROJECT_STICK_STORE.deviceId, doc["bluetooth"]["secret"] | "", doc["bluetooth"]["epoch"] | 0,
+                          doc["bluetooth"]["owner_id"] | "");
+  frame.reconciled(doc["accepted_ble_task"] | "");
+  active = frame.snapshot();
+  if (doc["target"].isNull()) {
+    if (active.origin == "cloud") frame.restore();
+    return;
+  }
   const std::string task = doc["target"]["task_id"] | "";
   const std::string hash = doc["target"]["sha256"] | "";
   const int64_t expires = doc["target"]["expires_epoch"] | int64_t(0);
   if (active.origin == "ble" || active.task == task || frame.busy()) return;
-  if ((doc["target"]["size"] | 0) != StudioFrame::BYTES || !frame.start(task, hash, expires, "cloud")) return;
+  if (studioAttemptTask != task) {
+    studioAttemptTask = task;
+    studioAttempts = 0;
+  }
+  if (studioAttempts >= 3 || (studioAttempts && static_cast<int32_t>(millis() - studioRetryAt) < 0)) return;
+  ++studioAttempts;
+  studioRetryAt = millis() + 15000;
+  const size_t size = doc["target"]["size"] | size_t(0);
+  if (!frame.start(task, hash, expires, "cloud", size)) {
+    report(task, "failed", hash, "设备存储不足、忙碌或画面大小无效");
+    return;
+  }
   report(task, "transferring", hash);
-  const std::string path = "/api/v2/device/studio/frame?device_id=" + PROJECT_STICK_STORE.deviceId + "&task_id=" + task;
-  const bool fetched = fetchAuthenticated(baseUrl + path, [&](const uint8_t* data, size_t length) { return frame.append(frame.received(), data, length); });
-  if (!fetched) { frame.abort(); report(task, "failed", hash, "画面下载失败"); return; }
+  const std::string path = "/api/v2/device/studio/frame?device_id=" + PROJECT_STICK_STORE.deviceId +
+                           "&task_id=" + task + "&offset=" + std::to_string(frame.received());
+  const bool fetched =
+      frame.received() == size || fetchAuthenticated(baseUrl + path, [&](const uint8_t* data, size_t length) {
+        return frame.append(frame.received(), data, length);
+      });
+  if (!fetched) {
+    frame.abort();
+    report(task, "failed", hash, "画面下载失败");
+    return;
+  }
   report(task, "verifying", hash);
-  if (!frame.commit()) { frame.abort(); report(task, "failed", hash, "画面校验失败"); return; }
-  report(task, "refreshing", hash);
+  if (!frame.commit()) {
+    frame.abort();
+    report(task, "failed", hash, "画面校验失败");
+    return;
+  }
+  const auto clock = now();
+  if (clock.valid) frame.tick(clock.day * 86400LL + clock.secondOfDay - 8 * 3600);
+  report(task, size > StudioFrame::BYTES && frame.snapshot().card.empty() ? "scheduled" : "refreshing", hash);
+}
+
+bool ProjectStickService::syncStudioCommand() {
+#ifndef SIMULATOR
+  std::string response;
+  if (!fetchJson(baseUrl + "/api/v2/device/commands?device_id=" + PROJECT_STICK_STORE.deviceId, response, 2048))
+    return false;
+  JsonDocument doc;
+  if (deserializeJson(doc, response) || doc["command"].isNull()) return false;
+  const std::string id = doc["command"]["id"] | "", hash = doc["command"]["sha256"] | "";
+  const size_t size = doc["command"]["bytes"] | size_t(0);
+  auto report = [&](const char* state, const char* error = "") {
+    JsonDocument body;
+    body["device_id"] = PROJECT_STICK_STORE.deviceId;
+    body["id"] = id;
+    body["state"] = state;
+    body["error"] = error;
+    std::string json, result;
+    serializeJson(body, json);
+    int status = 0;
+    return requestPost("/api/v2/device/commands", json, result, status) && status == 200;
+  };
+  if (id.size() != 36 || !validSha256(hash) || size < 100000 || size > 6553600) {
+    report("failed", "Invalid firmware metadata");
+    return true;
+  }
+  if (powerManager.getBatteryPercentage() < 30) {
+    report("failed", "Battery below 30%; charge before retrying");
+    return true;
+  }
+  if (StudioFrame::instance().busy() || studio_ble::connected()) return true;
+  studio_ble::pause(true);
+  HalPowerManager::Lock powerLock;
+  const char* path = "/.crosspoint/studio/firmware.tmp";
+  std::string downloadedHash;
+  if (!report("downloading")) {
+    studio_ble::pause(false);
+    return true;
+  }
+  if (!fetchToFile(baseUrl + "/api/v2/device/firmware?device_id=" + PROJECT_STICK_STORE.deviceId + "&command_id=" + id,
+                   path, size)) {
+    report("failed", "Firmware download failed");
+    studio_ble::pause(false);
+    return true;
+  }
+  report("verifying");
+  HalFile file;
+  const bool opened = Storage.openFileForRead("STUDIO", path, file);
+  const bool sized = opened && file.size() == size;
+  file.close();
+  if (!sized || !hashFile(path, downloadedHash) || downloadedHash != hash) {
+    Storage.remove(path);
+    report("failed", "Firmware checksum mismatch");
+    studio_ble::pause(false);
+    return true;
+  }
+  if (!report("installing")) {
+    studio_ble::pause(false);
+    return true;
+  }
+  const auto result = firmware_flash::flashFromSdPath(path, nullptr, nullptr);
+  Storage.remove(path);
+  if (result != firmware_flash::Result::OK) {
+    report("failed", firmware_flash::resultName(result));
+    studio_ble::pause(false);
+    return true;
+  }
+  report("restarting");
+  delay(300);
+  ESP.restart();
+  return true;
+#else
+  return false;
+#endif
+}
+
+void ProjectStickService::sendStudioFeedback(const std::string& task, const std::string& card, bool useful) {
+  ProjectStickStateLock lock(projectStickStateMutex);
+  ProjectStickEvent event;
+  event.id = makeUuid();
+  event.type = useful ? "studio_useful" : "studio_next";
+  event.studioTask = task;
+  event.studioCard = card;
+  event.clientTs = project_stick::formatIso8601Shanghai(now());
+  PROJECT_STICK_STORE.enqueue(std::move(event));
+  PROJECT_STICK_STORE.saveToFile();
+}
+
+void ProjectStickService::adoptOwner(const std::string& owner) {
+  ProjectStickStateLock lock(projectStickStateMutex);
+  if (PROJECT_STICK_STORE.ownerId == owner) return;
+  StudioFrame::instance().clear();
+  studio_ble::revoke();
+  Storage.removeDir(DATA_ROOT);
+  auto& s = PROJECT_STICK_STORE;
+  s.ownerId = owner;
+  s.activeVersion = 0;
+  s.previousVersion = 0;
+  s.profileRevision = 0;
+  s.displayVersion = 0;
+  s.displayScenario.clear();
+  s.displayText.clear();
+  s.displayTone.clear();
+  s.displayCopyId = 0;
+  s.displayAlert = false;
+  s.displayAlertUntil = {};
+  s.pendingEvents.clear();
+  s.usedCopyIds.clear();
+  s.seenAlertIds.clear();
+  s.saveToFile();
+  refreshOwnership();
+}
+bool ProjectStickService::refreshOwnership() {
+  ProjectStickStateLock lock(projectStickStateMutex);
+  if (localOwner == PROJECT_STICK_STORE.ownerId) return false;
+  localOwner = PROJECT_STICK_STORE.ownerId;
+  currentDisplay = {};
+  scheduleCache.clear();
+  scheduleCacheVersion = 0;
+  return true;
 }

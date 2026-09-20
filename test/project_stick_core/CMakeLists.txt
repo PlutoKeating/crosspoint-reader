@@ -16,3 +16,5 @@ target_link_libraries(ProjectStickCoreTest PRIVATE
 )
 
 gtest_discover_tests(ProjectStickCoreTest)
+
+target_sources(ProjectStickCoreTest PRIVATE ${REPO_ROOT}/lib/ProjectStick/StudioProgram.cpp StudioProgramTest.cpp)

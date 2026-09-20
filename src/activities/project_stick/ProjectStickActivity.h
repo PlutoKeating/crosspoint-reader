@@ -13,7 +13,9 @@ class ProjectStickActivity final : public Activity {
   void loop() override;
   void render(RenderLock&&) override;
   bool preventAutoSleep() override { return true; }
-  bool skipLoopDelay() override { return true; }
+  bool allowIdlePowerSaving() override;
+  bool handlesKeyguard() override;
+  bool skipLoopDelay() override;
 
  private:
   enum class State { Connecting, Online, Offline, Empty, Error, Inactive };

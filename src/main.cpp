@@ -479,7 +479,7 @@ void loop() {
 
   gpio.setSharedConfirmPowerShortPressEmitsPower(SETTINGS.shortPwrBtn == CrossPointSettings::SHORT_PWRBTN::SLEEP);
   gpio.update();
-  if (mappedInputManager.updateKeyguard(millis())) activityManager.requestUpdate();
+  if (mappedInputManager.updateKeyguard(millis(), !activityManager.handlesKeyguard())) activityManager.requestUpdate();
   halTiltSensor.update(SETTINGS.tiltPageTurn, SETTINGS.orientation, activityManager.isReaderActivity());
 
   renderer.setFadingFix(SETTINGS.fadingFix);
@@ -510,7 +510,7 @@ void loop() {
   // Check for any user activity (button press or release) or active background work
   static unsigned long lastActivityTime = millis();
   if (gpio.wasAnyPressed() || gpio.wasAnyReleased() || gpio.wasTouchActivity() || halTiltSensor.hadActivity() ||
-      activityManager.preventAutoSleep()) {
+      (activityManager.preventAutoSleep() && !activityManager.allowIdlePowerSaving())) {
     lastActivityTime = millis();         // Reset inactivity timer
     powerManager.setPowerSaving(false);  // Restore normal CPU frequency on user activity
   }
@@ -540,7 +540,7 @@ void loop() {
   }
 
   const unsigned long sleepTimeoutMs = SETTINGS.getSleepTimeoutMs();
-  if (sleepTimeoutMs > 0 && millis() - lastActivityTime >= sleepTimeoutMs) {
+  if (sleepTimeoutMs > 0 && millis() - lastActivityTime >= sleepTimeoutMs && !activityManager.preventAutoSleep()) {
     LOG_DBG("SLP", "Auto-sleep triggered after %lu ms of inactivity", sleepTimeoutMs);
     enterDeepSleep(true);
     // This should never be hit as `enterDeepSleep` calls esp_deep_sleep_start
