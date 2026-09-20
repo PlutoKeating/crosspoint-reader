@@ -36,6 +36,7 @@ class ProjectStickService {
   void begin();
   SyncReport sync(bool registerFirst = true, bool refreshDisplay = true);
   bool pollAlerts();
+  void syncStudio();
   bool refreshIfScheduleOrContentDue();
   bool refreshScheduledContent(const char* forcedScenario = nullptr,
                                const project_stick::ShanghaiTime* alertUntil = nullptr);

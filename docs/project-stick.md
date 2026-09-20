@@ -1,5 +1,8 @@
 # Project.Stick integration
 
+> New development: [Studio protocol](studio-protocol.md). Existing reader functions remain available.
+
+
 This private fork intentionally adds an external synchronization connector that
 is outside upstream CrossPoint's temporarily closed scope. Project.Stick targets
 the Xteink X3 (ESP32-C3, no PSRAM) only; it is not proposed as an upstream

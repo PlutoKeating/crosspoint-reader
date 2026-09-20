@@ -1,4 +1,11 @@
 #include "ProjectStickService.h"
+#include "StudioFrame.h"
+#include "StudioBluetooth.h"
+#ifndef SIMULATOR
+#include "StudioTrust.h"
+#include <WiFi.h>
+#include <sys/time.h>
+#endif
 
 #include <Arduino.h>
 #include <ArduinoJson.h>
@@ -33,6 +40,19 @@ namespace {
 std::recursive_mutex projectStickStateMutex;
 using ProjectStickStateLock = std::lock_guard<std::recursive_mutex>;
 bool projectStickStoreInitialized = false;
+
+bool trustedClockReady() {
+#ifndef SIMULATOR
+  if (std::time(nullptr) >= 1735689600) return true;
+  static bool requested = false;
+  if (!requested) { configTime(0, 0, "time.cloudflare.com", "time.google.com"); requested = true; }
+  const uint32_t deadline = millis() + 10000;
+  while (std::time(nullptr) < 1735689600 && static_cast<int32_t>(millis() - deadline) < 0) delay(100);
+  return std::time(nullptr) >= 1735689600;
+#else
+  return true;
+#endif
+}
 
 constexpr size_t MAX_RELEASE_FILE_SIZE = 512 * 1024;
 constexpr size_t MAX_MANIFEST_BYTES = 64 * 1024;
@@ -194,7 +214,11 @@ void ProjectStickService::begin() {
   baseUrl = PROJECT_STICK_BASE_URL;
   while (!baseUrl.empty() && baseUrl.back() == '/') baseUrl.pop_back();
   http.setTimeout(HTTP_TIMEOUT_MS);
+  #ifdef SIMULATOR
   http.setInsecure();
+  #else
+  http.setCACert(PROJECT_STICK_ROOT_CA);
+  #endif
 #ifndef SIMULATOR
   http.setUserAgent("Project.Stick-CrossPoint-" CROSSPOINT_VERSION);
   http.setFollowRedirects(3);
@@ -223,6 +247,7 @@ void ProjectStickService::begin() {
     cleanupReleaseStorage();
     projectStickStoreInitialized = true;
   }
+  StudioFrame::instance().load();
   currentDisplay.scenario = PROJECT_STICK_STORE.displayScenario;
   currentDisplay.text = PROJECT_STICK_STORE.displayText;
   currentDisplay.tone = PROJECT_STICK_STORE.displayTone;
@@ -274,6 +299,7 @@ ProjectStickService::SyncReport ProjectStickService::sync(bool registerFirst, bo
     }
   }
 
+  syncStudio();
   report.manifestAttempted = true;
   report.result = syncManifest();
   report.manifestCompleted =
@@ -314,6 +340,7 @@ bool ProjectStickService::ensurePairing(int& status) {
   request["firmware_version"] = CROSSPOINT_VERSION;
   JsonObject capabilities = request["capabilities"].to<JsonObject>();
   capabilities["protocol"] = 2;
+  capabilities["studio"] = 1;
   capabilities["themes"] = true;
   capabilities["panel"] = "xteink_x3";
   std::string body;
@@ -357,6 +384,7 @@ bool ProjectStickService::registerDevice(int& status) {
   request["applied_revision"] = PROJECT_STICK_STORE.profileRevision;
   JsonObject capabilities = request["capabilities"].to<JsonObject>();
   capabilities["protocol"] = 2;
+  capabilities["studio"] = 1;
   capabilities["themes"] = true;
   capabilities["panel"] = "xteink_x3";
   std::string body;
@@ -384,6 +412,7 @@ bool ProjectStickService::registerDevice(int& status) {
     PROJECT_STICK_STORE.tradingDay = doc["is_trading_day"] | false;
     PROJECT_STICK_STORE.bound = doc["bound"] | false;
     if (PROJECT_STICK_STORE.bound) PROJECT_STICK_STORE.pairingCode.clear();
+    else { StudioFrame::instance().clear(); studio_ble::revoke(); }
     parseServerTime(doc["server_time"] | "");
     pollSeconds = PROJECT_STICK_STORE.pollIntervalSeconds;
     alertSeconds = PROJECT_STICK_STORE.alertPollIntervalSeconds;
@@ -1017,6 +1046,7 @@ bool ProjectStickService::flushEvents() {
 bool ProjectStickService::requestPost(const std::string& path, const std::string& body, std::string& response,
                                       int& status) {
   status = 0;
+  if (!trustedClockReady()) return false;
 #ifdef SIMULATOR
   static bool injectedRegisterFailure = false;
   if (!injectedRegisterFailure && path == "/api/v2/device/register" &&
@@ -1113,6 +1143,7 @@ bool ProjectStickService::fetchAuthenticated(
     ProjectStickStateLock lock(projectStickStateMutex);
     deviceToken = PROJECT_STICK_STORE.deviceToken;
   }
+  if (!trustedClockReady()) return false;
   if (deviceToken.empty()) return HttpDownloader::fetchUrl(url, onData);
   if (!http.begin(url)) return false;
   http.addHeader("Authorization", "Bearer " + deviceToken);
@@ -1457,4 +1488,43 @@ ProjectStickService::DisplayPreferences ProjectStickService::displayPreferences(
   result.showTone = PROJECT_STICK_STORE.showTone;
   result.showSyncTime = PROJECT_STICK_STORE.showSyncTime;
   return result;
+}
+
+void ProjectStickService::syncStudio() {
+  HttpBurst burst(http);
+  if (!isBound() || studio_ble::connected()) return;
+  auto& frame = StudioFrame::instance();
+  auto active = frame.snapshot();
+  auto report = [&](const std::string& task, const char* state, const std::string& hash, const char* error = "") {
+    JsonDocument doc;
+    doc["device_id"] = PROJECT_STICK_STORE.deviceId; doc["task_id"] = task;
+    doc["state"] = state; doc["sha256"] = hash; doc["received_bytes"] = frame.received(); doc["error"] = error;
+    std::string body, response; serializeJson(doc, body); int status = 0;
+    return requestPost("/api/v2/device/studio", body, response, status) && status == 200;
+  };
+  if (frame.needsReport() && active.origin == "cloud" && report(active.task, "displayed", active.hash)) frame.acknowledge(active.task);
+  std::string response;
+  std::string url = baseUrl + "/api/v2/device/studio?device_id=" + PROJECT_STICK_STORE.deviceId;
+#ifndef SIMULATOR
+  url += "&heap_free=" + std::to_string(ESP.getFreeHeap()) + "&heap_min=" + std::to_string(ESP.getMinFreeHeap()) +
+         "&uptime_ms=" + std::to_string(millis()) + "&wifi_rssi=" + std::to_string(WiFi.RSSI());
+#endif
+  if (!fetchJson(url, response, 4096)) return;
+  JsonDocument doc;
+  if (deserializeJson(doc, response)) return;
+  if (!doc["bluetooth"].isNull()) studio_ble::configure(PROJECT_STICK_STORE.deviceId, doc["bluetooth"]["secret"] | "", doc["bluetooth"]["epoch"] | 0);
+  if (frame.reconciled(doc["accepted_ble_task"] | "")) active = frame.snapshot();
+  if (doc["target"].isNull()) { if (active.origin == "cloud") frame.clear(); return; }
+  const std::string task = doc["target"]["task_id"] | "";
+  const std::string hash = doc["target"]["sha256"] | "";
+  const int64_t expires = doc["target"]["expires_epoch"] | int64_t(0);
+  if (active.origin == "ble" || active.task == task || frame.busy()) return;
+  if ((doc["target"]["size"] | 0) != StudioFrame::BYTES || !frame.start(task, hash, expires, "cloud")) return;
+  report(task, "transferring", hash);
+  const std::string path = "/api/v2/device/studio/frame?device_id=" + PROJECT_STICK_STORE.deviceId + "&task_id=" + task;
+  const bool fetched = fetchAuthenticated(baseUrl + path, [&](const uint8_t* data, size_t length) { return frame.append(frame.received(), data, length); });
+  if (!fetched) { frame.abort(); report(task, "failed", hash, "画面下载失败"); return; }
+  report(task, "verifying", hash);
+  if (!frame.commit()) { frame.abort(); report(task, "failed", hash, "画面校验失败"); return; }
+  report(task, "refreshing", hash);
 }

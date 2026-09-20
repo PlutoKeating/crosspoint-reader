@@ -32,6 +32,10 @@ bool ProjectStickBackgroundSync::requestSync(bool registerFirst) {
   return queue(WorkKind::Sync, registerFirst);
 }
 
+bool ProjectStickBackgroundSync::requestStudioPoll() {
+  return queue(WorkKind::StudioPoll, false);
+}
+
 bool ProjectStickBackgroundSync::requestAlertPoll() {
   return queue(WorkKind::AlertPoll, false);
 }
@@ -92,6 +96,8 @@ void ProjectStickBackgroundSync::taskLoop() {
     completed.kind = kind;
     if (kind == WorkKind::Sync) {
       completed.syncReport = service.sync(registerFirst, false);
+    } else if (kind == WorkKind::StudioPoll) {
+      service.syncStudio();
     } else {
       completed.alertReceived = service.pollAlerts();
       if (completed.alertReceived) completed.alertDisplay = service.displaySnapshot();

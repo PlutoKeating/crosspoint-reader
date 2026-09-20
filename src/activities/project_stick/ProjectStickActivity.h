@@ -23,6 +23,8 @@ class ProjectStickActivity final : public Activity {
   State state = State::Connecting;
   uint32_t backgroundResultSequence = 0;
   uint32_t lastManifestPollMs = 0;
+  uint32_t lastStudioPollMs = 0;
+  uint32_t studioGeneration = 0;
   uint32_t lastManifestAttemptMs = 0;
   uint32_t lastAlertPollMs = 0;
   uint32_t lastScheduleCheckMs = 0;

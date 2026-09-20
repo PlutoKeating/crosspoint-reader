@@ -32,3 +32,6 @@ lib/EpdFont/scripts/output/
 /sdkconfig.default
 /sdkconfig.defaults
 sdkconfig.sticky
+
+# Generated PlatformIO SDK config for the release environment
+/sdkconfig.gh_release

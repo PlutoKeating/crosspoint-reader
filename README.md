@@ -1,5 +1,8 @@
 # CrossPoint Reader
 
+> Development: [single-screen Studio and offline BLE protocol](docs/studio-protocol.md). Full product integration and hardware acceptance remain open.
+
+
 > This checkout includes the private Project.Stick integration: authenticated
 > mini-program device binding, per-user v2 Release synchronization, and four
 > e-ink display presets. X3 builds also provide a global 20-second button

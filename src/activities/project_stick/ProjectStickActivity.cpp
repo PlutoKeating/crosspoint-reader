@@ -1,3 +1,5 @@
+#include "project_stick/StudioFrame.h"
+#include "project_stick/StudioBluetooth.h"
 #include "ProjectStickActivity.h"
 
 #include <GfxRenderer.h>
@@ -106,6 +108,7 @@ const char* scenarioDisplayName(const std::string& scenario) {
 
 void ProjectStickActivity::onEnter() {
   Activity::onEnter();
+  renderer.setOrientation(GfxRenderer::Portrait);
   service.begin();
   PROJECT_STICK_BACKGROUND_SYNC.begin();
   backgroundResultSequence = PROJECT_STICK_BACKGROUND_SYNC.latestSequence();
@@ -165,6 +168,7 @@ void ProjectStickActivity::applyBackgroundResult() {
     return;
   }
 
+  if (result.kind == ProjectStickBackgroundSync::WorkKind::StudioPoll) { return; }
   const auto& report = result.syncReport;
   service.adoptServerTime(report.synchronizedAt);
   recordSynchronizedAt(report.synchronizedAt);
@@ -228,6 +232,15 @@ void ProjectStickActivity::updateState(const project_stick::SyncReport& report) 
 }
 
 void ProjectStickActivity::loop() {
+  studio_ble::tick();
+  auto& frame = StudioFrame::instance();
+  const auto studio = frame.snapshot();
+  const auto clock = service.now();
+  if (studio.expires > 0 && clock.valid && clock.day * 86400 + clock.secondOfDay - 8 * 3600 >= studio.expires) frame.clear();
+  if (studioGeneration != frame.generation()) { studioGeneration = frame.generation(); requestUpdate(); }
+  if (!studio_ble::connected() && WiFi.status() == WL_CONNECTED && millis() - lastStudioPollMs >= 5000) {
+    if (PROJECT_STICK_BACKGROUND_SYNC.requestStudioPoll()) lastStudioPollMs = millis();
+  }
   applyBackgroundResult();
   updateFeedbackBubble();
 #ifdef SIMULATOR
@@ -285,7 +298,7 @@ void ProjectStickActivity::loop() {
   }
 
   const uint32_t nowMs = millis();
-  if (state != State::Inactive && WiFi.status() == WL_CONNECTED &&
+  if (!studio_ble::connected() && state != State::Inactive && WiFi.status() == WL_CONNECTED &&
       nowMs - lastManifestAttemptMs >= service.pollIntervalSeconds() * 1000UL) {
     const bool heartbeatDue = project_stick::registrationDue(nowMs, lastRegisterMs);
     if (requestCloudSync(heartbeatDue)) lastManifestAttemptMs = nowMs;
@@ -304,7 +317,7 @@ void ProjectStickActivity::loop() {
       requestUpdate();
     }
   }
-  if (state != State::Inactive && WiFi.status() == WL_CONNECTED &&
+  if (!studio_ble::connected() && state != State::Inactive && WiFi.status() == WL_CONNECTED &&
       nowMs - lastAlertPollMs >= service.alertPollIntervalSeconds() * 1000UL) {
     if (PROJECT_STICK_BACKGROUND_SYNC.requestAlertPoll()) lastAlertPollMs = nowMs;
   }
@@ -327,6 +340,11 @@ void ProjectStickActivity::launchWifiSelection() {
 }
 
 void ProjectStickActivity::render(RenderLock&&) {
+  if (StudioFrame::instance().render(renderer)) {
+    renderer.displayBuffer();
+    StudioFrame::instance().displayed();
+    return;
+  }
   const auto& metrics = UITheme::getInstance().getMetrics();
   const int width = renderer.getScreenWidth();
   const int height = renderer.getScreenHeight();

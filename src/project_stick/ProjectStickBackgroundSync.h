@@ -12,7 +12,7 @@
 
 class ProjectStickBackgroundSync {
  public:
-  enum class WorkKind : uint8_t { None, Sync, AlertPoll };
+  enum class WorkKind : uint8_t { None, Sync, AlertPoll, StudioPoll };
 
   struct Result {
     uint32_t sequence = 0;
@@ -27,6 +27,7 @@ class ProjectStickBackgroundSync {
   void begin();
   bool requestSync(bool registerFirst);
   bool requestAlertPoll();
+  bool requestStudioPoll();
   bool busy() const;
   uint32_t latestSequence() const;
   bool takeResult(uint32_t& lastSequence, Result& result) const;
