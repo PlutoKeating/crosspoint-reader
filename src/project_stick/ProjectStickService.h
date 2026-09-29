@@ -1,7 +1,6 @@
 #pragma once
 
 #include <ProjectStickCore.h>
-#include <ProjectStickStream.h>
 #include <ProjectStickSyncState.h>
 #include <SecureHttpClient.h>
 
@@ -15,26 +14,14 @@ class ProjectStickService {
   using SyncResult = project_stick::SyncResult;
   using SyncReport = project_stick::SyncReport;
 
+  // Market alert state handed from the background worker to the UI. The
+  // Studio program shows its alert scene while alertUntil lies in the future.
   struct Display {
-    std::string scenario;
-    std::string text;
-    std::string tone;
-    int64_t copyId = 0;
-    bool alert = false;
     project_stick::ShanghaiTime alertUntil;
   };
 
-  struct DisplayPreferences {
-    std::string themeId = "calm";
-    std::string textScale = "standard";
-    std::string layout = "balanced";
-    bool showScenario = true;
-    bool showTone = false;
-    bool showSyncTime = true;
-  };
-
   void begin();
-  SyncReport sync(bool registerFirst = true, bool refreshDisplay = true);
+  SyncReport sync(bool registerFirst = true);
   bool pollAlerts();
   void syncStudio();
   // Drops a kept-alive API connection (called by the worker when idle).
@@ -53,28 +40,19 @@ class ProjectStickService {
   bool refreshOwnership();
   bool syncStudioCommand();
   void reportFirmwareOutcome();
-  bool refreshIfScheduleOrContentDue();
-  bool refreshScheduledContent(const char* forcedScenario = nullptr,
-                               const project_stick::ShanghaiTime* alertUntil = nullptr);
-  void sendFeedback(bool useful, bool canSend);
   void sendStudioFeedback(const std::string& task, const std::string& card, bool useful);
-  bool sendManualRefresh(bool canSend);
-  void queueManualRefresh();
 
   const Display& display() const { return currentDisplay; }
   Display displaySnapshot() const;
   void adoptDisplay(Display display);
   void adoptServerTime(const project_stick::ShanghaiTime& time);
-  uint32_t activeVersion() const;
   uint32_t pendingEventCount() const;
   uint32_t pollIntervalSeconds() const;
   uint32_t alertPollIntervalSeconds() const;
-  uint32_t contentRefreshIntervalSeconds() const;
   bool isTradingDay() const;
   bool hasClock() const { return serverTime.valid; }
   bool isBound() const;
   std::string pairingCode() const;
-  DisplayPreferences displayPreferences() const;
   project_stick::ShanghaiTime now() const;
 
  private:
@@ -86,48 +64,21 @@ class ProjectStickService {
   project_stick::ShanghaiTime serverTime;
   uint32_t serverTimeCapturedMs = 0;
   bool inactive = false;
-  std::vector<project_stick::ScheduleWindow> scheduleCache;
-  uint32_t scheduleCacheVersion = 0;
   // One client per service keeps the Cloudflare TLS connection alive across
-  // register, manifest, object, and event requests in the same sync burst.
+  // the register, Studio and event requests of one sync burst.
   freeink::SecureHttpClient http;
 
   bool ensureIdentity();
   bool ensurePairing(int& status);
   bool registerDevice(int& status);
-  SyncResult syncManifest();
-  bool materializeRelease(uint32_t version);
-  bool ensureObject(uint32_t version, const project_stick::ReleaseFileEntry& file);
-  bool downloadObject(uint32_t version, const project_stick::ReleaseFileEntry& file);
-  bool validateObject(const project_stick::ReleaseFileEntry& file);
-  bool activateSnapshot(uint32_t version);
-  bool loadDisplayConfig(uint32_t version, uint32_t& contentRefreshIntervalSeconds,
-                         DisplayPreferences* preferences = nullptr, uint32_t* profileRevision = nullptr);
-  void cleanupReleaseStorage(bool keepIncoming = false);
-  bool ensureScheduleCache();
-  bool loadSchedule(std::vector<project_stick::ScheduleWindow>& windows);
-  bool selectContent(const std::string& scenario, uint32_t randomValue, project_stick::ContentCopy& selected);
-  bool streamScheduleFile(const std::string& path, project_stick::ScheduleStreamDecoder& decoder);
-  bool streamContentFile(const std::string& path, project_stick::ContentStreamDecoder& decoder);
-  bool fetchToFile(const std::string& url, const std::string& path, size_t maxBytes);
   enum class DownloadResult : uint8_t { Complete, Retry, Fatal };
   DownloadResult downloadFirmware(const std::string& id, const std::string& hash, size_t size);
   uint32_t firmwareRetryAtMs = 0;
   bool requestPost(const std::string& path, const std::string& body, std::string& response, int& status);
   bool fetchJson(const std::string& url, std::string& response, size_t maxBytes);
   bool fetchAuthenticated(const std::string& url, const std::function<bool(const uint8_t*, size_t)>& onData);
-  bool fileWithinLimit(const std::string& path, size_t maxBytes);
   bool parseServerTime(const char* value);
   bool hashFile(const std::string& path, std::string& result);
-  bool copyFile(const std::string& source, const std::string& destination);
-  bool findSnapshotEntry(uint32_t version, const std::string& path, project_stick::ReleaseFileEntry& result);
-  bool snapshotReferencesHash(uint32_t version, const std::string& sha256);
-  bool resolveReleaseFile(uint32_t version, const std::string& path, std::string& result);
-  std::string snapshotFile(uint32_t version) const;
-  std::string objectFile(const std::string& sha256) const;
-  std::string releaseRoot(uint32_t version) const;
-  std::string releaseFile(uint32_t version, const std::string& path) const;
-  void queueEvent(const char* type, const std::string& scenario, int64_t copyId);
   bool flushEvents();
   static std::string makeUuid();
 };

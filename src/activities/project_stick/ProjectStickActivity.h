@@ -19,48 +19,35 @@ class ProjectStickActivity final : public Activity {
   bool skipLoopDelay() override;
 
  private:
-  enum class State { Connecting, Online, Offline, Empty, Error, Inactive };
-  enum class FeedbackBubble { None, Meh, Useful };
+  enum class State { Connecting, Online, Offline, Error, Inactive };
 
   ProjectStickService service;
   State state = State::Connecting;
   uint32_t backgroundResultSequence = 0;
-  uint32_t lastManifestPollMs = 0;
   uint32_t lastStudioPollMs = 0;
   uint32_t studioGeneration = 0;
   uint32_t firmwareUpdateGeneration = 0;
-  // Button hint blocks (front hints and side feedback hints) appear on a key
-  // action and hide after BUTTON_HINT_TIMEOUT_MS without one; never while locked.
+  // Front button hints appear on a key action and hide after
+  // BUTTON_HINT_TIMEOUT_MS without one; never while locked.
   static constexpr uint32_t BUTTON_HINT_TIMEOUT_MS = 5000;
   bool buttonHintsVisible = false;
   uint32_t lastKeyActionMs = 0;
   void updateButtonHints(uint32_t nowMs);
   WifiAutoConnect wifiAutoConnect;
   void renderFirmwareUpdate();
-  uint32_t lastManifestAttemptMs = 0;
+  void renderStatusScreen();
+  uint32_t lastSyncAttemptMs = 0;
   uint32_t lastAlertPollMs = 0;
-  uint32_t lastScheduleCheckMs = 0;
   uint32_t lastRegisterMs = 0;
-  project_stick::SyncReport lastSyncReport;
   char statusLine[96] = {0};
-  char synchronizedAtLine[64] = {0};
-  FeedbackBubble feedbackBubble = FeedbackBubble::None;
-  uint32_t feedbackBubbleStartedMs = 0;
-  uint8_t feedbackBubbleFrame = 0;
 #ifdef SIMULATOR
-  bool simulatorRecoveryPending = false;
   bool simulatorAlertPollPending = false;
 #endif
 
-  void runManualRefresh();
   void applyBackgroundResult();
   bool requestCloudSync(bool registerFirst);
+  void syncNow();
   void updateState(const project_stick::SyncReport& report);
-  void recordSyncTiming(const project_stick::SyncReport& report);
-  void recordSynchronizedAt(const project_stick::ShanghaiTime& time);
-  void showFeedbackBubble(FeedbackBubble bubble);
-  void updateFeedbackBubble();
-  void drawFeedbackBubble(int screenWidth) const;
   void launchWifiSelection();
   void setStatus(const char* text);
 };

@@ -134,7 +134,7 @@ These flags in `platformio.ini` fundamentally affect firmware behavior:
   * lib/I18n/: Internationalization (translations in `translations/*.yaml`, generated string tables)
 * src/activities/: UI logic using the Activity Lifecycle (onEnter, loop, onExit)
 * freeink-sdk/: Low-level SDK (EInkDisplay, InputManager, BatteryMonitor, SDCardManager)
-* .crosspoint/: SD state (settings, project_stick/ releases, studio/ frames and OTA staging, lang/ packs)
+* .crosspoint/: SD state (settings, project_stick.json identity/binding state, studio/ frames and OTA staging, lang/ packs)
 
 ### Hardware Abstraction Layer (HAL)
 
@@ -547,8 +547,8 @@ clang-format -i src/**/*.cpp src/**/*.h
    - Set pointers to `nullptr` after `free()`
 
 4. **Corrupt SD State**:
-   - StockStick release snapshots and objects under `.crosspoint/project_stick/` are revalidated by SHA-256 and
-     re-downloaded; Studio partial transfers under `.crosspoint/studio/` resume or are discarded
+   - Studio partial transfers under `.crosspoint/studio/` resume or are discarded; `project_stick.json` holds only
+     identity, binding, alert and pending-event state
    - Deleting `.crosspoint/` resets settings, pairing identity and Wi-Fi credentials (device must be re-bound)
 
 5. **Watchdog Timeout**:

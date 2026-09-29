@@ -6,14 +6,12 @@
 
 namespace project_stick {
 
-enum class SyncResult { Updated, Unchanged, OfflineCache, NoContent, Failed, Inactive };
+enum class SyncResult { Synced, Unbound, Failed, Inactive };
 
 struct SyncReport {
   SyncResult result = SyncResult::Failed;
   bool registerAttempted = false;
   bool registerSucceeded = false;
-  bool manifestAttempted = false;
-  bool manifestCompleted = false;
   ShanghaiTime synchronizedAt;
 };
 
@@ -44,18 +42,6 @@ class BackgroundWorkGate {
 
 inline bool shouldRecordRegisterSuccess(const SyncReport& report) {
   return report.registerAttempted && report.registerSucceeded;
-}
-
-inline bool shouldRecordManifestPoll(const SyncReport& report) {
-  return report.manifestAttempted && report.manifestCompleted;
-}
-
-inline SyncResult contentSelectionFailureResult(uint32_t activeVersion) {
-  return activeVersion == 0 ? SyncResult::NoContent : SyncResult::Failed;
-}
-
-inline bool scheduleCacheNeedsReload(uint32_t cachedVersion, uint32_t activeVersion, bool cacheEmpty) {
-  return cacheEmpty || cachedVersion != activeVersion;
 }
 
 inline bool registrationDue(uint32_t nowMs, uint32_t lastSuccessMs, uint32_t intervalMs = 4UL * 60UL * 60UL * 1000UL) {

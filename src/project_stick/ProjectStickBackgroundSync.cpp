@@ -105,7 +105,7 @@ void ProjectStickBackgroundSync::taskLoop() {
     Result completed;
     completed.kind = kind;
     if (kind == WorkKind::Sync) {
-      completed.syncReport = service.sync(registerFirst, false);
+      completed.syncReport = service.sync(registerFirst);
     } else if (kind == WorkKind::StudioPoll) {
       service.syncStudio();
     } else if (kind == WorkKind::FirmwareCheck) {

@@ -78,11 +78,11 @@ TEST_F(I18nPack, IgnoresKeysFromOtherFirmwareVersions) {
 }
 
 TEST_F(I18nPack, DropsEntriesWhoseFormatConversionsDiffer) {
-  const auto synced = static_cast<size_t>(StrId::STR_PROJECT_STICK_SYNCED_AT);  // "%02u:%02u"
+  const auto synced = static_cast<size_t>(StrId::STR_SLEEP_TIMER_VALUE_FORMAT);  // "%u"
   const auto networks = static_cast<size_t>(StrId::STR_NETWORKS_FOUND);        // "%zu"
   ASSERT_TRUE(adopt(makePack("EN", "English",
-                             {{KEY_HASHES[synced], "Updated at %s"}, {KEY_HASHES[networks], "%zu networks, 100%% sure"}})));
-  EXPECT_STREQ(tr(STR_PROJECT_STICK_SYNCED_AT), "已更新 %02u:%02u 时刻的数据");  // would read an unsigned as char*
+                             {{KEY_HASHES[synced], "%s minutes"}, {KEY_HASHES[networks], "%zu networks, 100%% sure"}})));
+  EXPECT_STREQ(tr(STR_SLEEP_TIMER_VALUE_FORMAT), "%u 分钟");  // would read an unsigned as char*
   EXPECT_STREQ(tr(STR_NETWORKS_FOUND), "%zu networks, 100%% sure");
 }
 

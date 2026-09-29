@@ -41,30 +41,7 @@ bool parseDigits(const char* value, size_t offset, size_t count, int& out) {
   return true;
 }
 
-bool isUsed(int64_t id, const std::vector<int64_t>& usedIds) {
-  return std::find(usedIds.begin(), usedIds.end(), id) != usedIds.end();
-}
-
-bool matches(const ScheduleWindow& window, uint16_t minute, bool tradingDay) {
-  if (!window.enabled || window.allDay || (window.tradingDayOnly && !tradingDay)) return false;
-  if (window.startMinute == window.endMinute) return false;
-  if (window.startMinute < window.endMinute) {
-    return minute >= window.startMinute && minute < window.endMinute;
-  }
-  return minute >= window.startMinute || minute < window.endMinute;
-}
-
 }  // namespace
-
-bool parseClockMinute(const char* value, uint16_t& minute) {
-  if (!value) return false;
-  int hour = 0;
-  int min = 0;
-  if (!parseDigits(value, 0, 2, hour) || value[2] != ':' || !parseDigits(value, 3, 2, min)) return false;
-  if (hour > 23 || min > 59) return false;
-  minute = static_cast<uint16_t>(hour * 60 + min);
-  return true;
-}
 
 bool parseIso8601ToShanghai(const char* value, ShanghaiTime& result) {
   result = {};
@@ -134,13 +111,6 @@ ShanghaiTime advanceTime(const ShanghaiTime& base, uint32_t elapsedSeconds) {
   return result;
 }
 
-bool contentRotationDue(const ShanghaiTime& now, const ShanghaiTime& anchor, uint32_t intervalSeconds) {
-  if (intervalSeconds == 0 || !now.valid || !anchor.valid) return false;
-  const int64_t elapsed = (now.day - anchor.day) * 86400LL + static_cast<int64_t>(now.secondOfDay) -
-                          static_cast<int64_t>(anchor.secondOfDay);
-  return elapsed >= static_cast<int64_t>(intervalSeconds);
-}
-
 std::string formatIso8601Shanghai(const ShanghaiTime& time) {
   if (!time.valid) return {};
   int year = 0;
@@ -153,83 +123,6 @@ std::string formatIso8601Shanghai(const ShanghaiTime& time) {
   char buffer[32];
   snprintf(buffer, sizeof(buffer), "%04d-%02u-%02uT%02u:%02u:%02u+08:00", year, month, day, hour, minute, second);
   return buffer;
-}
-
-const ScheduleWindow* selectSchedule(const std::vector<ScheduleWindow>& windows, uint16_t minute, bool tradingDay) {
-  for (const auto& window : windows) {
-    if (matches(window, minute, tradingDay)) return &window;
-  }
-  for (const auto& window : windows) {
-    if (window.enabled && window.allDay) return &window;
-  }
-  for (const auto& window : windows) {
-    if (window.enabled) return &window;
-  }
-  return nullptr;
-}
-
-const ContentCopy* selectCopy(const std::vector<ContentCopy>& copies, const std::vector<int64_t>& usedIds,
-                              uint32_t randomValue) {
-  uint32_t total = 0;
-  for (const auto& copy : copies) {
-    if (!isUsed(copy.id, usedIds)) total += std::max<uint16_t>(copy.weight, 1);
-  }
-  if (total == 0) {
-    for (const auto& copy : copies) total += std::max<uint16_t>(copy.weight, 1);
-  }
-  if (total == 0) return nullptr;
-
-  uint32_t target = randomValue % total;
-  const bool allowUsed = std::all_of(copies.begin(), copies.end(),
-                                     [&usedIds](const ContentCopy& copy) { return isUsed(copy.id, usedIds); });
-  for (const auto& copy : copies) {
-    if (!allowUsed && isUsed(copy.id, usedIds)) continue;
-    const uint32_t weight = std::max<uint16_t>(copy.weight, 1);
-    if (target < weight) return &copy;
-    target -= weight;
-  }
-  return copies.empty() ? nullptr : &copies.front();
-}
-
-bool isSafeReleasePath(const std::string& path) {
-  if (path.empty() || path.front() == '/' || path.back() == '/' || path.size() > 160) return false;
-  size_t segmentStart = 0;
-  for (size_t i = 0; i <= path.size(); ++i) {
-    if (i == path.size() || path[i] == '/') {
-      const std::string segment = path.substr(segmentStart, i - segmentStart);
-      if (segment.empty() || segment == "." || segment == "..") return false;
-      segmentStart = i + 1;
-      continue;
-    }
-    const unsigned char c = static_cast<unsigned char>(path[i]);
-    if (!(std::isalnum(c) || c == '_' || c == '-' || c == '.')) return false;
-  }
-  return true;
-}
-
-std::string stripWrappingQuotes(const std::string& text) {
-  const size_t first = text.find_first_not_of(" \t\r\n");
-  if (first == std::string::npos) return {};
-  const size_t last = text.find_last_not_of(" \t\r\n");
-  std::string result = text.substr(first, last - first + 1);
-
-  struct QuotePair {
-    const char* opening;
-    const char* closing;
-  };
-  constexpr QuotePair PAIRS[] = {
-      {"\"", "\""},
-      {"\xE2\x80\x9C", "\xE2\x80\x9D"},  // “ ”
-  };
-  for (const auto& pair : PAIRS) {
-    const size_t openingLength = std::char_traits<char>::length(pair.opening);
-    const size_t closingLength = std::char_traits<char>::length(pair.closing);
-    if (result.size() >= openingLength + closingLength && result.compare(0, openingLength, pair.opening) == 0 &&
-        result.compare(result.size() - closingLength, closingLength, pair.closing) == 0) {
-      return result.substr(openingLength, result.size() - openingLength - closingLength);
-    }
-  }
-  return result;
 }
 
 }  // namespace project_stick

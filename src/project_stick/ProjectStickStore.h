@@ -11,8 +11,6 @@
 struct ProjectStickEvent {
   std::string id;
   std::string type;
-  std::string scenario;
-  int64_t copyId = 0;
   std::string clientTs;
   std::string studioTask, studioCard;
 };
@@ -23,37 +21,19 @@ class ProjectStickStore : public PersistableStore<ProjectStickStore> {
   friend class PersistableStore<ProjectStickStore>;
 
  public:
-  static constexpr size_t MAX_USED_IDS = 64;
   static constexpr size_t MAX_PENDING_EVENTS = 32;
+  static constexpr size_t MAX_SEEN_ALERTS = 32;
 
   std::string ownerId;
   std::string deviceId;
   std::string deviceToken;
   std::string pairingCode;
   bool bound = false;
-  uint32_t activeVersion = 0;
-  uint32_t previousVersion = 0;
   uint32_t pollIntervalSeconds = 300;
   uint32_t alertPollIntervalSeconds = 30;
-  uint32_t contentRefreshIntervalSeconds = 600;
-  uint32_t profileRevision = 0;
-  std::string themeId = "calm";
-  std::string textScale = "standard";
-  std::string displayLayout = "balanced";
-  bool showScenario = true;
-  bool showTone = false;
-  bool showSyncTime = true;
   bool tradingDay = false;
-  int64_t usedDay = 0;
-  project_stick::ShanghaiTime rotationAnchor;
-  uint32_t displayVersion = 0;
-  std::string displayScenario;
-  std::string displayText;
-  std::string displayTone;
-  int64_t displayCopyId = 0;
-  bool displayAlert = false;
-  project_stick::ShanghaiTime displayAlertUntil;
-  std::vector<int64_t> usedCopyIds;
+  // End of the latest market alert; the Studio program shows its alert scene until then.
+  project_stick::ShanghaiTime alertUntil;
   std::vector<int64_t> seenAlertIds;
   std::vector<ProjectStickEvent> pendingEvents;
 
@@ -61,7 +41,6 @@ class ProjectStickStore : public PersistableStore<ProjectStickStore> {
   void toJson(JsonDocument& doc) const;
   bool fromJson(JsonVariantConst doc);
 
-  void markCopyUsed(int64_t day, int64_t id);
   bool hasSeenAlert(int64_t id) const;
   void markAlertSeen(int64_t id);
   void enqueue(ProjectStickEvent event);

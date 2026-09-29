@@ -5,13 +5,16 @@
 
 This private fork turns upstream CrossPoint into the dedicated StockStick
 firmware. Since 2.0.0 the ebook reader, library, web file transfer, OPDS,
-KOReader and Calibre integrations are removed; the firmware keeps the device
-platform (display, input, power, SD, Wi-Fi, BLE, settings, SD/recovery
-flashing) and the StockStick surfaces. X3 is the product target; X3/X4
-runtime detection is kept so other panels can be added later.
+KOReader and Calibre integrations are removed; since 2.1.0 the legacy
+"Release" companion pipeline (manifest polling, release snapshots, JSON
+schedule/copy rotation and display themes) is removed as well. Everything the
+device shows is a Studio frame or program rendered by the mini program. The
+firmware keeps the device platform (display, input, power, SD, Wi-Fi, BLE,
+settings, SD/recovery flashing). X3 is the product target; X3/X4 runtime
+detection is kept so other panels can be added later.
 
-The firmware identity lives in `platformio.ini` (`version = 2.0.0`,
-`build = 20000`) and is embedded in every image; see
+The firmware identity lives in `platformio.ini` (`version = 2.1.0`,
+`build = 20100`) and is embedded in every image; see
 [firmware-ota.md](firmware-ota.md) for release and upgrade rules. The UI is
 built in Simplified Chinese; other languages load from SD-card packs.
 
@@ -21,66 +24,46 @@ built in Simplified Chinese; other languages load from SD-card packs.
    `ProjectStickActivity` by default. Recovery firmware mode, crash reporting,
    and explicit silent-restart targets retain their dedicated routes; holding
    Back during boot opens the system menu (StockStick / Settings) instead.
-2. The activity opens in offline mode immediately and reconnects to saved
-   Wi-Fi networks in the background (last network first, 15 s per attempt,
-   exponential backoff up to 5 min), so boot, deep-sleep wake and OTA restarts
-   come back online without user input; the offline->online edge registers and
-   polls immediately. Once online the service creates a persistent UUID v4 identity, obtains a
-   device bearer credential, and shows the short-lived binding code returned by
-   `/api/v2/device/pairing`. The bearer credential is persisted on SD but never
-   written to logs or rendered. After the mini program claims the code, the
-   service registers as the bound device. If an older backend reports the
-   pairing as already claimed before local state has observed `bound=true`, the
-   firmware continues to authenticated registration instead of stopping at the
-   pairing response. An unbound identity whose token the server rejects (401)
-   is replaced by a fresh identity instead of failing forever.
-3. The manifest is streamed through a 512-byte parser and written to a
-   temporary SD file. Its entries become a compact release snapshot under
-   `/.crosspoint/project_stick/snapshots/<version>.idx`.
-4. Register, manifest, changed Release files, and the final event batch reuse
-   one HTTP keep-alive/TLS connection for the synchronization burst. Release
-   files remain serial to respect the ESP32-C3 memory ceiling. Each SHA-256
-   object is stored once at
-   `/.crosspoint/project_stick/objects/<sha256>.json`; an already verified SHA
-   is reused without another download. Changed objects stream directly to a
-   temporary SD file while their byte count and SHA-256 are checked.
-5. Only after every object passes validation does
-   `/.crosspoint/project_stick.json` atomically switch `active_version`.
-   `previous_version` remains the rollback snapshot.
-6. The active schedule and persisted content-rotation deadline are checked
-   every 30 seconds, the manifest at the server-provided interval, and alerts
-   during the documented trading windows. The default rotation interval is
-   600 seconds; `0` disables it and other values are clamped to 60-86400 seconds.
-   A release-version change invalidates the foreground schedule cache before
-   selection, and the foreground clock adopts the Shanghai server time returned
-   by each completed background synchronization.
-7. Events are persisted in the same state file and retried after connectivity
-   returns. Pending telemetry does not delay manifest or Release activation:
-   the service combines old and newly produced events into one batch after the
-   content-critical path completes. The TLS connection is then closed so its
-   runtime memory is not retained between polling bursts.
+2. The activity opens immediately and reconnects to saved Wi-Fi networks in the
+   background (last network first, 15 s per attempt, exponential backoff up to
+   5 min), so boot, deep-sleep wake and OTA restarts come back online without
+   user input; the offline->online edge registers and polls immediately.
+3. The service keeps a persistent UUID v4 identity and a device bearer
+   credential obtained from `/api/v2/device/pairing`. The credential is persisted
+   on SD but never written to logs or rendered. While unbound, every sync
+   re-pairs, which refreshes the eight-character binding code (valid for 10
+   minutes on the server), and the screen shows the code and its
+   `stockstick://bind?code=` QR. If the server already committed the claim
+   (pairing answers 409), registration continues and returns the authoritative
+   `bound` state. An unbound identity whose token the server rejects (401) is
+   replaced by a fresh identity.
+4. `/api/v2/device/register` returns `bound`, `owner_id`, `server_time`,
+   `is_trading_day` and the register/alert poll intervals. A successful
+   registration corrects the working clock; an owner change clears Studio data,
+   pending events and alert state and rotates the BLE credential.
+5. While Wi-Fi is up and no BLE session is active, the Studio target is polled
+   every 5 seconds (`/api/v2/device/studio`, see
+   [studio-protocol.md](studio-protocol.md)). A register heartbeat runs at the
+   server-provided poll interval (every 4 hours once bound).
+6. Until a Studio frame is installed, a bound device shows `还没有内容` and
+   `请在小程序发布官方计划或卡片` (or a Wi-Fi prompt when offline). The mini program
+   seeds every account with the official scenes and plan and publishes that plan
+   right after binding, so this screen is normally transient.
+7. Studio feedback events (`studio_next`, `studio_useful`) are persisted in the
+   state file and uploaded after the Studio poll; the queue is capped at 32.
 
-Content rotation is local and independent from manifest polling. The active
-Release's display snapshot, alert expiry, and rotation anchor are persisted as
-one coherent runtime state, so restart restores the current page before checking
-whether its schedule or deadline changed. At a deadline
-the service first re-evaluates the schedule, then selects another weighted,
-unused copy from that scenario. The Shanghai-time anchor is persisted across
-reboots. Schedule transitions take priority, active alerts pause ordinary
-rotation, and useful/meh/manual interactions restart the interval. A failed
-selection retains the current display. Automatic selections enqueue the same
-`trigger_fired` and `screen_view` events as other display changes; they do not
-change the last successful synchronization label.
+## Market alerts
 
-The `market_open` scenario is the normal non-alert display during trading
-sessions. Its device tag is rendered as `盘中常态`; `volatility_alert` may
-temporarily override it, while `post_close` remains the all-day fallback.
+On trading days between 09:30–11:30 and 13:00–15:00 (Shanghai) the device polls
+`/api/v2/device/alerts` at the server-provided interval. Each unseen alert
+extends the persisted `alertUntil` to its `active_until`; the device keeps no
+alert copy of its own. `StudioFrame::tick` shows the installed program's alert
+scene (or overlays a permitted temporary card) while `alertUntil` lies in the
+future. The last 32 alert IDs are remembered so a restart does not replay them.
 
-The service uses the device RTC as the offline scheduling clock and corrects its
-working clock whenever the API returns `server_time`. RTC reads retain seconds,
-while the desktop simulator reads the host UTC wall clock, so both production
-deadlines and accelerated simulator checks use the same absolute wall-time
-comparison.
+The service uses the device RTC as the offline clock and corrects its working
+clock whenever the API returns `server_time`. The desktop simulator reads the
+host UTC wall clock.
 
 ## Configuration
 
@@ -102,24 +85,7 @@ build_flags =
 ```
 
 The authenticated HTTP API path prefix (`/api/v2/device`) is appended by the
-service. Existing firmware releases continue to use the anonymous v1 protocol;
-this firmware sends `Authorization: Bearer <device_token>` on register,
-manifest, Release, alert, and event requests. A device can read only the
-current Release belonging to its bound user.
-
-The active Release `config.json` supplies
-`display.content_refresh_interval_seconds`. Firmware without that field uses
-600 seconds. For fast desktop verification only, set
-`CROSSPOINT_SIM_CONTENT_REFRESH_SECONDS=5`; this also shortens the simulator's
-schedule/deadline check cadence to one second without changing production data.
-
-The same file supplies a finite display schema. Supported theme IDs are
-`calm`, `large`, `minimal`, and `information`; unknown values fall back to
-`calm`. `text_scale` accepts `compact`, `standard`, or `large`, and `layout`
-accepts `focused`, `balanced`, or `dense`. Scenario, tone, and synchronization
-metadata each have explicit visibility flags. The firmware never interprets
-arbitrary CSS or drawing instructions. These preferences are stored with the
-active Release so offline boots render the last synchronized theme.
+service. Every request after pairing sends `Authorization: Bearer <device_token>`.
 
 ## X3 controls
 
@@ -128,42 +94,26 @@ All StockStick strings come from the built-in Simplified Chinese catalogue
 them (see [i18n.md](i18n.md)).
 
 - The four protruding front buttons are protected by a global X3 keyguard in
-  every activity. After 20 seconds without button or touch activity, all
-  non-power button events are suppressed. The current activity and its content
-  remain unchanged; locking only adds a 12-pixel-high lock icon at the top left,
-  exactly matching the standard battery icon height.
+  every activity except while a Studio frame owns the screen (Studio has its own
+  portable-mode lock, see [studio-protocol.md](studio-protocol.md)). After 20
+  seconds without button or touch activity, all non-power button events are
+  suppressed. Locking only adds a 12-pixel-high lock icon at the top left.
 - Unlocking follows the Nokia-style physical sequence: release the left side
-  button, then release the right side button. No guide is shown merely because
-  the timeout elapsed. Pressing any non-power button reveals a compact bubble
-  in the bottom chrome with `请依次按左、右侧边键解锁`; after the first step it
-  changes to `左侧键已确认，请按右侧边键解锁`.
-  Right-first does nothing; a front-button press during an incomplete sequence
-  resets it to the left step. The right-side release that unlocks is consumed,
-  so it never leaks through as `feedback_useful`. The power button remains
-  available while locked, and cloud synchronization continues in the
-  background.
-
-- Release the left side button (`Up`) to send `feedback_meh`, show a left-origin
-  white confirmation box with a thin black rounded outline, and immediately
-  select another unused copy from the currently active schedule window.
-- Release the right side button (`Down`) to send `feedback_useful` and show a
-  matching right-origin confirmation box without replacing the displayed copy.
-  Both confirmations slide toward the centre and intentionally have no speech
-  bubble tail. The X3 renderer uses discrete e-paper-safe frames over 360 ms and
-  clears the confirmation after 2200 ms.
-- The top of the content area records the Shanghai `HH:MM` of the latest
-  completed background manifest synchronization.
-- Press the front-right button to re-evaluate the current schedule, select
-  another copy, and, when online, check for a new release.
-- The front confirm button opens Wi-Fi selection; the front back button opens the
-  system menu (StockStick / Settings).
-- The card page's button hint blocks (front hints and the side feedback hints)
-  are hidden by default, appear on any key action and hide after 5 seconds
-  without one. They never show while the keyguard is locked. Hint blocks are
-  sized for the Chinese fallback font (Noto Sans SC 12).
-- Before binding, the content area shows a clear mini-program instruction and
-  the current eight-character code. The ordinary content UI appears as soon as
-  the next authenticated registration reports `bound=true`.
+  button, then release the right side button. Pressing any non-power button
+  reveals `请依次按左、右侧边键解锁`; after the first step it changes to
+  `左侧键已确认，请按右侧边键解锁`. The right-side release that unlocks is
+  consumed. The power button remains available while locked, and cloud
+  synchronization continues in the background.
+- With a Studio frame installed: the left side button (`Up`) is "一般" (show
+  the next card, `studio_next`), the right side button (`Down`) is "有用" (keep
+  the card, `studio_useful`), and the front-right button selects the next card
+  without feedback. Feedback overlays use the physical 56×40 box at (236,732)
+  for two seconds, identical to the mini program's run simulation.
+- Without a Studio frame the front hints read 返回 / Wi-Fi / – / 同步: Back opens
+  the system menu (StockStick / Settings), Confirm opens Wi-Fi selection, and
+  the front-right button registers and polls Studio immediately. The hints
+  appear on any key action, hide after 5 seconds without one and never show
+  while locked.
 
 ## Desktop simulator
 
@@ -173,40 +123,21 @@ Build and launch the same Project.Stick activity used by the firmware:
 pio run -e simulator -t run_simulator
 ```
 
-The simulator uses the production API by default and persists its simulated SD state under `fs_/.crosspoint/`.
-
-To verify local rotation quickly:
-
-```bash
-CROSSPOINT_SIM_CONTENT_REFRESH_SECONDS=5 pio run -e simulator -t run_simulator
-```
+The simulator uses the production API by default and persists its simulated SD
+state under `fs_/.crosspoint/`. `CROSSPOINT_SIM_FORCE_ALERT_WINDOW=1` lets alert
+polling run outside trading hours, `CROSSPOINT_SIM_POLL_ALERT_ONCE=1` polls
+alerts once after the first successful sync, and
+`CROSSPOINT_SIM_FAIL_FIRST_REGISTER=1` injects one register failure.
 
 ## X3 memory boundaries
 
-- The manifest never occupies a 64 KiB RAM body: it is capped at 64 KiB on SD
-  and parsed with a 512-byte heap buffer. Alerts remain capped at 32 KiB.
-- Config, schedule, and content JSON are rejected above 16 KiB / 32 KiB /
-  96 KiB before parsing.
-- The schedule parser keeps at most 32 windows in RAM.
-- Content is read in two 512-byte streaming passes: the first measures weights
-  without retaining text, and the second retains only the selected copy.
-- Every HTTP GET completes before the next begins. Manifest, schedule, config,
-  and content downloads therefore never hold two network links concurrently;
-  completed responses reuse the same clean keep-alive connection during one
-  sync burst to avoid repeated TLS handshakes.
+- Register, alert and Studio JSON bodies are capped (alerts 32 KiB, Studio
+  4 KiB) and parsed with ArduinoJson from a bounded string.
+- Every HTTP GET completes before the next begins; one sync burst reuses the
+  same keep-alive TLS connection.
 - Studio polls (every 5 s) keep that connection between polls only while the
   heap has at least 80 KiB free with a 32 KiB contiguous block; the sync worker
   closes it after 45 s without work. A stale connection is retried once on a
   fresh one by SecureHttpClient.
-- Release downloads stream directly to SD; copy/hash helpers use a 1 KiB heap
-  buffer. Manifest entries, content copies, used IDs, seen alerts, and pending
-  events all have explicit caps.
-
-## SD retention and recovery
-
-The active and previous snapshot are the only release indexes retained.
-Content-addressed objects referenced by neither snapshot are removed. A failed
-or interrupted download leaves `active_version` unchanged; temporary and
-orphaned files are removed on the next service start. Older firmware's
-`releases/<version>` layout is imported by SHA without redownloading and is
-kept only while it is the sole rollback copy.
+- Studio frames and programs stream directly to SD; seen alerts and pending
+  events have explicit caps (32 each).

@@ -15,6 +15,10 @@ def check_image_size(source, target, env):
     if not limits:
         raise RuntimeError("No application partition found; cannot validate final firmware size")
     binary = Path(env.subst("$BUILD_DIR/${PROGNAME}.bin"))
+    if not binary.exists():
+        # The platform builds the .bin after checkprogsize; its own post action checks it.
+        print("Final OTA binary not produced yet; it is verified when written")
+        return
     size = binary.stat().st_size
     limit = min(limits)
     if size > limit:
