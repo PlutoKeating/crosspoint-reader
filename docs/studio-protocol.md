@@ -60,8 +60,8 @@ streams the remaining payload. POST reports receiving/verification/refresh state
 complete a newer target. A cloud poll occurs every five seconds while Wi-Fi is
 connected and BLE is idle.
 
-Ownership changes clear Studio and legacy companion data/events, rotate BLE
-credentials, and retain reading data. A revoked fully offline device cannot learn
+Ownership changes clear Studio and legacy companion data/events and rotate BLE
+credentials; device settings and saved Wi-Fi networks are kept. A revoked fully offline device cannot learn
 about revocation until it reconnects; the mini-program makes that limitation visible.
 
 The production API is `https://stockstick.plutokeating.beer`. TLS pins ISRG Root X2,
