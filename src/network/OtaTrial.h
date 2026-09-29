@@ -45,6 +45,8 @@ struct Outcome {
   char reason[48] = {};
 };
 Outcome pendingOutcome();
+// Cheap check (no NVS access) used by frequent polls.
+bool hasPendingOutcome();
 void clearOutcome();
 
 }  // namespace ota_trial

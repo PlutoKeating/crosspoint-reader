@@ -12,6 +12,7 @@
 #include "CrossPointSettings.h"
 #include "LanguageSelectActivity.h"
 #include "MappedInputManager.h"
+#include "FirmwareUpdateActivity.h"
 #include "SdFirmwareUpdateActivity.h"
 #include "SettingsList.h"
 #include "activities/network/WifiSelectionActivity.h"
@@ -55,6 +56,7 @@ void SettingsActivity::rebuildSettingsLists() {
                             SettingInfo::Action(StrId::STR_REMAP_FRONT_BUTTONS, SettingAction::RemapFrontButtons));
   }
   systemSettings.push_back(SettingInfo::Action(StrId::STR_WIFI_NETWORKS, SettingAction::Network));
+  systemSettings.push_back(SettingInfo::Action(StrId::STR_OTA_TITLE, SettingAction::FirmwareUpdate));
   systemSettings.push_back(SettingInfo::Action(StrId::STR_SD_FIRMWARE_UPDATE, SettingAction::SdFirmwareUpdate));
   systemSettings.push_back(SettingInfo::Action(StrId::STR_LANGUAGE, SettingAction::Language));
 
@@ -317,6 +319,9 @@ void SettingsActivity::toggleCurrentSetting() {
         break;
       case SettingAction::Network:
         startActivityForResult(std::make_unique<WifiSelectionActivity>(renderer, mappedInput, false), resultHandler);
+        break;
+      case SettingAction::FirmwareUpdate:
+        startActivityForResult(std::make_unique<FirmwareUpdateActivity>(renderer, mappedInput), resultHandler);
         break;
       case SettingAction::SdFirmwareUpdate:
         startActivityForResult(std::make_unique<SdFirmwareUpdateActivity>(renderer, mappedInput), resultHandler);

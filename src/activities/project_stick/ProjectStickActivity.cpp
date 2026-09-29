@@ -14,6 +14,7 @@
 #include "components/UITheme.h"
 #include "components/icons/project_stick_icons.h"
 #include "fontIds.h"
+#include "project_stick/FirmwareUpdateState.h"
 #include "project_stick/StudioBluetooth.h"
 #include "project_stick/StudioFrame.h"
 #include "util/QrUtils.h"
@@ -237,6 +238,11 @@ void ProjectStickActivity::loop() {
                                  ? display.alertUntil.day * 86400LL + display.alertUntil.secondOfDay - 8 * 3600
                                  : 0;
   frame.tick(studioNow, 0, alertUntil);
+  const auto firmwareUpdate = firmware_update::snapshot();
+  if (firmwareUpdate.generation != firmwareUpdateGeneration) {
+    firmwareUpdateGeneration = firmwareUpdate.generation;
+    requestUpdate();  // progress, or restore the content once the update stops
+  }
   if (studioGeneration != frame.generation()) {
     studioGeneration = frame.generation();
     requestUpdate();
@@ -364,7 +370,38 @@ void ProjectStickActivity::launchWifiSelection() {
                          });
 }
 
+void ProjectStickActivity::renderFirmwareUpdate() {
+  const auto update = firmware_update::snapshot();
+  const auto& metrics = UITheme::getInstance().getMetrics();
+  const int width = renderer.getScreenWidth();
+  const int height = renderer.getScreenHeight();
+  const int lineHeight = renderer.getLineHeight(UI_12_FONT_ID);
+  const char* title = tr(STR_OTA_DOWNLOADING);
+  if (update.phase == firmware_update::Phase::Verifying) title = tr(STR_OTA_VERIFYING);
+  if (update.phase == firmware_update::Phase::Installing) title = tr(STR_OTA_INSTALLING);
+  if (update.phase == firmware_update::Phase::Restarting) title = tr(STR_OTA_RESTARTING);
+  renderer.clearScreen();
+  GUI.drawHeader(renderer, Rect{0, metrics.topPadding, width, metrics.headerHeight}, tr(STR_OTA_TITLE));
+  int y = height / 2 - lineHeight * 2;
+  renderer.drawCenteredText(UI_12_FONT_ID, y, title, true, EpdFontFamily::BOLD);
+  y += lineHeight + metrics.verticalSpacing;
+  renderer.drawCenteredText(UI_10_FONT_ID, y, update.version);
+  y += lineHeight + metrics.verticalSpacing;
+  if (update.phase != firmware_update::Phase::Restarting) {
+    GUI.drawProgressBar(renderer,
+                        Rect{metrics.contentSidePadding, y, width - metrics.contentSidePadding * 2,
+                             metrics.progressBarHeight},
+                        update.percent(), 100);
+  }
+  renderer.displayBuffer();
+}
+
 void ProjectStickActivity::render(RenderLock&&) {
+  // A firmware update owns the screen: the device restarts when it finishes.
+  if (firmware_update::snapshot().busy()) {
+    renderFirmwareUpdate();
+    return;
+  }
   if (StudioFrame::instance().render(renderer)) {
     renderer.displayBuffer();
     StudioFrame::instance().displayed();

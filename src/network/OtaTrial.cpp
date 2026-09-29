@@ -8,6 +8,7 @@
 #include <esp_system.h>
 #include <freertos/FreeRTOS.h>
 
+#include <atomic>
 #include <cstring>
 
 #include "OtaBootSwitch.h"
@@ -29,6 +30,7 @@ uint8_t transportFailures = 0;
 uint32_t firstFailureMs = 0;
 char trialCommand[40] = {};
 char trialVersion[33] = {};
+std::atomic<bool> outcomePending{false};  // read by the sync task, written by the main loop
 
 bool abnormalReset(esp_reset_reason_t reason) {
   switch (reason) {
@@ -56,6 +58,7 @@ void markRunningValid() {
 }
 
 void saveOutcome(Preferences& prefs, bool rolledBack, const char* reason) {
+  outcomePending = true;
   prefs.putBool("out", true);
   prefs.putBool("out_rb", rolledBack);
   prefs.putString("out_cmd", prefs.getString("cmd", ""));
@@ -106,6 +109,7 @@ void onBoot() {
     markRunningValid();
     return;
   }
+  outcomePending = prefs.getBool("out", false);
   stick_fw::TrialRecord record;
   record.armed = prefs.getBool("armed", false);
   record.attempts = prefs.getUChar("tries", 0);
@@ -243,7 +247,10 @@ Outcome pendingOutcome() {
   return outcome;
 }
 
+bool hasPendingOutcome() { return outcomePending; }
+
 void clearOutcome() {
+  outcomePending = false;
   Preferences prefs;
   if (!prefs.begin(NS, false)) return;
   prefs.putBool("out", false);

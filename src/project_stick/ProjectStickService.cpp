@@ -314,6 +314,7 @@ ProjectStickService::SyncReport ProjectStickService::sync(bool registerFirst, bo
       return report;
     }
     report.registerSucceeded = true;
+    if (ota_trial::hasPendingOutcome()) reportFirmwareOutcome();
   }
 
   {
@@ -1531,7 +1532,11 @@ void ProjectStickService::syncStudio() {
   if (deserializeJson(doc, response)) return;
   adoptOwner(doc["owner_id"] | "");
   flushEvents();
-  if (syncStudioCommand()) return;
+  if (ota_trial::hasPendingOutcome()) reportFirmwareOutcome();
+  // Servers with OTA protocol 2 say whether a command is queued; older ones
+  // omit the flag and the device keeps polling /commands.
+  const bool commandPending = doc["command_pending"].isNull() || doc["command_pending"].as<bool>();
+  if (commandPending && syncStudioCommand()) return;
   if (!doc["bluetooth"].isNull())
     studio_ble::configure(PROJECT_STICK_STORE.deviceId, doc["bluetooth"]["secret"] | "", doc["bluetooth"]["epoch"] | 0,
                           doc["bluetooth"]["owner_id"] | "");
@@ -1596,7 +1601,6 @@ struct InstallContext {
 
 bool ProjectStickService::syncStudioCommand() {
 #ifndef SIMULATOR
-  reportFirmwareOutcome();
   std::string response;
   if (!fetchJson(baseUrl + "/api/v2/device/commands?device_id=" + PROJECT_STICK_STORE.deviceId, response, 2048))
     return false;
@@ -1629,6 +1633,7 @@ bool ProjectStickService::syncStudioCommand() {
     return true;
   }
   if (powerManager.getBatteryPercentage() < MIN_OTA_BATTERY_PERCENT) {
+    firmware_update::fail("low_battery");
     report("failed", "Battery below 30%; charge before retrying");
     return true;
   }
@@ -1759,6 +1764,50 @@ bool ProjectStickService::downloadFirmware(const std::string& id, const std::str
     if (offset < size && attempt < 3) delay(1000UL << attempt);
   }
   return offset == size;
+}
+
+ProjectStickService::FirmwareOffer ProjectStickService::checkFirmware() {
+  HttpBurst burst(http);
+  FirmwareOffer offer;
+  std::string response;
+  if (!fetchJson(baseUrl + "/api/v2/device/firmware/latest?device_id=" + PROJECT_STICK_STORE.deviceId +
+                     "&channel=stable",
+                 response, 4096)) {
+    return offer;
+  }
+  JsonDocument doc;
+  if (deserializeJson(doc, response)) return offer;
+  if (!(doc["bound"] | false)) {
+    offer.status = FirmwareOffer::Status::Unbound;
+  } else if (doc["latest"].isNull()) {
+    offer.status = FirmwareOffer::Status::UpToDate;
+  } else {
+    offer.status = FirmwareOffer::Status::UpdateAvailable;
+    offer.id = doc["latest"]["id"] | "";
+    offer.version = doc["latest"]["version"] | "";
+    offer.notes = doc["latest"]["notes"] | "";
+    if (offer.id.size() != 36 || offer.version.empty()) offer.status = FirmwareOffer::Status::Failed;
+  }
+  return offer;
+}
+
+ProjectStickService::FirmwareOffer ProjectStickService::requestFirmware(const std::string& firmwareId) {
+  HttpBurst burst(http);
+  FirmwareOffer offer;
+  offer.id = firmwareId;
+  offer.status = FirmwareOffer::Status::RequestFailed;
+  JsonDocument body;
+  body["device_id"] = PROJECT_STICK_STORE.deviceId;
+  body["action"] = "request";
+  body["firmware_id"] = firmwareId;
+  std::string json, response;
+  serializeJson(body, json);
+  int status = 0;
+  if (!requestPost("/api/v2/device/commands", json, response, status) || status != 200) return offer;
+  offer.status = FirmwareOffer::Status::Requested;
+  // Install right away on this worker; progress is published for the UI.
+  syncStudioCommand();
+  return offer;
 }
 
 void ProjectStickService::reportFirmwareOutcome() {

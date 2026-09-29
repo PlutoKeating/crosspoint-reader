@@ -1,0 +1,214 @@
+#include "FirmwareUpdateActivity.h"
+
+#include <GfxRenderer.h>
+#include <I18n.h>
+#include <WiFi.h>
+
+#include <cstdio>
+#include <cstring>
+
+#include "MappedInputManager.h"
+#include "activities/network/WifiSelectionActivity.h"
+#include "activities/util/ConfirmationActivity.h"
+#include "components/UITheme.h"
+#include "fontIds.h"
+#include "network/OtaTrial.h"
+#include "project_stick/FirmwareInstall.h"
+#include "project_stick/FirmwareUpdateState.h"
+#include "project_stick/ProjectStickBackgroundSync.h"
+
+void FirmwareUpdateActivity::onEnter() {
+  Activity::onEnter();
+  PROJECT_STICK_BACKGROUND_SYNC.begin();
+  backgroundSequence = PROJECT_STICK_BACKGROUND_SYNC.latestSequence();
+  const auto outcome = ota_trial::pendingOutcome();
+  rolledBackNotice = outcome.pending && outcome.rolledBack;
+  rolledBackVersion = outcome.version;
+  state = firmware_update::snapshot().busy() ? State::Installing : State::Idle;
+  requestUpdate();
+}
+
+void FirmwareUpdateActivity::startCheck() {
+  checkFailedOffline = false;
+  if (WiFi.status() != WL_CONNECTED) {
+    startActivityForResult(std::make_unique<WifiSelectionActivity>(renderer, mappedInput),
+                           [this](const ActivityResult& result) {
+                             if (result.isCancelled || WiFi.status() != WL_CONNECTED) {
+                               checkFailedOffline = true;
+                               state = State::Idle;
+                               requestUpdate();
+                               return;
+                             }
+                             startCheck();
+                           });
+    return;
+  }
+  state = State::Checking;
+  awaitingWork = PROJECT_STICK_BACKGROUND_SYNC.requestFirmwareCheck();
+  requestUpdate();
+}
+
+void FirmwareUpdateActivity::startInstall() {
+  state = State::Installing;
+  firmware_update::reset();
+  awaitingWork = PROJECT_STICK_BACKGROUND_SYNC.requestFirmwareInstall(offer.id);
+  requestUpdate();
+}
+
+void FirmwareUpdateActivity::pollBackground() {
+  // The worker handles one job at a time; retry queuing until it is free.
+  if (!awaitingWork) {
+    if (state == State::Checking) awaitingWork = PROJECT_STICK_BACKGROUND_SYNC.requestFirmwareCheck();
+    if (state == State::Installing && !firmware_update::snapshot().busy() && !offer.id.empty()) {
+      awaitingWork = PROJECT_STICK_BACKGROUND_SYNC.requestFirmwareInstall(offer.id);
+    }
+  }
+  ProjectStickBackgroundSync::Result result;
+  while (PROJECT_STICK_BACKGROUND_SYNC.takeResult(backgroundSequence, result)) {
+    using Kind = ProjectStickBackgroundSync::WorkKind;
+    if (result.kind == Kind::FirmwareCheck && state == State::Checking) {
+      offer = result.firmware;
+      state = State::Result;
+      awaitingWork = false;
+      requestUpdate();
+    } else if (result.kind == Kind::FirmwareRequest && state == State::Installing) {
+      // A successful install restarts the device, so reaching here means the
+      // request failed, the device was busy, or the install stopped early.
+      offer.status = result.firmware.status;
+      state = State::Result;
+      awaitingWork = false;
+      requestUpdate();
+    }
+  }
+  const auto progress = firmware_update::snapshot();
+  if (progress.generation != renderedProgressGeneration) {
+    renderedProgressGeneration = progress.generation;
+    if (progress.busy()) state = State::Installing;
+    requestUpdate();
+  }
+}
+
+void FirmwareUpdateActivity::loop() {
+  pollBackground();
+  if (state == State::Confirming) return;
+  if (mappedInput.wasPressed(MappedInputManager::Button::Back)) backPressSeen = true;
+  if (mappedInput.wasPressed(MappedInputManager::Button::Confirm)) confirmPressSeen = true;
+  if (backPressSeen && mappedInput.wasReleased(MappedInputManager::Button::Back)) {
+    // Leaving never cancels work: the worker keeps downloading/installing.
+    finish();
+    return;
+  }
+  if (!confirmPressSeen || !mappedInput.wasReleased(MappedInputManager::Button::Confirm)) return;
+  confirmPressSeen = false;
+  if (state == State::Idle ||
+      (state == State::Result && offer.status != ProjectStickService::FirmwareOffer::Status::UpdateAvailable)) {
+    startCheck();
+  } else if (state == State::Result) {
+    state = State::Confirming;
+    char heading[64];
+    snprintf(heading, sizeof(heading), "%s %s", tr(STR_OTA_AVAILABLE), offer.version.c_str());
+    startActivityForResult(std::make_unique<ConfirmationActivity>(renderer, mappedInput, heading, offer.notes),
+                           [this](const ActivityResult& result) {
+                             if (result.isCancelled) {
+                               state = State::Result;
+                               requestUpdate();
+                               return;
+                             }
+                             startInstall();
+                           });
+  }
+}
+
+void FirmwareUpdateActivity::render(RenderLock&&) {
+  const auto& metrics = UITheme::getInstance().getMetrics();
+  const int pageWidth = renderer.getScreenWidth();
+  const int lineHeight = renderer.getLineHeight(UI_10_FONT_ID);
+  const int side = metrics.contentSidePadding;
+  renderer.clearScreen();
+  GUI.drawHeader(renderer, Rect{0, metrics.topPadding, pageWidth, metrics.headerHeight}, tr(STR_OTA_TITLE));
+
+  int y = metrics.topPadding + metrics.headerHeight + metrics.verticalSpacing * 2;
+  char line[96];
+  snprintf(line, sizeof(line), "%s  %s (%u)", tr(STR_OTA_CURRENT), CROSSPOINT_VERSION,
+           static_cast<unsigned>(firmware_install::runningBuild()));
+  renderer.drawText(UI_10_FONT_ID, side, y, line, true);
+  y += lineHeight * 2;
+
+  if (rolledBackNotice) {
+    const Rect notice{side, y, pageWidth - side * 2, lineHeight * 3};
+    UITheme::drawCenteredWrappedText(renderer, notice, UI_10_FONT_ID, tr(STR_OTA_ROLLED_BACK), 3, true,
+                                     EpdFontFamily::BOLD, UITheme::TextVerticalAlignment::TOP);
+    y += lineHeight * 4;
+  }
+
+  const auto progress = firmware_update::snapshot();
+  const char* message = nullptr;
+  const char* confirmLabel = tr(STR_OTA_CHECK);
+  using Status = ProjectStickService::FirmwareOffer::Status;
+  switch (state) {
+    case State::Idle:
+      message = checkFailedOffline ? tr(STR_OTA_NEED_WIFI) : nullptr;
+      break;
+    case State::Checking:
+      message = tr(STR_OTA_CHECKING);
+      confirmLabel = "";
+      break;
+    case State::Confirming:
+      break;
+    case State::Result:
+      if (offer.status == Status::UpdateAvailable) {
+        snprintf(line, sizeof(line), "%s  %s", tr(STR_OTA_LATEST), offer.version.c_str());
+        renderer.drawText(UI_10_FONT_ID, side, y, line, true, EpdFontFamily::BOLD);
+        y += lineHeight * 2;
+        if (!offer.notes.empty()) {
+          UITheme::drawCenteredWrappedText(renderer, Rect{side, y, pageWidth - side * 2, lineHeight * 6}, UI_10_FONT_ID,
+                                           offer.notes.c_str(), 6, true, EpdFontFamily::REGULAR,
+                                           UITheme::TextVerticalAlignment::TOP);
+        }
+        confirmLabel = tr(STR_OTA_INSTALL);
+      } else if (offer.status == Status::UpToDate) {
+        message = tr(STR_OTA_UP_TO_DATE);
+      } else if (offer.status == Status::Unbound) {
+        message = tr(STR_OTA_NEED_BINDING);
+      } else if (offer.status == Status::Requested) {
+        message = progress.phase == firmware_update::Phase::Failed ? tr(STR_OTA_FAILED) : tr(STR_OTA_REQUESTED);
+      } else {
+        message = tr(STR_OTA_CHECK_FAILED);
+      }
+      break;
+    case State::Installing: {
+      confirmLabel = "";
+      switch (progress.phase) {
+        case firmware_update::Phase::Verifying:
+          message = tr(STR_OTA_VERIFYING);
+          break;
+        case firmware_update::Phase::Installing:
+          message = tr(STR_OTA_INSTALLING);
+          break;
+        case firmware_update::Phase::Restarting:
+          message = tr(STR_OTA_RESTARTING);
+          break;
+        case firmware_update::Phase::Failed:
+          message = strcmp(progress.error, "low_battery") == 0 ? tr(STR_OTA_LOW_BATTERY) : tr(STR_OTA_FAILED);
+          confirmLabel = tr(STR_OTA_CHECK);
+          break;
+        default:
+          message = tr(STR_OTA_DOWNLOADING);
+          break;
+      }
+      if (progress.busy() && progress.total > 0) {
+        GUI.drawProgressBar(renderer, Rect{side, y + lineHeight * 2, pageWidth - side * 2, metrics.progressBarHeight},
+                            progress.percent(), 100);
+      }
+      break;
+    }
+  }
+  if (message) {
+    UITheme::drawCenteredWrappedText(renderer, Rect{side, y, pageWidth - side * 2, lineHeight * 2}, UI_10_FONT_ID,
+                                     message, 2, true, EpdFontFamily::BOLD, UITheme::TextVerticalAlignment::TOP);
+  }
+
+  const auto labels = mappedInput.mapLabels(tr(STR_BACK), confirmLabel, "", "");
+  GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
+  renderer.displayBuffer();
+}

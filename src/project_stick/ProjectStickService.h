@@ -37,6 +37,17 @@ class ProjectStickService {
   SyncReport sync(bool registerFirst = true, bool refreshDisplay = true);
   bool pollAlerts();
   void syncStudio();
+
+  // Device-side firmware check / request (Settings > Firmware update).
+  struct FirmwareOffer {
+    enum class Status : uint8_t { UpdateAvailable, UpToDate, Unbound, Failed, Requested, RequestFailed };
+    Status status = Status::Failed;
+    std::string id;
+    std::string version;
+    std::string notes;
+  };
+  FirmwareOffer checkFirmware();
+  FirmwareOffer requestFirmware(const std::string& firmwareId);
   bool refreshOwnership();
   bool syncStudioCommand();
   void reportFirmwareOutcome();

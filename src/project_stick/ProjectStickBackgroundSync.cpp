@@ -33,12 +33,21 @@ bool ProjectStickBackgroundSync::requestStudioPoll() { return queue(WorkKind::St
 
 bool ProjectStickBackgroundSync::requestAlertPoll() { return queue(WorkKind::AlertPoll, false); }
 
-bool ProjectStickBackgroundSync::queue(WorkKind kind, bool registerFirst) {
+bool ProjectStickBackgroundSync::requestFirmwareCheck() { return queue(WorkKind::FirmwareCheck, false); }
+
+bool ProjectStickBackgroundSync::requestFirmwareInstall(const std::string& firmwareId) {
+  return queue(WorkKind::FirmwareRequest, false, firmwareId);
+}
+
+bool ProjectStickBackgroundSync::queue(WorkKind kind, bool registerFirst, const std::string& firmwareId) {
+  // Copied outside the spinlock: std::string may allocate.
+  std::string id = firmwareId;
   taskENTER_CRITICAL(&stateMux);
   const bool accepted = started && taskHandle != nullptr && gate.tryQueue();
   if (accepted) {
     pendingKind = kind;
     pendingRegisterFirst = registerFirst;
+    pendingFirmwareId.swap(id);
   }
   taskEXIT_CRITICAL(&stateMux);
   if (accepted) xTaskNotify(taskHandle, 1, eIncrement);
@@ -75,10 +84,12 @@ void ProjectStickBackgroundSync::taskLoop() {
 
     WorkKind kind = WorkKind::None;
     bool registerFirst = false;
+    std::string firmwareId;
     taskENTER_CRITICAL(&stateMux);
     if (gate.begin()) {
       kind = pendingKind;
       registerFirst = pendingRegisterFirst;
+      firmwareId.swap(pendingFirmwareId);
       pendingKind = WorkKind::None;
       pendingRegisterFirst = false;
     }
@@ -91,6 +102,10 @@ void ProjectStickBackgroundSync::taskLoop() {
       completed.syncReport = service.sync(registerFirst, false);
     } else if (kind == WorkKind::StudioPoll) {
       service.syncStudio();
+    } else if (kind == WorkKind::FirmwareCheck) {
+      completed.firmware = service.checkFirmware();
+    } else if (kind == WorkKind::FirmwareRequest) {
+      completed.firmware = service.requestFirmware(firmwareId);
     } else {
       completed.alertReceived = service.pollAlerts();
       if (completed.alertReceived) completed.alertDisplay = service.displaySnapshot();
