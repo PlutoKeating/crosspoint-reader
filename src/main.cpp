@@ -486,7 +486,7 @@ void loop() {
     activityManager.requestUpdate();
   }
 
-  ota_trial::tick();
+  ota_trial::tick(WiFi.status() == WL_CONNECTED);
 
   const unsigned long activityStartTime = millis();
   activityManager.loop();

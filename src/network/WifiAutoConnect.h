@@ -26,7 +26,7 @@ class WifiAutoConnect {
   bool connecting = false;
   bool wasConnected = false;
   uint8_t failures = 0;
-  size_t candidate = 0;
+  size_t step = 0;  // position within the current round over saved networks
   uint32_t attemptStartedMs = 0;
   uint32_t nextAttemptMs = 0;
 };

@@ -122,19 +122,22 @@ BootAction decideOnBoot(TrialRecord& record, const char* runningSlot, bool abnor
 
 // Health policy for a trial boot. Any HTTP response from the StockStick API
 // proves Wi-Fi, DNS, TLS and the cloud client work, so the build is confirmed.
-// Transport failures while Wi-Fi is connected count against it; without Wi-Fi
-// the build is confirmed after a grace period because nothing else can judge it.
+// Failed API cycles while Wi-Fi stays connected count against it (at most one
+// per FAILURE_SAMPLE_MS, reset whenever Wi-Fi drops) and must be spread over
+// ONLINE_FAILURE_WINDOW_MS; without Wi-Fi the build is confirmed after a grace
+// period because nothing else can judge it.
 constexpr uint32_t OFFLINE_CONFIRM_MS = 2UL * 60UL * 1000UL;
 constexpr uint32_t ONLINE_FAILURE_WINDOW_MS = 5UL * 60UL * 1000UL;
 constexpr uint8_t ONLINE_FAILURE_LIMIT = 5;
+constexpr uint32_t FAILURE_SAMPLE_MS = 30UL * 1000UL;
 
 enum class HealthDecision : uint8_t { Wait, Confirm, Rollback };
 
 struct HealthInputs {
   uint32_t uptimeMs = 0;
   bool apiResponded = false;      // at least one HTTP status from the API this boot
-  uint8_t transportFailures = 0;  // API attempts that failed below HTTP while Wi-Fi was up
-  uint32_t onlineSinceFirstFailureMs = 0;
+  uint8_t transportFailures = 0;  // sampled API failures below HTTP while Wi-Fi stayed up
+  uint32_t failureSpanMs = 0;     // last sampled failure minus the first one
   bool everOnline = false;
 };
 

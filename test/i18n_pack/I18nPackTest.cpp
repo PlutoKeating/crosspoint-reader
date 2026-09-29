@@ -77,6 +77,15 @@ TEST_F(I18nPack, IgnoresKeysFromOtherFirmwareVersions) {
   EXPECT_STREQ(tr(STR_CANCEL), "Abbrechen");
 }
 
+TEST_F(I18nPack, DropsEntriesWhoseFormatConversionsDiffer) {
+  const auto synced = static_cast<size_t>(StrId::STR_PROJECT_STICK_SYNCED_AT);  // "%02u:%02u"
+  const auto networks = static_cast<size_t>(StrId::STR_NETWORKS_FOUND);        // "%zu"
+  ASSERT_TRUE(adopt(makePack("EN", "English",
+                             {{KEY_HASHES[synced], "Updated at %s"}, {KEY_HASHES[networks], "%zu networks, 100%% sure"}})));
+  EXPECT_STREQ(tr(STR_PROJECT_STICK_SYNCED_AT), "已更新 %02u:%02u 时刻的数据");  // would read an unsigned as char*
+  EXPECT_STREQ(tr(STR_NETWORKS_FOUND), "%zu networks, 100%% sure");
+}
+
 TEST_F(I18nPack, RejectsMalformedPacksAndKeepsCurrentCatalogue) {
   const auto settings = static_cast<size_t>(StrId::STR_SETTINGS_TITLE);
   auto bad = makePack("EN", "English", {{KEY_HASHES[settings], "Settings"}});

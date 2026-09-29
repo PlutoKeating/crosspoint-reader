@@ -112,6 +112,11 @@ bool SdFirmwareUpdateActivity::validateFirmware() {
   // Identify the image. Settings only installs StockStick builds that fit this
   // device; recovery mode stays permissive so any bootable image can rescue a
   // device, but only identified StockStick images get a trial boot.
+  if (ota_trial::active() && !recoveryMode) {
+    // Installing now would overwrite the slot the running trial rolls back to.
+    errorMessage = tr(STR_OTA_TRIAL_BUSY);
+    return false;
+  }
   const auto candidate = firmware_install::inspect(firmwarePath.c_str(), nullptr);
   stockStickImage = candidate.identity == stick_fw::IdentifyResult::Ok;
   imageVersion = stockStickImage ? candidate.info.version : "";
@@ -196,6 +201,7 @@ void SdFirmwareUpdateActivity::performUpdate() {
       firmware_flash::flashFromSdPath(firmwarePath.c_str(), progressCb, this, /*alreadyValidated=*/false, armTrial);
   if (result != firmware_flash::Result::OK) {
     LOG_ERR("FW", "flash failed: %s", firmware_flash::resultName(result));
+    ota_trial::disarm();
     errorMessage = tr(STR_FIRMWARE_WRITE_FAILED);
     RenderLock lock(*this);
     state = State::FAILED;

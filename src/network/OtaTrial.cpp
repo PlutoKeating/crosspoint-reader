@@ -11,6 +11,7 @@
 #include <atomic>
 #include <cstring>
 
+#include "FirmwareFlasher.h"
 #include "OtaBootSwitch.h"
 
 // Arduino's initArduino() marks a PENDING_VERIFY image valid immediately unless
@@ -28,6 +29,7 @@ bool apiResponded = false;
 bool everOnline = false;
 uint8_t transportFailures = 0;
 uint32_t firstFailureMs = 0;
+uint32_t lastFailureMs = 0;
 char trialCommand[40] = {};
 char trialVersion[33] = {};
 std::atomic<bool> outcomePending{false};  // read by the sync task, written by the main loop
@@ -139,6 +141,12 @@ void onBoot() {
       return;
     case stick_fw::BootAction::Continue:
       prefs.putUChar("tries", record.attempts);
+      // The app-level counter now owns the trial. A bootloader with rollback
+      // enabled would otherwise abort a PENDING_VERIFY image on *any* reset
+      // (power loss, brownout, one panic), overriding the 3-failure rule; it
+      // still protects the window before this point, i.e. images that crash
+      // before setup() reaches onBoot().
+      markRunningValid();
       copyString(trialCommand, sizeof(trialCommand), prefs.getString("cmd", "").c_str());
       copyString(trialVersion, sizeof(trialVersion), prefs.getString("ver", "").c_str());
       prefs.end();
@@ -157,14 +165,31 @@ bool arm(const esp_partition_t* target, const char* commandId, const char* targe
   if (!target || !running) return false;
   Preferences prefs;
   if (!prefs.begin(NS, false)) return false;
-  const bool ok =
-      prefs.putString("prev", running->label) > 0 && prefs.putString("target", target->label) > 0 &&
-      prefs.putString("cmd", commandId ? commandId : "") == strlen(commandId ? commandId : "") &&
-      prefs.putString("ver", targetVersion ? targetVersion : "") == strlen(targetVersion ? targetVersion : "") &&
-      prefs.putUChar("tries", 0) == 1 && prefs.putBool("armed", true) == 1;
+  const char* command = commandId ? commandId : "";
+  const char* version = targetVersion ? targetVersion : "";
+  prefs.putString("prev", running->label);
+  prefs.putString("target", target->label);
+  prefs.putString("cmd", command);
+  prefs.putString("ver", version);
+  prefs.putUChar("tries", 0);
+  prefs.putBool("armed", true);
+  // Read back: put*() cannot distinguish an empty value from a failed write.
+  const bool ok = prefs.getString("prev", "") == running->label && prefs.getString("target", "") == target->label &&
+                  prefs.getString("cmd", "\x01") == command && prefs.getString("ver", "\x01") == version &&
+                  prefs.getUChar("tries", 0xFF) == 0 && prefs.getBool("armed", false);
+  if (!ok) prefs.putBool("armed", false);
   prefs.end();
   LOG_INF("OTA", "Trial armed: %s -> %s (%s)", running->label, target->label, targetVersion ? targetVersion : "");
   return ok;
+}
+
+void disarm() {
+  if (active()) return;  // never cancel the trial of the image that is running
+  Preferences prefs;
+  if (!prefs.begin(NS, false)) return;
+  finishTrial(prefs);
+  prefs.end();
+  LOG_INF("OTA", "Trial disarmed: install did not switch boot slots");
 }
 
 bool active() {
@@ -181,23 +206,35 @@ void noteApiResult(int httpStatus, bool wifiConnected) {
     if (httpStatus > 0) {
       apiResponded = true;
     } else if (wifiConnected && transportFailures < UINT8_MAX) {
-      if (transportFailures++ == 0) firstFailureMs = millis();
+      // Sample: one request cycle retries several times, which is one failure.
+      const uint32_t now = millis();
+      if (transportFailures == 0) {
+        firstFailureMs = lastFailureMs = now;
+        transportFailures = 1;
+      } else if (now - lastFailureMs >= stick_fw::FAILURE_SAMPLE_MS) {
+        lastFailureMs = now;
+        ++transportFailures;
+      }
     }
   }
   taskEXIT_CRITICAL(&healthMux);
 }
 
-void tick() {
+void tick(bool wifiConnected) {
   stick_fw::HealthInputs inputs;
   taskENTER_CRITICAL(&healthMux);
+  // Failures only count while one Wi-Fi association lasts; losing the link
+  // points at the network, not at the image.
+  if (!wifiConnected) transportFailures = 0;
   const bool running = trialActive;
   inputs.uptimeMs = millis();
   inputs.apiResponded = apiResponded;
   inputs.everOnline = everOnline;
   inputs.transportFailures = transportFailures;
-  inputs.onlineSinceFirstFailureMs = transportFailures ? millis() - firstFailureMs : 0;
+  inputs.failureSpanMs = transportFailures ? lastFailureMs - firstFailureMs : 0;
   taskEXIT_CRITICAL(&healthMux);
-  if (!running) return;
+  // Never switch slots while an install is erasing the update slot.
+  if (!running || firmware_flash::installInProgress()) return;
 
   const auto decision = stick_fw::evaluateHealth(inputs);
   if (decision == stick_fw::HealthDecision::Wait) return;

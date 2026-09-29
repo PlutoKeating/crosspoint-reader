@@ -110,7 +110,9 @@ class ProjectStickService {
   bool streamScheduleFile(const std::string& path, project_stick::ScheduleStreamDecoder& decoder);
   bool streamContentFile(const std::string& path, project_stick::ContentStreamDecoder& decoder);
   bool fetchToFile(const std::string& url, const std::string& path, size_t maxBytes);
-  bool downloadFirmware(const std::string& id, const std::string& hash, size_t size);
+  enum class DownloadResult : uint8_t { Complete, Retry, Fatal };
+  DownloadResult downloadFirmware(const std::string& id, const std::string& hash, size_t size);
+  uint32_t firmwareRetryAtMs = 0;
   bool requestPost(const std::string& path, const std::string& body, std::string& response, int& status);
   bool fetchJson(const std::string& url, std::string& response, size_t maxBytes);
   bool fetchAuthenticated(const std::string& url, const std::function<bool(const uint8_t*, size_t)>& onData);

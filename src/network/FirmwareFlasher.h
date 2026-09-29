@@ -32,7 +32,13 @@ enum class Result {
   ERASE_FAIL,
   WRITE_FAIL,
   OTADATA_FAIL,
+  VERIFY_FAIL,  // partition read-back does not match the written image
+  BUSY,         // another install is writing the update slot
 };
+
+// True while flashFromSdPath() is writing; installs are serialized and the
+// trial-boot logic must not switch slots meanwhile.
+bool installInProgress();
 
 // Progress callback: called after every chunk write. `written`/`total` are bytes.
 using ProgressCb = void (*)(size_t written, size_t total, void* ctx);
@@ -43,9 +49,10 @@ using ProgressCb = void (*)(size_t written, size_t total, void* ctx);
 using BeforeSwitchCb = bool (*)(const esp_partition_t* dest, void* ctx);
 
 // Open `sdPath`, validate it looks like an ESP32 image, then stream it into the
-// next OTA app partition with interleaved 64 KiB erase + sector writes. On
-// success switches otadata via ota_boot::switchTo. Caller is responsible for
-// ESP.restart() afterwards.
+// next OTA app partition with interleaved 64 KiB erase + sector writes, read the
+// partition back and compare its SHA-256 with the bytes written. On success
+// switches otadata via ota_boot::switchTo. Only one install runs at a time
+// (BUSY otherwise). Caller is responsible for ESP.restart() afterwards.
 //
 // `alreadyValidated` lets callers that have just run `validateImageFile()`
 // themselves (e.g. SdFirmwareUpdateActivity, which validates before showing

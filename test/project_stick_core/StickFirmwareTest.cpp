@@ -131,9 +131,9 @@ TEST(StickFirmware, HealthPolicy) {
   in = {};
   in.everOnline = true;
   in.transportFailures = ONLINE_FAILURE_LIMIT;
-  in.onlineSinceFirstFailureMs = ONLINE_FAILURE_WINDOW_MS - 1;
+  in.failureSpanMs = ONLINE_FAILURE_WINDOW_MS - 1;
   EXPECT_EQ(evaluateHealth(in), HealthDecision::Wait);
-  in.onlineSinceFirstFailureMs = ONLINE_FAILURE_WINDOW_MS;
+  in.failureSpanMs = ONLINE_FAILURE_WINDOW_MS;
   EXPECT_EQ(evaluateHealth(in), HealthDecision::Rollback);
 
   in = {};

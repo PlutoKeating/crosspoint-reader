@@ -96,13 +96,17 @@ python3 scripts/firmware_release.py --build --notes RELEASE_NOTES.md \
 Studio 轮询（每 5 秒，Wi-Fi 在线且无 BLE 会话）
   └─ 响应 command_pending=true（旧服务端无此字段时每次都查）
       └─ GET /commands → {id, version, sha256, bytes, firmware_id}
+          0. 新固件仍在试运行时不开始安装（命令保留，试运行结束后再执行）
           1. 元数据校验；电量 ≥ 30%；Studio 未在接收、BLE 未连接
           2. 暂停 BLE 广播，持有电源锁，屏幕切换为升级进度页
           3. POST downloading → 下载到 /.crosspoint/studio/firmware.tmp
-             · firmware.meta 记录 "<命令> <sha> <字节>"；同一命令的半截文件带 offset 续传（206）
+             · firmware.meta 记录 "<sha> <字节>"；同一镜像的半截文件（包括被重新下达的命令）带 offset 续传（206）
+             · 每写约 256 KB 刷新一次 SD 文件，掉电后续传偏移以文件实际大小为准
              · 服务端忽略 offset（返回 200）时从头下载
+             · 网络类失败不结束命令：保持 downloading，60 秒后在后续轮询中续传；撤回/无权限（401/403/404/409/416）才上报失败
           4. POST verifying → 大小 + SHA-256 → 描述符与安装策略
-          5. POST installing（服务端再次确认未撤回）→ 写入另一 OTA 槽并完整校验镜像
+          5. POST installing（服务端再次确认未撤回）→ 写入另一 OTA 槽（同一时间只允许一个安装），
+             写完后读回整个分区计算 SHA-256，与写入的数据比对
           6. 切换启动槽之前写入试运行记录 → 切换 otadata
           7. POST restarting → 重启
 ```
@@ -118,14 +122,18 @@ Studio 轮询（每 5 秒，Wi-Fi 在线且无 BLE 会话）
 | 时机 | 行为 |
 |---|---|
 | 写完新镜像、切换启动槽之前 | 记录旧槽、目标槽、命令 ID、目标版本，`armed=true` |
-| 每次启动（`setup()` 最早阶段） | 运行在旧槽 → 记为回滚（`bootloader_rollback`）；上一次是 panic/看门狗复位 → 失败次数 +1；达到 3 次 → 切回旧槽并重启（`repeated_crash`）。掉电复位和深睡唤醒不计入 |
-| 运行中（主循环） | 任意一次 StockStick API 返回 HTTP 状态 → 确认；Wi-Fi 在线时传输层失败 ≥ 5 次且持续 ≥ 5 分钟 → 回滚（`cloud_unreachable`）；从未联网且运行满 2 分钟 → 确认；超过 60 分钟仍无结论 → 确认 |
+| 每次启动（`setup()` 最早阶段） | 运行在旧槽 → 记为回滚（`bootloader_rollback`）；上一次是 panic/看门狗复位 → 失败次数 +1；达到 3 次 → 切回旧槽并重启（`repeated_crash`）。掉电、欠压复位和深睡唤醒不计入。计数写入 NVS 后即向 bootloader 标记镜像有效，之后由应用层计数负责 |
+| 运行中（主循环） | 任意一次 StockStick API 返回 HTTP 状态 → 确认；同一次 Wi-Fi 连接期间，API 请求周期在传输层失败（每 30 秒最多计 1 次，Wi-Fi 断开即清零）累计 ≥ 5 次且首末相隔 ≥ 5 分钟 → 回滚（`cloud_unreachable`）；从未联网且运行满 2 分钟 → 确认；超过 60 分钟仍无结论 → 确认。刷写进行中不做判定 |
 | 正常进入深度睡眠 | 视为健康，确认 |
 | 下一次注册 / Studio 轮询 | 回滚结果以 `failed`、`Rolled back from <版本> (<原因>)` 上报对应命令 |
 
-`verifyRollbackLater()` 返回 true，Arduino 不再在启动时自动确认镜像；确认时才调用
-`esp_ota_mark_app_valid_cancel_rollback()`。因此如果设备上的 bootloader 支持回滚，
-连应用代码都跑不到的崩溃也会由 bootloader 回退；如果不支持，则依靠上表的应用层计数。
+`verifyRollbackLater()` 返回 true，Arduino 不再在 `initArduino()` 中自动确认镜像，而是由
+`ota_trial::onBoot()` 在写入计数后调用 `esp_ota_mark_app_valid_cancel_rollback()`。
+本仓库构建的 bootloader 启用了回滚（`CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE`），它会把
+PENDING_VERIFY 状态下的**任何**复位都当作失败；若把确认推迟到健康判定，一次掉电就会误回滚。
+因此 bootloader 只负责 `onBoot()` 之前就崩溃的镜像，之后交给上表的应用层策略。出厂 bootloader
+若不支持回滚，则完全依靠应用层计数。试运行期间设置中的 SD 卡更新和云端安装都会等待，
+避免覆盖回滚目标分区；恢复模式不受此限制。
 在全局构造阶段就崩溃、且 bootloader 不支持回滚的镜像无法自救，只能用恢复模式或 USB 刷机，
 因此每次发布都必须先在真机上完成验证清单。
 
@@ -147,6 +155,7 @@ Studio 轮询（每 5 秒，Wi-Fi 在线且无 BLE 会话）
 - 2.0.0 移除了电子书阅读器；旧 `settings.json` 中与阅读相关的字段在加载时被忽略，
   `.crosspoint/epub_*` 等阅读缓存不再使用，可以手动删除。
 - 设备出厂 bootloader 是否启用回滚未经确认；应用层回滚在两种情况下都工作。
+- SD 语言包中的文案若改变了 `printf` 转换说明（如把 `%02u` 换成 `%s`），该条目被忽略并显示内置文案。
 - BLE 通道只传输 Studio 画面，不传输固件（6 MB 级镜像经 BLE 需十余分钟且占用会话）。
 
 ## 9. 真机验证清单（每次发布）

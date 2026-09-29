@@ -10,10 +10,10 @@
 // resets, deep sleep and power loss.
 //
 // Works with or without bootloader rollback support: the firmware keeps its
-// own attempt counter and switches otadata back to the previous slot itself,
-// and additionally defers esp_ota_mark_app_valid_cancel_rollback() until the
-// image is confirmed, so an IDF bootloader with rollback enabled also reverts
-// images that crash before this code runs.
+// own attempt counter and switches otadata back to the previous slot itself.
+// verifyRollbackLater() keeps the image PENDING_VERIFY until onBoot(), so an
+// IDF bootloader with rollback enabled still reverts images that crash before
+// onBoot() runs; from there on the app-level counter decides.
 namespace ota_trial {
 
 // Call once, early in setup() after HalSystem::begin(). Increments the trial
@@ -26,12 +26,16 @@ bool arm(const esp_partition_t* target, const char* commandId, const char* targe
 
 bool active();
 
+// Clears an armed record whose install never switched boot slots (the new
+// image will not run, so there is no trial to judge). No-op during a trial.
+void disarm();
+
 // Feed every StockStick API attempt: an HTTP status > 0, or <= 0 for a
 // transport/TLS failure. Safe to call from any task.
 void noteApiResult(int httpStatus, bool wifiConnected);
 
 // Call from the main loop; confirms or rolls back when the policy decides.
-void tick();
+void tick(bool wifiConnected);
 
 // Deep sleep is a clean, deliberate shutdown: treat it as proof of health.
 void onCleanShutdown();

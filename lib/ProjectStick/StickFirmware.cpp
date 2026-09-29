@@ -119,7 +119,7 @@ BootAction decideOnBoot(TrialRecord& record, const char* runningSlot, bool abnor
 HealthDecision evaluateHealth(const HealthInputs& inputs) {
   if (inputs.apiResponded) return HealthDecision::Confirm;
   if (inputs.transportFailures >= ONLINE_FAILURE_LIMIT &&
-      inputs.onlineSinceFirstFailureMs >= ONLINE_FAILURE_WINDOW_MS) {
+      inputs.failureSpanMs >= ONLINE_FAILURE_WINDOW_MS) {
     return HealthDecision::Rollback;
   }
   if (!inputs.everOnline && inputs.uptimeMs >= OFFLINE_CONFIRM_MS) return HealthDecision::Confirm;

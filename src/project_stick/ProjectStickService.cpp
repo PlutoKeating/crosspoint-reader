@@ -1627,6 +1627,7 @@ constexpr char FIRMWARE_META[] = "/.crosspoint/studio/firmware.meta";
 constexpr size_t MAX_FIRMWARE_BYTES = 0x640000;
 constexpr size_t MIN_FIRMWARE_BYTES = 100000;
 constexpr uint8_t MIN_OTA_BATTERY_PERCENT = 30;
+constexpr uint32_t FIRMWARE_RETRY_MS = 60000;
 
 struct InstallContext {
   const char* commandId;
@@ -1636,6 +1637,11 @@ struct InstallContext {
 
 bool ProjectStickService::syncStudioCommand() {
 #ifndef SIMULATOR
+  // A new image is still proving itself; installing now would overwrite the
+  // slot it rolls back to. The command stays queued until the trial ends.
+  if (ota_trial::active()) return false;
+  if (firmwareRetryAtMs != 0 && static_cast<int32_t>(millis() - firmwareRetryAtMs) < 0) return false;
+  firmwareRetryAtMs = 0;
   std::string response;
   if (!fetchJson(baseUrl + "/api/v2/device/commands?device_id=" + PROJECT_STICK_STORE.deviceId, response, 2048))
     return false;
@@ -1681,7 +1687,17 @@ bool ProjectStickService::syncStudioCommand() {
     studio_ble::pause(false);
     return true;
   }
-  if (!downloadFirmware(id, hash, size)) return fail("Firmware download failed");
+  const auto download = downloadFirmware(id, hash, size);
+  if (download == DownloadResult::Fatal) return fail("Firmware download failed");
+  if (download == DownloadResult::Retry) {
+    // Transport trouble: keep the command in `downloading` and the partial
+    // file, and resume on a later poll instead of failing the whole update.
+    LOG_INF("OTA", "Firmware download interrupted; retrying in %us", (unsigned)(FIRMWARE_RETRY_MS / 1000));
+    firmwareRetryAtMs = millis() + FIRMWARE_RETRY_MS;
+    firmware_update::reset();
+    studio_ble::pause(false);
+    return true;
+  }
 
   firmware_update::setPhase(firmware_update::Phase::Verifying);
   report("verifying");
@@ -1714,7 +1730,10 @@ bool ProjectStickService::syncStudioCommand() {
     return ota_trial::arm(dest, install->commandId, install->version);
   };
   const auto result = firmware_flash::flashFromSdPath(FIRMWARE_TEMP, onProgress, &context, false, armTrial);
-  if (result != firmware_flash::Result::OK) return fail(firmware_flash::resultName(result));
+  if (result != firmware_flash::Result::OK) {
+    ota_trial::disarm();  // the new image will not boot, so there is no trial
+    return fail(firmware_flash::resultName(result));
+  }
   Storage.remove(FIRMWARE_TEMP);
   Storage.remove(FIRMWARE_META);
   firmware_update::setPhase(firmware_update::Phase::Restarting);
@@ -1727,11 +1746,22 @@ bool ProjectStickService::syncStudioCommand() {
 #endif
 }
 
-bool ProjectStickService::downloadFirmware(const std::string& id, const std::string& hash, size_t size) {
-  // A partial download survives errors, power loss and reboots; it is resumed
-  // only for the same command, hash and size.
-  const std::string meta = id + " " + hash + " " + std::to_string(size);
-  size_t offset = 0;
+namespace {
+size_t fileSize(const char* path) {
+  HalFile file;
+  if (!Storage.openFileForRead("STUDIO", path, file)) return 0;
+  const size_t size = file.size();
+  file.close();
+  return size;
+}
+}  // namespace
+
+ProjectStickService::DownloadResult ProjectStickService::downloadFirmware(const std::string& id,
+                                                                          const std::string& hash, size_t size) {
+  // A partial download survives errors, power loss, reboots and re-issued
+  // commands: it is keyed on the image (hash + size), which every command for
+  // the same catalogue entry serves byte-identically.
+  const std::string meta = hash + " " + std::to_string(size);
   {
     HalFile metaFile;
     char stored[128] = {};
@@ -1740,38 +1770,45 @@ bool ProjectStickService::downloadFirmware(const std::string& id, const std::str
       stored[read > 0 ? read : 0] = '\0';
     }
     metaFile.close();
-    HalFile partial;
-    if (meta == stored && Storage.openFileForRead("STUDIO", FIRMWARE_TEMP, partial)) offset = partial.size();
-    partial.close();
-    if (offset > size || meta != stored) {
-      offset = 0;
+    if (meta != stored || fileSize(FIRMWARE_TEMP) > size) {
       Storage.remove(FIRMWARE_TEMP);
       Storage.mkdir("/.crosspoint/studio");
       if (!Storage.openFileForWrite("STUDIO", FIRMWARE_META, metaFile) ||
           metaFile.write(reinterpret_cast<const uint8_t*>(meta.data()), meta.size()) != meta.size()) {
-        return false;
+        return DownloadResult::Retry;
       }
       metaFile.close();
     }
   }
-  if (offset > 0) LOG_INF("OTA", "Resuming firmware download at %u/%u", (unsigned)offset, (unsigned)size);
 
   std::string deviceToken;
   {
     ProjectStickStateLock lock(projectStickStateMutex);
     deviceToken = PROJECT_STICK_STORE.deviceToken;
   }
-  for (uint8_t attempt = 0; attempt < 4 && offset < size; ++attempt) {
-    if (!trustedClockReady()) return false;
+  constexpr size_t FLUSH_INTERVAL = 256 * 1024;  // bounds what power loss can discard
+  for (uint8_t attempt = 0; attempt < 4; ++attempt) {
+    // The file on SD is the source of truth: a short write or an aborted pass
+    // may have stored more (or fewer) bytes than the last callback counted.
+    size_t offset = fileSize(FIRMWARE_TEMP);
+    if (offset == size) return DownloadResult::Complete;
+    if (offset > size) {
+      Storage.remove(FIRMWARE_TEMP);
+      offset = 0;
+    }
+    firmware_update::setProgress(offset);
+    if (offset > 0) LOG_INF("OTA", "Resuming firmware download at %u/%u", (unsigned)offset, (unsigned)size);
+    if (!trustedClockReady()) return DownloadResult::Retry;
     std::string url = baseUrl + "/api/v2/device/firmware?device_id=" + PROJECT_STICK_STORE.deviceId +
                       "&command_id=" + id;
     if (offset > 0) url += "&offset=" + std::to_string(offset);
     HalFile output = Storage.open(FIRMWARE_TEMP, O_WRONLY | O_CREAT | O_APPEND);
-    if (!output) return false;
-    if (!http.begin(url)) return false;
+    if (!output) return DownloadResult::Retry;
+    if (!http.begin(url)) return DownloadResult::Fatal;
     http.addHeader("Authorization", "Bearer " + deviceToken);
     bool restartFromZero = false;
     const size_t requested = offset;
+    size_t unflushed = 0;
     const int status = http.GET([&](const uint8_t* data, size_t length) {
       const int code = http.getStatus();
       // A server that ignores `offset` answers 200 with the whole image.
@@ -1782,6 +1819,11 @@ bool ProjectStickService::downloadFirmware(const std::string& id, const std::str
       if (code != 200 && code != 206) return true;  // error body: drop it
       if (length > size - offset || output.write(data, length) != length) return false;
       offset += length;
+      unflushed += length;
+      if (unflushed >= FLUSH_INTERVAL) {
+        output.flush();  // persists the directory entry size for resume
+        unflushed = 0;
+      }
       firmware_update::setProgress(offset);
       return true;
     });
@@ -1791,14 +1833,17 @@ bool ProjectStickService::downloadFirmware(const std::string& id, const std::str
     if (restartFromZero) {
       LOG_INF("OTA", "Server does not support resume; restarting download");
       Storage.remove(FIRMWARE_TEMP);
-      offset = 0;
       continue;
     }
-    if (status == 404 || status == 401 || status == 403 || status == 409) return false;  // withdrawn or not ours
-    LOG_INF("OTA", "Firmware download pass: status=%d received %u/%u", status, (unsigned)offset, (unsigned)size);
-    if (offset < size && attempt < 3) delay(1000UL << attempt);
+    // Withdrawn, cancelled or not this device's command: resuming cannot help.
+    if (status == 401 || status == 403 || status == 404 || status == 409 || status == 416) {
+      return DownloadResult::Fatal;
+    }
+    LOG_INF("OTA", "Firmware download pass: status=%d stored %u/%u", status, (unsigned)fileSize(FIRMWARE_TEMP),
+            (unsigned)size);
+    if (attempt < 3) delay(1000UL << attempt);
   }
-  return offset == size;
+  return fileSize(FIRMWARE_TEMP) == size ? DownloadResult::Complete : DownloadResult::Retry;
 }
 
 ProjectStickService::FirmwareOffer ProjectStickService::checkFirmware() {

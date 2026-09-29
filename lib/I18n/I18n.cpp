@@ -21,6 +21,39 @@ void copyField(char* dest, size_t destSize, const uint8_t* src, size_t srcSize) 
   dest[length] = '\0';
 }
 
+// True when `a` and `b` contain the same sequence of printf conversions
+// (length modifier + conversion letter; flags, width and precision ignored).
+// Callers pass these strings to snprintf with arguments fixed by the firmware,
+// so a pack may reword text but never change what the arguments are read as.
+bool sameConversions(const char* a, const char* b) {
+  auto next = [](const char*& p, char* spec, size_t specSize) {
+    while (*p) {
+      if (*p++ != '%') continue;
+      if (*p == '%') {
+        ++p;
+        continue;
+      }
+      while (*p && strchr("-+ #0123456789.*", *p)) ++p;
+      size_t length = 0;
+      while (*p && strchr("hlLqjzt", *p) && length + 2 < specSize) spec[length++] = *p++;
+      if (!*p) return false;
+      spec[length++] = *p++;
+      spec[length] = '\0';
+      return true;
+    }
+    return false;
+  };
+  char specA[8];
+  char specB[8];
+  for (;;) {
+    const bool hasA = next(a, specA, sizeof(specA));
+    const bool hasB = next(b, specB, sizeof(specB));
+    if (hasA != hasB) return false;
+    if (!hasA) return true;
+    if (strcmp(specA, specB) != 0) return false;
+  }
+}
+
 int findKey(uint32_t hash) {
   for (size_t i = 0; i < KEY_COUNT; ++i) {
     if (KEY_HASHES[i] == hash) return static_cast<int>(i);
@@ -67,7 +100,10 @@ bool I18n::adoptPack(std::unique_ptr<uint8_t[]> image, size_t size) {
     const uint32_t offset = readU32(table + i * 8 + 4);
     if (offset >= stringsSize || offset >= NO_OVERRIDE) return false;
     const int key = findKey(readU32(table + i * 8));
-    if (key >= 0) mapped[key] = static_cast<uint16_t>(offset);  // unknown keys belong to other firmware versions
+    if (key < 0) continue;  // unknown keys belong to other firmware versions
+    const char* text = reinterpret_cast<const char*>(image.get() + stringsOffset + offset);
+    if (!sameConversions(text, BUILTIN_DATA + BUILTIN_OFFSETS[key])) continue;  // keep the built-in text
+    mapped[key] = static_cast<uint16_t>(offset);
   }
 
   pack = std::move(image);

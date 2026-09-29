@@ -9,6 +9,7 @@
 #include <spi_flash_mmap.h>
 
 #include <algorithm>
+#include <atomic>
 #include <cstring>
 #include <memory>
 
@@ -60,6 +61,10 @@ const char* resultName(Result r) {
       return "WRITE_FAIL";
     case Result::OTADATA_FAIL:
       return "OTADATA_FAIL";
+    case Result::VERIFY_FAIL:
+      return "VERIFY_FAIL";
+    case Result::BUSY:
+      return "BUSY";
   }
   return "?";
 }
@@ -226,8 +231,31 @@ Result validateImageFile(const char* sdPath, size_t partitionSize) {
   return Result::OK;
 }
 
+namespace {
+std::atomic<bool> installing{false};
+
+struct InstallGuard {
+  bool acquired = !installing.exchange(true);
+  ~InstallGuard() {
+    if (acquired) installing.store(false);
+  }
+};
+
+void sha256Finish(mbedtls_sha256_context* ctx, uint8_t* out) {
+  mbedtls_sha256_finish(ctx, out);
+  mbedtls_sha256_free(ctx);
+}
+}  // namespace
+
+bool installInProgress() { return installing.load(); }
+
 Result flashFromSdPath(const char* sdPath, ProgressCb onProgress, void* ctx, bool alreadyValidated,
                        BeforeSwitchCb beforeSwitch) {
+  InstallGuard guard;
+  if (!guard.acquired) {
+    LOG_ERR("FLASH", "another install is in progress");
+    return Result::BUSY;
+  }
   // Resolve destination first so we can size-check during validation. The full image-integrity
   // pass below verifies header, segment table, XOR checksum and SHA256 trailer end-to-end before
   // we touch otadata, so a truncated/corrupted .bin can never become the next boot target.
@@ -266,6 +294,12 @@ Result flashFromSdPath(const char* sdPath, ProgressCb onProgress, void* ctx, boo
     return Result::OOM;
   }
 
+  // Hash what is written so the partition can be verified by reading it back:
+  // the SD file was validated before, but the write pass reads it again.
+  mbedtls_sha256_context written;
+  mbedtls_sha256_init(&written);
+  mbedtls_sha256_starts(&written, /*is224=*/0);
+
   // Interleave erase + write so the progress bar advances 0→100% smoothly
   // rather than stalling for several seconds during a single up-front erase.
   size_t streamPos = 0;
@@ -279,6 +313,7 @@ Result flashFromSdPath(const char* sdPath, ProgressCb onProgress, void* ctx, boo
         LOG_ERR("FLASH", "erase @%u (len=%u) failed", static_cast<unsigned>(streamPos),
                 static_cast<unsigned>(eraseLen));
         file.close();
+        mbedtls_sha256_free(&written);
         return Result::ERASE_FAIL;
       }
       erasedUpto = streamPos + eraseLen;
@@ -289,18 +324,42 @@ Result flashFromSdPath(const char* sdPath, ProgressCb onProgress, void* ctx, boo
     if (read <= 0 || static_cast<size_t>(read) != want) {
       LOG_ERR("FLASH", "read @%u: got=%d want=%u", static_cast<unsigned>(streamPos), read, static_cast<unsigned>(want));
       file.close();
+      mbedtls_sha256_free(&written);
       return Result::READ_FAIL;
     }
     if (esp_partition_write(dest, streamPos, buffer.get(), want) != ESP_OK) {
       LOG_ERR("FLASH", "write @%u failed", static_cast<unsigned>(streamPos));
       file.close();
+      mbedtls_sha256_free(&written);
       return Result::WRITE_FAIL;
     }
+    mbedtls_sha256_update(&written, buffer.get(), want);
     streamPos += want;
     if (onProgress) onProgress(streamPos, firmwareSize, ctx);
     delay(1);
   }
   file.close();
+
+  uint8_t expected[SHA_TRAILER];
+  sha256Finish(&written, expected);
+  mbedtls_sha256_context readBack;
+  mbedtls_sha256_init(&readBack);
+  mbedtls_sha256_starts(&readBack, /*is224=*/0);
+  for (size_t pos = 0; pos < firmwareSize; pos += CHUNK) {
+    const size_t want = std::min<size_t>(CHUNK, firmwareSize - pos);
+    if (esp_partition_read(dest, pos, buffer.get(), want) != ESP_OK) {
+      mbedtls_sha256_free(&readBack);
+      LOG_ERR("FLASH", "read-back @%u failed", static_cast<unsigned>(pos));
+      return Result::VERIFY_FAIL;
+    }
+    mbedtls_sha256_update(&readBack, buffer.get(), want);
+  }
+  uint8_t actual[SHA_TRAILER];
+  sha256Finish(&readBack, actual);
+  if (std::memcmp(expected, actual, SHA_TRAILER) != 0) {
+    LOG_ERR("FLASH", "partition read-back does not match the written image");
+    return Result::VERIFY_FAIL;
+  }
 
   if (beforeSwitch && !beforeSwitch(dest, ctx)) {
     LOG_ERR("FLASH", "install aborted before otadata switch");

@@ -13,11 +13,25 @@ void WifiAutoConnect::startAttempt(uint32_t nowMs) {
     nextAttemptMs = nowMs + MAX_BACKOFF_MS;  // nothing to try until the user adds a network
     return;
   }
-  // Round-robin, but every round starts with the last network that worked.
+  // Each round tries every saved network once, starting with the last one
+  // that worked; step 0 is that network, later steps walk the others in order.
+  const WifiCredential* last = WIFI_STORE.findCredential(WIFI_STORE.getLastConnectedSsid());
   const WifiCredential* credential = nullptr;
-  if (candidate == 0) credential = WIFI_STORE.findCredential(WIFI_STORE.getLastConnectedSsid());
-  if (!credential) credential = &saved[candidate % saved.size()];
-  candidate = (candidate + 1) % saved.size();
+  if (step == 0 && last) {
+    credential = last;
+  } else {
+    const size_t index = last ? step - 1 : step;
+    size_t seen = 0;
+    for (const auto& savedNetwork : saved) {
+      if (&savedNetwork == last) continue;
+      if (seen++ == index) {
+        credential = &savedNetwork;
+        break;
+      }
+    }
+  }
+  step = (step + 1) % saved.size();
+  if (!credential) credential = &saved.front();  // list changed mid-round
 
   WiFi.persistent(false);  // credentials live in WifiCredentialStore, not SDK NVS
   WiFi.mode(WIFI_STA);
@@ -39,7 +53,7 @@ bool WifiAutoConnect::tick(uint32_t nowMs) {
     if (connecting) LOG_INF("WIFI", "Auto-connect succeeded");
     connecting = false;
     failures = 0;
-    candidate = 0;
+    step = 0;
     return cameUp;
   }
   if (!loaded) {
