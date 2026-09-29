@@ -18,8 +18,7 @@ void ProjectStickBackgroundSync::begin() {
   // instance owns all cloud I/O and keeps its network/display state off the UI
   // task.
   service.begin();
-  const BaseType_t created =
-      xTaskCreate(&taskTrampoline, "ProjectStickSync", 8192, this, 1, &taskHandle);
+  const BaseType_t created = xTaskCreate(&taskTrampoline, "ProjectStickSync", 8192, this, 1, &taskHandle);
   if (created != pdTRUE || taskHandle == nullptr) {
     LOG_ERR("STICK", "Could not create background sync task");
     taskENTER_CRITICAL(&stateMux);
@@ -28,17 +27,11 @@ void ProjectStickBackgroundSync::begin() {
   }
 }
 
-bool ProjectStickBackgroundSync::requestSync(bool registerFirst) {
-  return queue(WorkKind::Sync, registerFirst);
-}
+bool ProjectStickBackgroundSync::requestSync(bool registerFirst) { return queue(WorkKind::Sync, registerFirst); }
 
-bool ProjectStickBackgroundSync::requestStudioPoll() {
-  return queue(WorkKind::StudioPoll, false);
-}
+bool ProjectStickBackgroundSync::requestStudioPoll() { return queue(WorkKind::StudioPoll, false); }
 
-bool ProjectStickBackgroundSync::requestAlertPoll() {
-  return queue(WorkKind::AlertPoll, false);
-}
+bool ProjectStickBackgroundSync::requestAlertPoll() { return queue(WorkKind::AlertPoll, false); }
 
 bool ProjectStickBackgroundSync::queue(WorkKind kind, bool registerFirst) {
   taskENTER_CRITICAL(&stateMux);

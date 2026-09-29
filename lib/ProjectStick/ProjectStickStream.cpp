@@ -7,8 +7,7 @@
 namespace project_stick {
 
 ReleaseManifestDecoder::ReleaseManifestDecoder(FileCallback fileCallback, void* callbackContext)
-    : callbacks{this, onKey, onString, onNumber, onBool, nullptr, onObjectStart, onObjectEnd, onArrayStart,
-                onArrayEnd},
+    : callbacks{this, onKey, onString, onNumber, onBool, nullptr, onObjectStart, onObjectEnd, onArrayStart, onArrayEnd},
       parser(callbacks),
       callback(fileCallback),
       callbackCtx(callbackContext) {
@@ -117,8 +116,7 @@ void ReleaseManifestDecoder::finishFile() {
 }
 
 ScheduleStreamDecoder::ScheduleStreamDecoder()
-    : callbacks{this, onKey, onString, nullptr, onBool, nullptr, onObjectStart, onObjectEnd, onArrayStart,
-                onArrayEnd},
+    : callbacks{this, onKey, onString, nullptr, onBool, nullptr, onObjectStart, onObjectEnd, onArrayStart, onArrayEnd},
       parser(callbacks) {
   scheduleWindows.reserve(MAX_WINDOWS);
 }
@@ -207,9 +205,8 @@ void ScheduleStreamDecoder::finishWindow() {
     invalid = true;
     return;
   }
-  if (!currentWindow.allDay &&
-      (!parseClockMinute(startTime.c_str(), currentWindow.startMinute) ||
-       !parseClockMinute(endTime.c_str(), currentWindow.endMinute))) {
+  if (!currentWindow.allDay && (!parseClockMinute(startTime.c_str(), currentWindow.startMinute) ||
+                                !parseClockMinute(endTime.c_str(), currentWindow.endMinute))) {
     invalid = true;
     return;
   }
@@ -218,8 +215,8 @@ void ScheduleStreamDecoder::finishWindow() {
 
 ContentStreamDecoder::ContentStreamDecoder(ContentPassMode mode, const std::vector<int64_t>& usedCopyIds,
                                            uint32_t selectionTarget)
-    : callbacks{this, onKey, onString, onNumber, nullptr, nullptr, onObjectStart, onObjectEnd, onArrayStart,
-                onArrayEnd},
+    : callbacks{this,    onKey,         onString,    onNumber,     nullptr,
+                nullptr, onObjectStart, onObjectEnd, onArrayStart, onArrayEnd},
       parser(callbacks),
       usedIds(usedCopyIds),
       passMode(mode),
@@ -236,8 +233,7 @@ bool ContentStreamDecoder::finish() const {
 
 bool ContentStreamDecoder::finishAllowEmpty() const {
   if (passMode != ContentPassMode::MEASURE) return finish();
-  return !invalid && !parser.hasError() && level == 0 && !inCopy && copiesSeen &&
-         (copyCount == 0 || allWeight != 0);
+  return !invalid && !parser.hasError() && level == 0 && !inCopy && copiesSeen && (copyCount == 0 || allWeight != 0);
 }
 
 void ContentStreamDecoder::onKey(void* ctx, const char* value, size_t length) {
@@ -325,8 +321,7 @@ void ContentStreamDecoder::finishCopy() {
     if (!used) availableWeight += weight;
     return;
   }
-  if (hasSelection || currentCopy.text.empty() ||
-      (passMode == ContentPassMode::SELECT_UNUSED && used)) {
+  if (hasSelection || currentCopy.text.empty() || (passMode == ContentPassMode::SELECT_UNUSED && used)) {
     return;
   }
   if (target < weight) {

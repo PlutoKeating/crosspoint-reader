@@ -82,8 +82,7 @@ bool parseIso8601ToShanghai(const char* value, ShanghaiTime& result) {
   int minute = 0;
   int second = 0;
   if (!parseDigits(value, 0, 4, year) || !parseDigits(value, 5, 2, month) || !parseDigits(value, 8, 2, day) ||
-      !parseDigits(value, 11, 2, hour) || !parseDigits(value, 14, 2, minute) ||
-      !parseDigits(value, 17, 2, second)) {
+      !parseDigits(value, 11, 2, hour) || !parseDigits(value, 14, 2, minute) || !parseDigits(value, 17, 2, second)) {
     return false;
   }
   if (month < 1 || month > 12 || day < 1 || day > 31 || hour > 23 || minute > 59 || second > 60) return false;
@@ -112,8 +111,8 @@ bool parseIso8601ToShanghai(const char* value, ShanghaiTime& result) {
   }
   if (zone != input.size()) return false;
 
-  int64_t epoch = daysFromCivil(year, static_cast<unsigned>(month), static_cast<unsigned>(day)) * 86400 +
-                  hour * 3600 + minute * 60 + std::min(second, 59) - offsetSeconds;
+  int64_t epoch = daysFromCivil(year, static_cast<unsigned>(month), static_cast<unsigned>(day)) * 86400 + hour * 3600 +
+                  minute * 60 + std::min(second, 59) - offsetSeconds;
   epoch += 8 * 3600;  // Protocol scheduling is authoritative in Asia/Shanghai.
   result.day = epoch / 86400;
   int64_t seconds = epoch % 86400;
@@ -135,11 +134,9 @@ ShanghaiTime advanceTime(const ShanghaiTime& base, uint32_t elapsedSeconds) {
   return result;
 }
 
-bool contentRotationDue(const ShanghaiTime& now, const ShanghaiTime& anchor,
-                        uint32_t intervalSeconds) {
+bool contentRotationDue(const ShanghaiTime& now, const ShanghaiTime& anchor, uint32_t intervalSeconds) {
   if (intervalSeconds == 0 || !now.valid || !anchor.valid) return false;
-  const int64_t elapsed = (now.day - anchor.day) * 86400LL +
-                          static_cast<int64_t>(now.secondOfDay) -
+  const int64_t elapsed = (now.day - anchor.day) * 86400LL + static_cast<int64_t>(now.secondOfDay) -
                           static_cast<int64_t>(anchor.secondOfDay);
   return elapsed >= static_cast<int64_t>(intervalSeconds);
 }
@@ -183,9 +180,8 @@ const ContentCopy* selectCopy(const std::vector<ContentCopy>& copies, const std:
   if (total == 0) return nullptr;
 
   uint32_t target = randomValue % total;
-  const bool allowUsed = std::all_of(copies.begin(), copies.end(), [&usedIds](const ContentCopy& copy) {
-    return isUsed(copy.id, usedIds);
-  });
+  const bool allowUsed = std::all_of(copies.begin(), copies.end(),
+                                     [&usedIds](const ContentCopy& copy) { return isUsed(copy.id, usedIds); });
   for (const auto& copy : copies) {
     if (!allowUsed && isUsed(copy.id, usedIds)) continue;
     const uint32_t weight = std::max<uint16_t>(copy.weight, 1);

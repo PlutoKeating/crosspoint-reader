@@ -2,8 +2,8 @@
 
 #include "ProjectStickCore.h"
 #include "ProjectStickKeyguard.h"
-#include "ProjectStickSyncState.h"
 #include "ProjectStickStream.h"
+#include "ProjectStickSyncState.h"
 
 using namespace project_stick;
 
@@ -162,16 +162,12 @@ TEST(ProjectStickCore, AdvancesAcrossMidnight) {
 TEST(ProjectStickCore, ContentRotationUsesPersistedShanghaiTime) {
   const ShanghaiTime anchor{.day = 100, .secondOfDay = 86370, .valid = true};
   EXPECT_FALSE(contentRotationDue(anchor, anchor, 60));
-  EXPECT_FALSE(contentRotationDue(
-      ShanghaiTime{.day = 101, .secondOfDay = 29, .valid = true}, anchor, 60));
-  EXPECT_TRUE(contentRotationDue(
-      ShanghaiTime{.day = 101, .secondOfDay = 30, .valid = true}, anchor, 60));
-  EXPECT_FALSE(contentRotationDue(
-      ShanghaiTime{.day = 99, .secondOfDay = 0, .valid = true}, anchor, 60));
+  EXPECT_FALSE(contentRotationDue(ShanghaiTime{.day = 101, .secondOfDay = 29, .valid = true}, anchor, 60));
+  EXPECT_TRUE(contentRotationDue(ShanghaiTime{.day = 101, .secondOfDay = 30, .valid = true}, anchor, 60));
+  EXPECT_FALSE(contentRotationDue(ShanghaiTime{.day = 99, .secondOfDay = 0, .valid = true}, anchor, 60));
   EXPECT_FALSE(contentRotationDue(ShanghaiTime{}, anchor, 60));
   EXPECT_FALSE(contentRotationDue(anchor, ShanghaiTime{}, 60));
-  EXPECT_FALSE(contentRotationDue(
-      ShanghaiTime{.day = 101, .secondOfDay = 30, .valid = true}, anchor, 0));
+  EXPECT_FALSE(contentRotationDue(ShanghaiTime{.day = 101, .secondOfDay = 30, .valid = true}, anchor, 0));
 }
 
 TEST(ProjectStickCore, SelectsTimedThenAllDayThenEnabledFallback) {
@@ -267,8 +263,7 @@ TEST(ProjectStickStream, StreamsManifestEntriesWithoutRetainingTheFileList) {
 }
 
 TEST(ProjectStickStream, AcceptsTheDocumentedUnchangedManifest) {
-  constexpr char json[] =
-      R"({"unchanged":true,"version":12,"server_time":"2026-07-22T13:30:05+08:00"})";
+  constexpr char json[] = R"({"unchanged":true,"version":12,"server_time":"2026-07-22T13:30:05+08:00"})";
   ReleaseManifestDecoder decoder;
   decoder.feed(json, sizeof(json) - 1);
 
@@ -299,10 +294,9 @@ TEST(ProjectStickStream, LoadsOnlyTheBoundedScheduleIntoMemory) {
 }
 
 TEST(ProjectStickStream, SelectsOneCopyUsingTwoStreamingPasses) {
-  constexpr char json[] =
-      R"({"scenario":"pre_open","copies":[)"
-      R"({"id":1,"text":"already shown","weight":1,"tone":"calm"},)"
-      R"({"id":2,"text":"selected copy","weight":3,"tone":"focused"}]})";
+  constexpr char json[] = R"({"scenario":"pre_open","copies":[)"
+                          R"({"id":1,"text":"already shown","weight":1,"tone":"calm"},)"
+                          R"({"id":2,"text":"selected copy","weight":3,"tone":"focused"}]})";
   const std::vector<int64_t> usedIds = {1};
 
   ContentStreamDecoder measure(ContentPassMode::MEASURE, usedIds);

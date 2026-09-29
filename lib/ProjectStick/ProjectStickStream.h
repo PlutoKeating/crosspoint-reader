@@ -1,7 +1,5 @@
 #pragma once
 
-#include "ProjectStickCore.h"
-
 #include <StreamingJsonParser.h>
 
 #include <cstddef>
@@ -9,6 +7,8 @@
 #include <string>
 #include <utility>
 #include <vector>
+
+#include "ProjectStickCore.h"
 
 namespace project_stick {
 
@@ -115,8 +115,7 @@ class ContentStreamDecoder {
  public:
   static constexpr size_t MAX_COPIES = 64;
 
-  ContentStreamDecoder(ContentPassMode mode, const std::vector<int64_t>& usedCopyIds,
-                       uint32_t selectionTarget = 0);
+  ContentStreamDecoder(ContentPassMode mode, const std::vector<int64_t>& usedCopyIds, uint32_t selectionTarget = 0);
 
   void feed(const char* data, size_t length);
   bool finish() const;
