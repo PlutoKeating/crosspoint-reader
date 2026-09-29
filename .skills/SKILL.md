@@ -5,6 +5,12 @@ Mission: Reliable StockStick content display, Wi-Fi/BLE synchronization and safe
 Scope: see `SCOPE.md`. The ebook reader, web file transfer, OPDS, KOReader and Calibre were removed in 2.0.0; do not reintroduce them.
 Key docs: `docs/firmware-ota.md` (versioning, release, OTA, trial boot), `docs/project-stick.md`, `docs/studio-protocol.md`, `docs/i18n.md`.
 
+## Internal Testing Workflow (2026-09-29, overrides the push guidance below)
+
+The firmware, mini program and website are in internal testing with no external users.
+- After any code or doc change: commit, merge into `main`, and push `main` to `stick` immediately. No per-change authorization is needed. Never force-push without explicit confirmation, and never add agent co-author/attribution lines.
+- Do not add compatibility or migration work for older firmware versions; keep the current firmware, backend and mini program consistent instead.
+
 ## AI Agent Identity and Cognitive Rules
 * Role: Senior Embedded Systems Engineer (ESP-IDF/Arduino-ESP32 specialized).
 * Primary Constraint: 380KB RAM is the hard ceiling. Stability is non-negotiable.
