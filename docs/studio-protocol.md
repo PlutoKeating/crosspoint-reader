@@ -65,9 +65,12 @@ Ownership changes clear Studio and legacy companion data/events, rotate BLE
 credentials, and retain reading data. A revoked fully offline device cannot learn
 about revocation until it reconnects; the mini-program makes that limitation visible.
 
-TLS uses GTS Root R4 with peer and hostname verification in SecureNet, and a usable
-system clock. Another deployment must maintain its actual trust chain; never disable
-verification to transmit authorization material.
+The production API is `https://stockstick.plutokeating.beer`. TLS pins ISRG Root X2,
+ISRG Root X1 and GTS Root R4 (`src/project_stick/StudioTrust.h`) with peer and hostname
+verification in SecureNet, and requires a usable system clock. The domain currently
+chains Let's Encrypt YE1 -> Root YE -> ISRG Root X2; the Google root stays pinned because
+Cloudflare may reissue from Google Trust Services. Another deployment must maintain its
+actual trust chain; never disable verification to transmit authorization material.
 
 ## BLE protocol 2
 

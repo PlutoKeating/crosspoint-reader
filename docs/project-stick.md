@@ -82,7 +82,7 @@ comparison.
 The production service defaults to:
 
 ```text
-https://stockstick.arr2018.dpdns.org
+https://stockstick.plutokeating.beer
 ```
 
 Override it at build time without editing source:

@@ -38,7 +38,7 @@
 #include "project_stick/ProjectStickStore.h"
 
 #ifndef PROJECT_STICK_BASE_URL
-#define PROJECT_STICK_BASE_URL "https://stockstick.arr2018.dpdns.org"
+#define PROJECT_STICK_BASE_URL "https://stockstick.plutokeating.beer"
 #endif
 
 namespace {
