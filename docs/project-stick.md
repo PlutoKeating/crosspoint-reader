@@ -157,6 +157,10 @@ them (see [i18n.md](i18n.md)).
   another copy, and, when online, check for a new release.
 - The front confirm button opens Wi-Fi selection; the front back button opens the
   system menu (StockStick / Settings).
+- The card page's button hint blocks (front hints and the side feedback hints)
+  are hidden by default, appear on any key action and hide after 5 seconds
+  without one. They never show while the keyguard is locked. Hint blocks are
+  sized for the Chinese fallback font (Noto Sans SC 12).
 - Before binding, the content area shows a clear mini-program instruction and
   the current eight-character code. The ordinary content UI appears as soon as
   the next authenticated registration reports `bound=true`.
