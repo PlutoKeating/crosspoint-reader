@@ -9,6 +9,8 @@ embedded StockStick descriptor, and writes:
     dist/firmware/<version>/
       stockstick-<version>.bin     OTA / SD-card image
       stockstick-<version>.elf     symbols for crash decoding (not published)
+      stockstick-<version>-web.js  browser simulator runtime (same source, Emscripten)
+      stockstick-<version>-web.wasm
       manifest.json                identity, size, SHA-256, commit, notes
       lang/<CODE>.lang             SD-card language packs for this build
       catalogue.json               body for the admin firmware catalogue
@@ -131,6 +133,9 @@ def main() -> int:
     parser.add_argument("--url-base", default="", help="public HTTPS directory the .bin will be uploaded to")
     parser.add_argument("--out", type=Path, default=ROOT / "dist" / "firmware")
     parser.add_argument("--allow-dirty", action="store_true", help="package an uncommitted tree (testing only)")
+    parser.add_argument("--no-web", action="store_true", help="skip the browser simulator build (needs emsdk)")
+    parser.add_argument("--simulator", type=Path, default=ROOT.parent / "crosspoint-simulator",
+                        help="crosspoint-simulator checkout used for the browser build")
     args = parser.parse_args()
 
     identity = read_identity()
@@ -179,6 +184,23 @@ def main() -> int:
         stdout=subprocess.DEVNULL,
     )
 
+    # The website's simulator loads this build from the same directory as the
+    # OTA image, so it always runs exactly the published firmware source.
+    web = None
+    if not args.no_web:
+        subprocess.run(
+            [sys.executable, str(ROOT / "scripts" / "build_web_simulator.py"),
+             "--simulator", str(args.simulator), "--out", str(out)],
+            cwd=ROOT,
+            check=True,
+        )
+        (out / f"stockstick-{version}-web.json").unlink(missing_ok=True)
+        web = {}
+        for kind in ("js", "wasm"):
+            name = f"stockstick-{version}-web.{kind}"
+            data = (out / name).read_bytes()
+            web[kind] = {"file": name, "bytes": len(data), "sha256": hashlib.sha256(data).hexdigest()}
+
     sha256 = hashlib.sha256(image).hexdigest()
     manifest = {
         "product": "stockstick",
@@ -194,6 +216,7 @@ def main() -> int:
         "commit": git("rev-parse", "HEAD"),
         "built_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "notes": notes,
+        "web": web,
     }
     (out / "manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     catalogue = {
@@ -208,7 +231,9 @@ def main() -> int:
 
     print(f"StockStick {version} (build {identity['build']}) -> {out}")
     print(f"  {binary_name}: {len(image)} / {limit} bytes, sha256 {sha256}")
-    print("  Upload the .bin to HTTPS storage, then register catalogue.json in /console/studio.")
+    if web:
+        print(f"  browser simulator: {web['js']['bytes']} + {web['wasm']['bytes']} bytes")
+    print("  Publish the .bin (and the -web files beside it), then register catalogue.json in /console/studio.")
     if not catalogue["url"]:
         print("  (catalogue.json has no url: pass --url-base once the storage location is known)")
     return 0
