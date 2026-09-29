@@ -238,6 +238,14 @@ void ProjectStickActivity::loop() {
                                  ? display.alertUntil.day * 86400LL + display.alertUntil.secondOfDay - 8 * 3600
                                  : 0;
   frame.tick(studioNow, 0, alertUntil);
+  if (!firmware_update::snapshot().busy() && wifiAutoConnect.tick(millis()) && state != State::Inactive) {
+    // Came online on its own (boot, wake, OTA restart or a recovered link).
+    state = service.display().copyId != 0 ? State::Online : State::Connecting;
+    setStatus(state == State::Online ? tr(STR_PROJECT_STICK_ONLINE) : tr(STR_PROJECT_STICK_SYNCING));
+    requestCloudSync(true);
+    lastStudioPollMs = millis() - 5000;  // poll the Studio target right away
+    requestUpdate();
+  }
   const auto firmwareUpdate = firmware_update::snapshot();
   if (firmwareUpdate.generation != firmwareUpdateGeneration) {
     firmwareUpdateGeneration = firmwareUpdate.generation;
@@ -358,6 +366,7 @@ void ProjectStickActivity::loop() {
 void ProjectStickActivity::launchWifiSelection() {
   startActivityForResult(std::make_unique<WifiSelectionActivity>(renderer, mappedInput, false),
                          [this](const ActivityResult&) {
+                           wifiAutoConnect.retrySoon();
                            if (WiFi.status() == WL_CONNECTED) {
                              state = State::Connecting;
                              setStatus(tr(STR_PROJECT_STICK_SYNCING));

@@ -79,8 +79,14 @@ void ProjectStickBackgroundSync::taskTrampoline(void* context) {
 }
 
 void ProjectStickBackgroundSync::taskLoop() {
+  // Studio polls keep their TLS connection warm; drop it once polling pauses
+  // (activity left, Wi-Fi gone, BLE session) so the heap is not held.
+  constexpr TickType_t IDLE_CLOSE_TICKS = pdMS_TO_TICKS(45000);
   while (true) {
-    ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+    if (ulTaskNotifyTake(pdTRUE, IDLE_CLOSE_TICKS) == 0) {
+      service.closeIdleConnection();
+      continue;
+    }
 
     WorkKind kind = WorkKind::None;
     bool registerFirst = false;

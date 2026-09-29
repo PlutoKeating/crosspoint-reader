@@ -1,6 +1,7 @@
 #pragma once
 
 #include "activities/Activity.h"
+#include "network/WifiAutoConnect.h"
 #include "project_stick/ProjectStickBackgroundSync.h"
 #include "project_stick/ProjectStickService.h"
 
@@ -28,6 +29,7 @@ class ProjectStickActivity final : public Activity {
   uint32_t lastStudioPollMs = 0;
   uint32_t studioGeneration = 0;
   uint32_t firmwareUpdateGeneration = 0;
+  WifiAutoConnect wifiAutoConnect;
   void renderFirmwareUpdate();
   uint32_t lastManifestAttemptMs = 0;
   uint32_t lastAlertPollMs = 0;

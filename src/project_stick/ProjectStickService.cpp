@@ -112,6 +112,27 @@ class HttpBurst {
   freeink::SecureHttpClient& client;
 };
 
+// Studio polls run every few seconds; re-doing the TLS handshake each time
+// costs about a second of CPU and radio time on the C3. Keep the connection
+// between polls while the heap can afford the TLS session; the sync worker
+// closes it after it has been idle for a while.
+constexpr uint32_t KEEP_ALIVE_MIN_FREE_HEAP = 80 * 1024;
+constexpr uint32_t KEEP_ALIVE_MIN_MAX_ALLOC = 32 * 1024;
+
+class HttpKeepWarm {
+ public:
+  explicit HttpKeepWarm(freeink::SecureHttpClient& client) : client(client) {}
+  ~HttpKeepWarm() {
+#ifndef SIMULATOR
+    if (ESP.getFreeHeap() >= KEEP_ALIVE_MIN_FREE_HEAP && ESP.getMaxAllocHeap() >= KEEP_ALIVE_MIN_MAX_ALLOC) return;
+#endif
+    client.end();
+  }
+
+ private:
+  freeink::SecureHttpClient& client;
+};
+
 bool equalsIgnoreCase(const std::string& left, const std::string& right) {
   if (left.size() != right.size()) return false;
   for (size_t i = 0; i < left.size(); ++i) {
@@ -384,6 +405,18 @@ bool ProjectStickService::registerDevice(int& status) {
     bound = PROJECT_STICK_STORE.bound;
   }
   if (!bound && !ensurePairing(status)) {
+    if (status == 401) {
+      // The server holds a different token for this unbound identity (SD state
+      // restored or copied, or a token lost mid-pairing). Nothing is bound to
+      // it, so start over with a fresh identity instead of failing forever.
+      ProjectStickStateLock lock(projectStickStateMutex);
+      LOG_ERR("STICK", "Unbound identity %s was rejected; creating a new one", PROJECT_STICK_STORE.deviceId.c_str());
+      PROJECT_STICK_STORE.deviceId = makeUuid();
+      PROJECT_STICK_STORE.deviceToken.clear();
+      PROJECT_STICK_STORE.pairingCode.clear();
+      PROJECT_STICK_STORE.saveToFile();
+      return false;
+    }
     if (!project_stick::pairingFailureAllowsRegistration(status)) {
       LOG_ERR("STICK", "Device pairing refresh failed (status=%d)", status);
       return false;
@@ -1493,8 +1526,10 @@ ProjectStickService::DisplayPreferences ProjectStickService::displayPreferences(
   return result;
 }
 
+void ProjectStickService::closeIdleConnection() { http.end(); }
+
 void ProjectStickService::syncStudio() {
-  HttpBurst burst(http);
+  HttpKeepWarm connection(http);
   if (!isBound() || studio_ble::connected()) return;
 
   auto& frame = StudioFrame::instance();

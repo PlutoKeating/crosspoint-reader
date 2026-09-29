@@ -37,6 +37,8 @@ class ProjectStickService {
   SyncReport sync(bool registerFirst = true, bool refreshDisplay = true);
   bool pollAlerts();
   void syncStudio();
+  // Drops a kept-alive API connection (called by the worker when idle).
+  void closeIdleConnection();
 
   // Device-side firmware check / request (Settings > Firmware update).
   struct FirmwareOffer {
