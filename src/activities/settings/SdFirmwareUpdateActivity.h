@@ -8,7 +8,7 @@
  * SD-card based firmware update activity.
  *
  * Flow:
- *  1) onEnter -> push FileBrowserActivity in PickFirmware mode (only .bin files visible).
+ *  1) onEnter -> push FirmwarePickerActivity (*.bin in / and /firmware).
  *  2) On result: validate the .bin (header magic, size fits OTA partition).
  *  3) Push ConfirmationActivity ("Update firmware?").
  *  4) On confirm: stream the file into the OTA partition via the Arduino Update API,

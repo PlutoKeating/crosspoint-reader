@@ -13,7 +13,7 @@ class IntervalSelectionActivity final : public Activity {
   explicit IntervalSelectionActivity(GfxRenderer& renderer, MappedInputManager& mappedInput, const char* activityName,
                                      StrId titleId, int initialValue, int minValue, int maxValue, int smallStep,
                                      int largeStep, StrId valueFormatId = StrId::STR_NONE_OPT,
-                                     bool readerActivity = false, bool ignoreInitialConfirmRelease = false,
+                                     bool ignoreInitialConfirmRelease = false,
                                      StrId maxBoundaryLabelId = StrId::STR_NONE_OPT)
       : Activity(activityName, renderer, mappedInput),
         titleId(titleId),
@@ -24,13 +24,11 @@ class IntervalSelectionActivity final : public Activity {
         maxValue(maxValue),
         smallStep(smallStep),
         largeStep(largeStep),
-        readerActivity(readerActivity),
         ignoreConfirmRelease(ignoreInitialConfirmRelease) {}
 
   void onEnter() override;
   void loop() override;
   void render(RenderLock&&) override;
-  bool isReaderActivity() const override { return readerActivity; }
 
  private:
   StrId titleId;
@@ -41,7 +39,6 @@ class IntervalSelectionActivity final : public Activity {
   int maxValue;
   int smallStep;
   int largeStep;
-  bool readerActivity;
   bool ignoreConfirmRelease;
   bool draggingBar = false;
   ButtonNavigator buttonNavigator;

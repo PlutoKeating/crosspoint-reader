@@ -15,15 +15,9 @@ enum class SettingType { TOGGLE, ENUM, ACTION, VALUE, STRING };
 enum class SettingAction {
   None,
   RemapFrontButtons,
-  CustomiseStatusBar,
-  KOReaderSync,
-  OPDSBrowser,
   Network,
-  ClearCache,
   SdFirmwareUpdate,
   Language,
-  DownloadFonts,
-  TextSettings,
 };
 
 struct SettingInfo {
@@ -44,7 +38,6 @@ struct SettingInfo {
   const char* key = nullptr;             // JSON API key (nullptr for ACTION types)
   StrId category = StrId::STR_NONE_OPT;  // Category for web UI grouping
   bool obfuscated = false;               // Save/load via base64 obfuscation (passwords)
-  bool inTextSettings = false;           // Surfaced in the Text Settings screen; hidden from the flat Reader list
 
   // Direct char[] string fields (for settings stored in CrossPointSettings)
   size_t stringOffset = 0;
@@ -58,11 +51,6 @@ struct SettingInfo {
 
   SettingInfo& withObfuscated() {
     obfuscated = true;
-    return *this;
-  }
-
-  SettingInfo& withTextSettings() {
-    inTextSettings = true;
     return *this;
   }
 
@@ -158,7 +146,6 @@ class SettingsActivity final : public Activity {
 
   // Per-category settings derived from shared list + device-only actions
   std::vector<SettingInfo> displaySettings;
-  std::vector<SettingInfo> readerSettings;
   std::vector<SettingInfo> controlsSettings;
   std::vector<SettingInfo> systemSettings;
   const std::vector<SettingInfo>* currentSettings = nullptr;
@@ -168,13 +155,14 @@ class SettingsActivity final : public Activity {
 
   OptionPopup optionPopup;
 
-  static constexpr int categoryCount = 4;
+  static constexpr int categoryCount = 3;
   static const StrId categoryNames[categoryCount];
 
   void enterCategory(int categoryIndex);
   void toggleCurrentSetting();
   void openSleepTimeoutPicker();
   void rebuildSettingsLists();
+  const std::vector<SettingInfo>* settingsForCategory(int index) const;
   void syncQuickResumeTimeoutForSleepScreen(bool sleepScreenChanged, bool quickResumeTimeoutChanged);
 
  public:

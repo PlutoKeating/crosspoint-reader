@@ -9,55 +9,40 @@
 #include <cstring>
 
 #include "ButtonRemapActivity.h"
-#include "ClearCacheActivity.h"
 #include "CrossPointSettings.h"
-#include "FontDownloadActivity.h"
-#include "KOReaderSettingsActivity.h"
 #include "LanguageSelectActivity.h"
 #include "MappedInputManager.h"
-#include "OpdsServerListActivity.h"
-#include "SdCardFontSystem.h"
 #include "SdFirmwareUpdateActivity.h"
 #include "SettingsList.h"
-#include "StatusBarSettingsActivity.h"
-#include "TextSettingsActivity.h"
 #include "activities/network/WifiSelectionActivity.h"
 #include "activities/util/IntervalSelectionActivity.h"
 #include "components/UITheme.h"
 #include "fontIds.h"
 
-const StrId SettingsActivity::categoryNames[categoryCount] = {StrId::STR_CAT_DISPLAY, StrId::STR_CAT_READER,
-                                                              StrId::STR_CAT_CONTROLS, StrId::STR_CAT_SYSTEM};
+const StrId SettingsActivity::categoryNames[categoryCount] = {StrId::STR_CAT_DISPLAY, StrId::STR_CAT_CONTROLS,
+                                                              StrId::STR_CAT_SYSTEM};
+
+const std::vector<SettingInfo>* SettingsActivity::settingsForCategory(int index) const {
+  switch (index) {
+    case 1:
+      return &controlsSettings;
+    case 2:
+      return &systemSettings;
+    case 0:
+    default:
+      return &displaySettings;
+  }
+}
 
 void SettingsActivity::rebuildSettingsLists() {
   displaySettings.clear();
-  readerSettings.clear();
   controlsSettings.clear();
   systemSettings.clear();
 
-  // Pick up any fonts uploaded/deleted over the web server since the last
-  // reader activity ran — otherwise the font-family picker shows stale list.
-  sdFontSystem.refreshIfDirty();
-
-  // Rescan /dictionaries on every rebuild: cheap (one directory listing) and
-  // picks up dictionaries copied to the SD card since the last visit.
-  std::vector<DictionaryEntry> dictionaries;
-  DictionaryRegistry::discover(dictionaries);
-
-  for (auto& setting : getSettingsList(&sdFontSystem.registry(), &dictionaries)) {
-    if (setting.category == StrId::STR_NONE_OPT) continue;
+  for (auto& setting : getSettingsList()) {
     if (setting.category == StrId::STR_CAT_DISPLAY) {
       displaySettings.push_back(setting);
-    } else if (setting.category == StrId::STR_CAT_READER) {
-      // Settings merged into "Text Settings"
-      // (they stay in the shared list for the web settings API)
-      if (setting.inTextSettings) continue;
-      readerSettings.push_back(setting);
     } else if (setting.category == StrId::STR_CAT_CONTROLS) {
-      if (setting.valuePtr == &CrossPointSettings::pwrBtnFootnoteBack &&
-          SETTINGS.shortPwrBtn != CrossPointSettings::SHORT_PWRBTN::FOOTNOTES) {
-        continue;
-      }
       controlsSettings.push_back(setting);
     } else if (setting.category == StrId::STR_CAT_SYSTEM) {
       systemSettings.push_back(setting);
@@ -70,32 +55,10 @@ void SettingsActivity::rebuildSettingsLists() {
                             SettingInfo::Action(StrId::STR_REMAP_FRONT_BUTTONS, SettingAction::RemapFrontButtons));
   }
   systemSettings.push_back(SettingInfo::Action(StrId::STR_WIFI_NETWORKS, SettingAction::Network));
-  systemSettings.push_back(SettingInfo::Action(StrId::STR_KOREADER_SYNC, SettingAction::KOReaderSync));
-  systemSettings.push_back(SettingInfo::Action(StrId::STR_OPDS_SERVERS, SettingAction::OPDSBrowser));
-  systemSettings.push_back(SettingInfo::Action(StrId::STR_CLEAR_READING_CACHE, SettingAction::ClearCache));
   systemSettings.push_back(SettingInfo::Action(StrId::STR_SD_FIRMWARE_UPDATE, SettingAction::SdFirmwareUpdate));
   systemSettings.push_back(SettingInfo::Action(StrId::STR_LANGUAGE, SettingAction::Language));
-  readerSettings.insert(readerSettings.begin(),
-                        SettingInfo::Action(StrId::STR_TEXT_SETTINGS, SettingAction::TextSettings));
-  readerSettings.insert(readerSettings.begin() + 1,
-                        SettingInfo::Action(StrId::STR_MANAGE_FONTS, SettingAction::DownloadFonts));
-  readerSettings.push_back(SettingInfo::Action(StrId::STR_CUSTOMISE_STATUS_BAR, SettingAction::CustomiseStatusBar));
 
-  // Update currentSettings pointer and count for the active category
-  switch (selectedCategoryIndex) {
-    case 0:
-      currentSettings = &displaySettings;
-      break;
-    case 1:
-      currentSettings = &readerSettings;
-      break;
-    case 2:
-      currentSettings = &controlsSettings;
-      break;
-    case 3:
-      currentSettings = &systemSettings;
-      break;
-  }
+  currentSettings = settingsForCategory(selectedCategoryIndex);
   settingsCount = static_cast<int>(currentSettings->size());
 }
 
@@ -128,20 +91,7 @@ void SettingsActivity::loop() {
   bool hasChangedCategory = false;
 
   auto applyCategorySelection = [this] {
-    switch (selectedCategoryIndex) {
-      case 0:
-        currentSettings = &displaySettings;
-        break;
-      case 1:
-        currentSettings = &readerSettings;
-        break;
-      case 2:
-        currentSettings = &controlsSettings;
-        break;
-      case 3:
-        currentSettings = &systemSettings;
-        break;
-    }
+    currentSettings = settingsForCategory(selectedCategoryIndex);
     settingsCount = static_cast<int>(currentSettings->size());
   };
 
@@ -365,38 +315,11 @@ void SettingsActivity::toggleCurrentSetting() {
       case SettingAction::RemapFrontButtons:
         startActivityForResult(std::make_unique<ButtonRemapActivity>(renderer, mappedInput), resultHandler);
         break;
-      case SettingAction::CustomiseStatusBar:
-        startActivityForResult(std::make_unique<StatusBarSettingsActivity>(renderer, mappedInput), resultHandler);
-        break;
-      case SettingAction::KOReaderSync:
-        startActivityForResult(std::make_unique<KOReaderSettingsActivity>(renderer, mappedInput), resultHandler);
-        break;
-      case SettingAction::OPDSBrowser:
-        startActivityForResult(std::make_unique<OpdsServerListActivity>(renderer, mappedInput), resultHandler);
-        break;
       case SettingAction::Network:
         startActivityForResult(std::make_unique<WifiSelectionActivity>(renderer, mappedInput, false), resultHandler);
         break;
-      case SettingAction::ClearCache:
-        startActivityForResult(std::make_unique<ClearCacheActivity>(renderer, mappedInput), resultHandler);
-        break;
       case SettingAction::SdFirmwareUpdate:
         startActivityForResult(std::make_unique<SdFirmwareUpdateActivity>(renderer, mappedInput), resultHandler);
-        break;
-      case SettingAction::DownloadFonts:
-        startActivityForResult(std::make_unique<FontDownloadActivity>(renderer, mappedInput),
-                               [this](const ActivityResult&) {
-                                 SETTINGS.saveToFile();
-                                 rebuildSettingsLists();
-                               });
-        break;
-      case SettingAction::TextSettings:
-        startActivityForResult(std::make_unique<TextSettingsActivity>(renderer, mappedInput, &sdFontSystem.registry(),
-                                                                      TextSettingsActivity::Tab::Family),
-                               [this](const ActivityResult&) {
-                                 SETTINGS.saveToFile();
-                                 rebuildSettingsLists();
-                               });
         break;
       case SettingAction::Language:
         startActivityForResult(std::make_unique<LanguageSelectActivity>(renderer, mappedInput), resultHandler);
@@ -444,7 +367,7 @@ void SettingsActivity::openSleepTimeoutPicker() {
       std::make_unique<IntervalSelectionActivity>(
           renderer, mappedInput, "SleepTimeoutInterval", StrId::STR_TIME_TO_SLEEP, SETTINGS.sleepTimeoutMinutes,
           CrossPointSettings::MIN_SLEEP_TIMEOUT_MINUTES, CrossPointSettings::MAX_SLEEP_TIMEOUT_MINUTES, 1, 5,
-          StrId::STR_SLEEP_TIMER_VALUE_FORMAT, false, true, StrId::STR_SLEEP_NEVER),
+          StrId::STR_SLEEP_TIMER_VALUE_FORMAT, true, StrId::STR_SLEEP_NEVER),
       [this](const ActivityResult& result) {
         if (!result.isCancelled) {
           SETTINGS.sleepTimeoutMinutes = static_cast<uint8_t>(std::get<IntervalResult>(result.data).value);

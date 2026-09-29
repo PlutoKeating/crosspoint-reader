@@ -45,7 +45,6 @@ class Activity {
   virtual bool handlesKeyguard() { return false; }
   virtual bool allowIdlePowerSaving() { return false; }
   virtual bool preventAutoSleep() { return false; }
-  virtual bool isReaderActivity() const { return false; }
   // Returns true when the activity schedules its own forced refresh.
   virtual bool handleForcedRefresh() { return false; }
   virtual bool isHomeActivity() const { return false; }
@@ -65,7 +64,6 @@ class Activity {
   // Convenience method to facilitate API transition to ActivityManager
   // TODO: remove this in near future
   void onGoHome(HomeMenuItem item = HomeMenuItem::NONE);
-  void onSelectBook(const std::string& path);
 
  protected:
   enum class ListTouchResult : uint8_t {

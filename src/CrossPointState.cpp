@@ -21,18 +21,14 @@ void CrossPointState::pushRecentSleep(uint16_t idx) {
 }
 
 void CrossPointState::toJson(JsonDocument& doc) const {
-  doc["openEpubPath"] = openEpubPath;
   JsonArray recentArr = doc["recentSleepImages"].to<JsonArray>();
   for (int i = 0; i < SLEEP_RECENT_COUNT; i++) recentArr.add(recentSleepImages[i]);
   doc["recentSleepPos"] = recentSleepPos;
   doc["recentSleepFill"] = recentSleepFill;
-  doc["readerActivityLoadCount"] = readerActivityLoadCount;
-  doc["lastSleepFromReader"] = lastSleepFromReader;
   doc["showBootScreen"] = showBootScreen;
 }
 
 bool CrossPointState::fromJson(JsonVariantConst doc) {
-  openEpubPath = doc["openEpubPath"] | "";
   memset(recentSleepImages, 0, sizeof(recentSleepImages));
   JsonArrayConst recentArr = doc["recentSleepImages"];
   const int actualCount =
@@ -48,8 +44,6 @@ bool CrossPointState::fromJson(JsonVariantConst doc) {
     const uint8_t legacy = doc["lastSleepImage"] | static_cast<uint8_t>(UINT8_MAX);
     if (legacy != UINT8_MAX) pushRecentSleep(static_cast<uint16_t>(legacy));
   }
-  readerActivityLoadCount = doc["readerActivityLoadCount"] | static_cast<uint8_t>(0);
-  lastSleepFromReader = doc["lastSleepFromReader"] | false;
   showBootScreen = doc["showBootScreen"] | true;
   return true;
 }

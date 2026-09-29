@@ -1,6 +1,5 @@
 #include <Arduino.h>
 #include <BoardConfig.h>
-#include <Epub.h>
 #include <FontCacheManager.h>
 #include <FontDecompressor.h>
 #include <GfxRenderer.h>
@@ -24,11 +23,7 @@
 
 #include "CrossPointSettings.h"
 #include "CrossPointState.h"
-#include "KOReaderCredentialStore.h"
 #include "MappedInputManager.h"
-#include "OpdsServerStore.h"
-#include "RecentBooksStore.h"
-#include "SdCardFontSystem.h"
 #include "activities/Activity.h"
 #include "activities/ActivityManager.h"
 #include "activities/settings/SdFirmwareUpdateActivity.h"
@@ -42,64 +37,10 @@ GfxRenderer renderer(display);
 MappedInputManager mappedInputManager(gpio, renderer);
 ActivityManager activityManager(renderer, mappedInputManager);
 FontDecompressor fontDecompressor;
-SdCardFontSystem sdFontSystem;
 FontCacheManager fontCacheManager(renderer.getFontMap(), renderer.getSdCardFonts());
 static unsigned long allowSleepAt = 0;
 
 // Fonts
-EpdFont notoserif14RegularFont(&notoserif_14_regular);
-EpdFont notoserif14BoldFont(&notoserif_14_bold);
-EpdFont notoserif14ItalicFont(&notoserif_14_italic);
-EpdFont notoserif14BoldItalicFont(&notoserif_14_bolditalic);
-EpdFontFamily notoserif14FontFamily(&notoserif14RegularFont, &notoserif14BoldFont, &notoserif14ItalicFont,
-                                    &notoserif14BoldItalicFont);
-#ifndef OMIT_FONTS
-EpdFont notoserif12RegularFont(&notoserif_12_regular);
-EpdFont notoserif12BoldFont(&notoserif_12_bold);
-EpdFont notoserif12ItalicFont(&notoserif_12_italic);
-EpdFont notoserif12BoldItalicFont(&notoserif_12_bolditalic);
-EpdFontFamily notoserif12FontFamily(&notoserif12RegularFont, &notoserif12BoldFont, &notoserif12ItalicFont,
-                                    &notoserif12BoldItalicFont);
-EpdFont notoserif16RegularFont(&notoserif_16_regular);
-EpdFont notoserif16BoldFont(&notoserif_16_bold);
-EpdFont notoserif16ItalicFont(&notoserif_16_italic);
-EpdFont notoserif16BoldItalicFont(&notoserif_16_bolditalic);
-EpdFontFamily notoserif16FontFamily(&notoserif16RegularFont, &notoserif16BoldFont, &notoserif16ItalicFont,
-                                    &notoserif16BoldItalicFont);
-EpdFont notoserif18RegularFont(&notoserif_18_regular);
-EpdFont notoserif18BoldFont(&notoserif_18_bold);
-EpdFont notoserif18ItalicFont(&notoserif_18_italic);
-EpdFont notoserif18BoldItalicFont(&notoserif_18_bolditalic);
-EpdFontFamily notoserif18FontFamily(&notoserif18RegularFont, &notoserif18BoldFont, &notoserif18ItalicFont,
-                                    &notoserif18BoldItalicFont);
-
-EpdFont notosans12RegularFont(&notosans_12_regular);
-EpdFont notosans12BoldFont(&notosans_12_bold);
-EpdFont notosans12ItalicFont(&notosans_12_italic);
-EpdFont notosans12BoldItalicFont(&notosans_12_bolditalic);
-EpdFontFamily notosans12FontFamily(&notosans12RegularFont, &notosans12BoldFont, &notosans12ItalicFont,
-                                   &notosans12BoldItalicFont);
-EpdFont notosans14RegularFont(&notosans_14_regular);
-EpdFont notosans14BoldFont(&notosans_14_bold);
-EpdFont notosans14ItalicFont(&notosans_14_italic);
-EpdFont notosans14BoldItalicFont(&notosans_14_bolditalic);
-EpdFontFamily notosans14FontFamily(&notosans14RegularFont, &notosans14BoldFont, &notosans14ItalicFont,
-                                   &notosans14BoldItalicFont);
-EpdFont notosans16RegularFont(&notosans_16_regular);
-EpdFont notosans16BoldFont(&notosans_16_bold);
-EpdFont notosans16ItalicFont(&notosans_16_italic);
-EpdFont notosans16BoldItalicFont(&notosans_16_bolditalic);
-EpdFontFamily notosans16FontFamily(&notosans16RegularFont, &notosans16BoldFont, &notosans16ItalicFont,
-                                   &notosans16BoldItalicFont);
-EpdFont notosans18RegularFont(&notosans_18_regular);
-EpdFont notosans18BoldFont(&notosans_18_bold);
-EpdFont notosans18ItalicFont(&notosans_18_italic);
-EpdFont notosans18BoldItalicFont(&notosans_18_bolditalic);
-EpdFontFamily notosans18FontFamily(&notosans18RegularFont, &notosans18BoldFont, &notosans18ItalicFont,
-                                   &notosans18BoldItalicFont);
-
-#endif  // OMIT_FONTS
-
 EpdFont smallFont(&notosans_8_regular);
 EpdFontFamily smallFontFamily(&smallFont);
 
@@ -128,7 +69,6 @@ RTC_NOINIT_ATTR uint32_t silentRebootMagic;
 RTC_NOINIT_ATTR uint32_t silentRebootTarget;
 constexpr uint32_t SILENT_REBOOT_MAGIC = 0xC1EAB007;
 constexpr uint32_t SILENT_REBOOT_TARGET_HOME = 0;
-constexpr uint32_t SILENT_REBOOT_TARGET_READER = 1;
 
 // How the device is coming back to life, resolved once at boot. Both resume
 // flows suppress the splash and leave the panel holding its pre-boot frame; a
@@ -156,16 +96,6 @@ void silentRestart() {
   // Without an overlay, users don't see the reboot and fire input through to
   // Home. Select on the default selectorIndex=0 then opens the most-recent
   // book, looking like a trampoline back to the reader they just exited.
-  GUI.drawPopup(renderer, tr(STR_LOADING_POPUP));
-  delay(50);
-  ESP.restart();
-}
-
-void silentRestartToReader() {
-  if (deepSleepInProgress) return;  // sleeping supersedes the heap-defrag reboot
-  silentRebootTarget = SILENT_REBOOT_TARGET_READER;
-  silentRebootMagic = SILENT_REBOOT_MAGIC;
-  LOG_DBG("MAIN", "Silent restart (target=reader)");
   GUI.drawPopup(renderer, tr(STR_LOADING_POPUP));
   delay(50);
   ESP.restart();
@@ -205,7 +135,6 @@ static bool loadSleepFrameBuffer() {
 // Enter deep sleep mode
 void enterDeepSleep(bool fromTimeout = false) {
   HalPowerManager::Lock powerLock;  // Ensure we are at normal CPU frequency for sleep preparation
-  APP_STATE.lastSleepFromReader = activityManager.isReaderActivity();
 
   const bool isQuickResumeSleep =
       SETTINGS.sleepScreen == CrossPointSettings::SLEEP_SCREEN_MODE::QUICK_RESUME ||
@@ -244,23 +173,12 @@ void setupDisplayAndFonts(bool seamless = false) {
   activityManager.begin();
   LOG_DBG("MAIN", "Display initialized");
 
-  // Initialize font decompressor for compressed reader fonts
+  // Initialize font decompressor for compressed built-in fonts
   if (!fontDecompressor.init()) {
     LOG_ERR("MAIN", "Font decompressor init failed");
   }
   fontCacheManager.setFontDecompressor(&fontDecompressor);
   renderer.setFontCacheManager(&fontCacheManager);
-  renderer.insertFont(NOTOSERIF_14_FONT_ID, notoserif14FontFamily);
-#ifndef OMIT_FONTS
-  renderer.insertFont(NOTOSERIF_12_FONT_ID, notoserif12FontFamily);
-  renderer.insertFont(NOTOSERIF_16_FONT_ID, notoserif16FontFamily);
-  renderer.insertFont(NOTOSERIF_18_FONT_ID, notoserif18FontFamily);
-
-  renderer.insertFont(NOTOSANS_12_FONT_ID, notosans12FontFamily);
-  renderer.insertFont(NOTOSANS_14_FONT_ID, notosans14FontFamily);
-  renderer.insertFont(NOTOSANS_16_FONT_ID, notosans16FontFamily);
-  renderer.insertFont(NOTOSANS_18_FONT_ID, notosans18FontFamily);
-#endif  // OMIT_FONTS
   renderer.insertFont(UI_10_FONT_ID, ui10FontFamily);
   renderer.insertFont(UI_12_FONT_ID, ui12FontFamily);
   renderer.insertFont(SMALL_FONT_ID, smallFontFamily);
@@ -269,9 +187,6 @@ void setupDisplayAndFonts(bool seamless = false) {
   renderer.setDefaultFallbackFont(SMALL_FONT_ID, NOTOSANSSC_12_FONT_ID);
   renderer.setDefaultFallbackFont(UI_10_FONT_ID, NOTOSANSSC_12_FONT_ID);
   renderer.setDefaultFallbackFont(UI_12_FONT_ID, NOTOSANSSC_12_FONT_ID);
-
-  // Discover and load SD card fonts
-  sdFontSystem.begin(renderer);
 
   LOG_DBG("MAIN", "Fonts setup");
 }
@@ -297,10 +212,8 @@ void setup() {
   HalSystem::begin();
 
   // Read-and-clear so a panic later in setup() doesn't loop into silent reboot.
-  // Bound the target range too — RTC_NOINIT memory is uninitialized on cold boot.
+  // RTC_NOINIT memory is uninitialized on cold boot, so only the magic counts.
   const bool isSilentReboot = (silentRebootMagic == SILENT_REBOOT_MAGIC);
-  const uint32_t snapshotTarget =
-      (isSilentReboot && silentRebootTarget <= SILENT_REBOOT_TARGET_READER) ? silentRebootTarget : 0;
   silentRebootMagic = 0;
   silentRebootTarget = 0;
 
@@ -324,10 +237,7 @@ void setup() {
 
   SETTINGS.loadFromFile();
   APP_STATE.loadFromFile();
-  RECENT_BOOKS.loadFromFile();
   I18N.setLanguage(static_cast<Language>(SETTINGS.language));
-  KOREADER_STORE.loadFromFile();
-  OPDS_STORE.loadFromFile();
   UITheme::getInstance().reload();
   ButtonNavigator::setMappedInputManager(mappedInputManager);
 
@@ -433,9 +343,6 @@ void setup() {
   else if (HalSystem::isRebootFromPanic()) {
     // If we rebooted from a panic, go to crash report screen to show the panic info
     activityManager.goToCrashReport();
-  } else if (resume == BootResume::Silent && snapshotTarget == SILENT_REBOOT_TARGET_READER &&
-             !APP_STATE.openEpubPath.empty()) {
-    activityManager.goToReader(APP_STATE.openEpubPath);
   } else if (resume == BootResume::Silent) {
     // Preserve the explicit target used by Wi-Fi/settings workflows. A reader
     // target without a valid book also falls back safely to Home.
@@ -480,7 +387,6 @@ void loop() {
   gpio.setSharedConfirmPowerShortPressEmitsPower(SETTINGS.shortPwrBtn == CrossPointSettings::SHORT_PWRBTN::SLEEP);
   gpio.update();
   if (mappedInputManager.updateKeyguard(millis(), !activityManager.handlesKeyguard())) activityManager.requestUpdate();
-  halTiltSensor.update(SETTINGS.tiltPageTurn, SETTINGS.orientation, activityManager.isReaderActivity());
 
   renderer.setFadingFix(SETTINGS.fadingFix);
 

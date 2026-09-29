@@ -9,12 +9,9 @@
 #include "components/UITheme.h"
 
 bool MappedInputManager::isNavDirectionSwapped() const {
-  // Key the swap on the orientation the screen is *actually* rendered at, not the persisted reader
-  // setting. The reader (and its modal menus) render rotated, so navigation/labels flip there; the
-  // home and settings UI render in portrait, so they never flip even when a rotated reader is configured.
-  const auto orientation = renderer.getOrientation();
-  return SETTINGS.frontButtonFollowOrientation &&
-         (orientation == GfxRenderer::PortraitInverted || orientation == GfxRenderer::LandscapeCounterClockwise);
+  // Orientation-following front buttons belonged to the removed ebook reader;
+  // every remaining surface renders in portrait with fixed navigation.
+  return false;
 }
 
 bool MappedInputManager::updateKeyguard(const uint32_t nowMs, const bool enabled) {
@@ -66,8 +63,6 @@ bool MappedInputManager::updateKeyguard(const uint32_t nowMs, const bool enabled
 
 bool MappedInputManager::mapButton(const Button button, bool (HalGPIO::*fn)(uint8_t) const) const {
   if (button != Button::Power && (keyguard.locked() || suppressButtonsThisFrame)) return false;
-  const auto sideLayout = SETTINGS.sideButtonLayout;
-
   switch (button) {
     case Button::Back:
       // Logical Back maps to user-configured front button.
@@ -91,27 +86,10 @@ bool MappedInputManager::mapButton(const Button button, bool (HalGPIO::*fn)(uint
       // Power button bypasses remapping.
       return (gpio.*fn)(HalGPIO::BTN_POWER);
     case Button::PageBack:
-      // Reader page navigation uses side buttons and can be swapped via settings.
-      switch (sideLayout) {
-        case CrossPointSettings::PREV_NEXT:
-          return (gpio.*fn)(HalGPIO::BTN_UP);
-        case CrossPointSettings::NEXT_PREV:
-          return (gpio.*fn)(HalGPIO::BTN_DOWN);
-        case CrossPointSettings::SIDE_BUTTONS_DISABLED:
-        default:
-          return false;
-      }
+      // Side buttons page backwards/forwards in lists with a fixed layout.
+      return (gpio.*fn)(HalGPIO::BTN_UP);
     case Button::PageForward:
-      // Reader page navigation uses side buttons and can be swapped via settings.
-      switch (sideLayout) {
-        case CrossPointSettings::PREV_NEXT:
-          return (gpio.*fn)(HalGPIO::BTN_DOWN);
-        case CrossPointSettings::NEXT_PREV:
-          return (gpio.*fn)(HalGPIO::BTN_UP);
-        case CrossPointSettings::SIDE_BUTTONS_DISABLED:
-        default:
-          return false;
-      }
+      return (gpio.*fn)(HalGPIO::BTN_DOWN);
     case Button::NavNext:
       // Logical "next item" navigation: side Down + front Right, with the control axis flipped in
       // INVERTED / LANDSCAPE_CCW (frontButtonFollowOrientation) so it matches the rotated hint labels.

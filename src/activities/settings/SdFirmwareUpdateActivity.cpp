@@ -8,7 +8,7 @@
 #include <esp_ota_ops.h>
 
 #include "MappedInputManager.h"
-#include "activities/home/FileBrowserActivity.h"
+#include "FirmwarePickerActivity.h"
 #include "activities/util/ConfirmationActivity.h"
 #include "components/UITheme.h"
 #include "fontIds.h"
@@ -23,9 +23,7 @@ void SdFirmwareUpdateActivity::onEnter() {
 }
 
 void SdFirmwareUpdateActivity::launchPicker() {
-  // Reuse the standard file browser, restricted to .bin files only.
-  startActivityForResult(
-      std::make_unique<FileBrowserActivity>(renderer, mappedInput, "/", FileBrowserActivity::Mode::PickFirmware),
+  startActivityForResult(std::make_unique<FirmwarePickerActivity>(renderer, mappedInput),
       [this](const ActivityResult& result) { onPickerResult(result); });
 }
 
