@@ -2,10 +2,10 @@
 
 #include <HalPowerManager.h>
 
-#include "StudioBluetooth.h"
-#include "StudioFrame.h"
 #include "FirmwareInstall.h"
 #include "FirmwareUpdateState.h"
+#include "StudioBluetooth.h"
+#include "StudioFrame.h"
 #include "network/FirmwareFlasher.h"
 #include "network/OtaTrial.h"
 // WiFi.h also has a simulator shim; the trial health signal needs link state on both.
@@ -39,7 +39,6 @@
 #endif
 #include <utility>
 
-#include "network/HttpDownloader.h"
 #include "project_stick/ProjectStickStore.h"
 
 #ifndef PROJECT_STICK_BASE_URL
@@ -1174,9 +1173,10 @@ bool ProjectStickService::fetchAuthenticated(const std::string& url,
     deviceToken = PROJECT_STICK_STORE.deviceToken;
   }
   if (!trustedClockReady()) return false;
-  if (deviceToken.empty()) return HttpDownloader::fetchUrl(url, onData);
   if (!http.begin(url)) return false;
-  http.addHeader("Authorization", "Bearer " + deviceToken);
+  // Same pinned-root client with or without a credential; the ESP-IDF HTTP
+  // client (and the mbedTLS TLS stack it pulls in) is not linked.
+  if (!deviceToken.empty()) http.addHeader("Authorization", "Bearer " + deviceToken);
   const int status = http.GET([this, &onData](const uint8_t* data, size_t length) {
     if (http.getStatus() != 200) return true;
     return onData(data, length);
@@ -1799,8 +1799,8 @@ ProjectStickService::DownloadResult ProjectStickService::downloadFirmware(const 
     firmware_update::setProgress(offset);
     if (offset > 0) LOG_INF("OTA", "Resuming firmware download at %u/%u", (unsigned)offset, (unsigned)size);
     if (!trustedClockReady()) return DownloadResult::Retry;
-    std::string url = baseUrl + "/api/v2/device/firmware?device_id=" + PROJECT_STICK_STORE.deviceId +
-                      "&command_id=" + id;
+    std::string url =
+        baseUrl + "/api/v2/device/firmware?device_id=" + PROJECT_STICK_STORE.deviceId + "&command_id=" + id;
     if (offset > 0) url += "&offset=" + std::to_string(offset);
     HalFile output = Storage.open(FIRMWARE_TEMP, O_WRONLY | O_CREAT | O_APPEND);
     if (!output) return DownloadResult::Retry;
@@ -1850,9 +1850,9 @@ ProjectStickService::FirmwareOffer ProjectStickService::checkFirmware() {
   HttpBurst burst(http);
   FirmwareOffer offer;
   std::string response;
-  if (!fetchJson(baseUrl + "/api/v2/device/firmware/latest?device_id=" + PROJECT_STICK_STORE.deviceId +
-                     "&channel=stable",
-                 response, 4096)) {
+  if (!fetchJson(
+          baseUrl + "/api/v2/device/firmware/latest?device_id=" + PROJECT_STICK_STORE.deviceId + "&channel=stable",
+          response, 4096)) {
     return offer;
   }
   JsonDocument doc;
