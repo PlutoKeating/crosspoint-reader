@@ -93,8 +93,7 @@ void CrossPointSettings::toJson(JsonDocument& doc) const {
   doc["shortPwrBtn"] = shortPwrBtn;
 
   // Language -- managed by LanguageSelectActivity, not in SettingsList.
-  // Stored as ISO code string ("EN", "DE", ...) for stability across enum reorders.
-  doc["language"] = (language < getLanguageCount()) ? LANGUAGE_CODES[language] : "EN";
+  doc["language"] = language;
 }
 
 bool CrossPointSettings::fromJson(JsonVariantConst doc) {
@@ -200,10 +199,10 @@ bool CrossPointSettings::fromJson(JsonVariantConst doc) {
     needsResave = true;
   }
 
-  // Language -- stored as code string for stability across enum reorders.
-  if (doc["language"].is<const char*>()) {
-    language = static_cast<uint8_t>(I18n::languageFromCode(doc["language"].as<const char*>()));
-  }
+  // Language -- a catalogue code. Older firmware stored upstream codes such as
+  // "EN"; they now select the matching SD pack, or the built-in catalogue if
+  // that pack is not installed.
+  copyToField(language, doc["language"] | "ZH", sizeof(language));
 
   if (needsResave) {
     LOG_DBG("CPS", "Resaving settings to update format");

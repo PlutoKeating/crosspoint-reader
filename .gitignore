@@ -35,3 +35,6 @@ sdkconfig.sticky
 
 # Generated PlatformIO SDK config for the release environment
 /sdkconfig.gh_release
+
+# Generated SD-card language packs and release bundles
+/dist

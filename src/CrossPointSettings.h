@@ -89,8 +89,9 @@ class CrossPointSettings : public PersistableStore<CrossPointSettings> {
   uint8_t uiTheme = LYRA;
   // Sunlight fading compensation
   uint8_t fadingFix = 0;
-  // Index into the language catalogue list (built-in Chinese first, then SD packs).
-  uint8_t language = 0;
+  // UI language code: the built-in catalogue ("ZH") or an SD-card pack in
+  // /.crosspoint/lang/<code>.lang. Persisted as the "language" string.
+  char language[8] = "ZH";
   uint8_t quickResumeSleepScreen = QUICK_RESUME_NEVER;
 
   static constexpr uint8_t MIN_SLEEP_TIMEOUT_MINUTES = 1;

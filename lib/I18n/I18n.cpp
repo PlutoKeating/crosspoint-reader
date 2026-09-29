@@ -1,11 +1,33 @@
 #include "I18n.h"
 
-#include <cstddef>
 #include <cstring>
 
 #include "I18nStrings.h"
 
-using namespace i18n_strings;
+using namespace i18n_catalogue;
+
+namespace {
+uint16_t readU16(const uint8_t* p) { return static_cast<uint16_t>(p[0] | (p[1] << 8)); }
+uint32_t readU32(const uint8_t* p) {
+  return static_cast<uint32_t>(p[0]) | (static_cast<uint32_t>(p[1]) << 8) | (static_cast<uint32_t>(p[2]) << 16) |
+         (static_cast<uint32_t>(p[3]) << 24);
+}
+
+void copyField(char* dest, size_t destSize, const uint8_t* src, size_t srcSize) {
+  const size_t limit = destSize - 1 < srcSize ? destSize - 1 : srcSize;
+  size_t length = 0;
+  while (length < limit && src[length] != 0) ++length;
+  memcpy(dest, src, length);
+  dest[length] = '\0';
+}
+
+int findKey(uint32_t hash) {
+  for (size_t i = 0; i < KEY_COUNT; ++i) {
+    if (KEY_HASHES[i] == hash) return static_cast<int>(i);
+  }
+  return -1;
+}
+}  // namespace
 
 I18n& I18n::getInstance() {
   static I18n instance;
@@ -14,47 +36,55 @@ I18n& I18n::getInstance() {
 
 const char* I18n::get(StrId id) const {
   const auto index = static_cast<size_t>(id);
-  if (index >= static_cast<size_t>(StrId::_COUNT)) {
-    return "???";
-  }
-
-  // Use generated helper function - no hardcoded switch needed!
-  const LangStrings lang = getLanguageStrings(_language);
-
-  // If bit 15 of the offset is set, apply the offset to the English lookup table
-  const uint16_t off = lang.offsets[index];
-  if (off & 0x8000) return STRINGS_EN_DATA + (off & 0x7FFF);
-  return lang.data + off;
+  if (index >= KEY_COUNT) return "???";
+  if (pack && overrides[index] != NO_OVERRIDE) return packStrings + overrides[index];
+  return BUILTIN_DATA + BUILTIN_OFFSETS[index];
 }
 
-void I18n::setLanguage(Language lang) {
-  if (lang >= Language::_COUNT) {
-    return;
-  }
-  _language = lang;
+bool I18n::readPackHeader(const uint8_t* data, size_t size, char* code, size_t codeSize, char* name, size_t nameSize) {
+  if (!data || size < HEADER_BYTES || size > MAX_PACK_BYTES) return false;
+  if (memcmp(data, PACK_MAGIC, sizeof(PACK_MAGIC)) != 0 || readU16(data + 4) != PACK_VERSION) return false;
+  if (code && codeSize) copyField(code, codeSize, data + 8, PACK_CODE_BYTES);
+  if (name && nameSize) copyField(name, nameSize, data + 8 + PACK_CODE_BYTES, PACK_NAME_BYTES);
+  return !code || code[0] != '\0';
 }
 
-const char* I18n::getLanguageName(Language lang) const {
-  const auto index = static_cast<size_t>(lang);
-  if (index >= static_cast<size_t>(Language::_COUNT)) {
-    return "???";
+bool I18n::adoptPack(std::unique_ptr<uint8_t[]> image, size_t size) {
+  char code[sizeof(packCode)];
+  char name[sizeof(packName)];
+  if (!image || !readPackHeader(image.get(), size, code, sizeof(code), name, sizeof(name))) return false;
+  const size_t count = readU16(image.get() + 6);
+  const size_t tableBytes = count * 8;
+  if (HEADER_BYTES + tableBytes > size) return false;
+  const uint8_t* table = image.get() + HEADER_BYTES;
+  const size_t stringsOffset = HEADER_BYTES + tableBytes;
+  const size_t stringsSize = size - stringsOffset;
+  if (stringsSize == 0 || image[size - 1] != 0) return false;  // every string must be terminated in-bounds
+
+  uint16_t mapped[static_cast<size_t>(StrId::_COUNT)];
+  for (auto& entry : mapped) entry = NO_OVERRIDE;
+  for (size_t i = 0; i < count; ++i) {
+    const uint32_t offset = readU32(table + i * 8 + 4);
+    if (offset >= stringsSize || offset >= NO_OVERRIDE) return false;
+    const int key = findKey(readU32(table + i * 8));
+    if (key >= 0) mapped[key] = static_cast<uint16_t>(offset);  // unknown keys belong to other firmware versions
   }
-  return LANGUAGE_NAMES[index];
+
+  pack = std::move(image);
+  packStrings = reinterpret_cast<const char*>(pack.get() + stringsOffset);
+  memcpy(overrides, mapped, sizeof(overrides));
+  memcpy(packCode, code, sizeof(packCode));
+  memcpy(packName, name, sizeof(packName));
+  return true;
 }
 
-Language I18n::languageFromCode(const char* code) {
-  for (uint8_t i = 0; i < getLanguageCount(); i++) {
-    if (strcmp(code, LANGUAGE_CODES[i]) == 0) return static_cast<Language>(i);
-  }
-  return Language::EN;
+void I18n::useBuiltin() {
+  pack.reset();
+  packStrings = nullptr;
+  packCode[0] = '\0';
+  packName[0] = '\0';
 }
 
-// Generate character set for a specific language
-const char* I18n::getCharacterSet(Language lang) {
-  const auto langIndex = static_cast<size_t>(lang);
-  if (langIndex >= static_cast<size_t>(Language::_COUNT)) {
-    lang = Language::EN;  // Fallback to first language
-  }
+const char* I18n::languageCode() const { return pack ? packCode : BUILTIN_CODE; }
 
-  return CHARACTER_SETS[static_cast<size_t>(lang)];
-}
+const char* I18n::languageName() const { return pack ? packName : BUILTIN_NAME; }

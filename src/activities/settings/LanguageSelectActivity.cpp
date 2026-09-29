@@ -3,28 +3,29 @@
 #include <GfxRenderer.h>
 #include <I18n.h>
 
-#include <algorithm>
-#include <iterator>
+#include <cstring>
 
 #include "CrossPointSettings.h"
-#include "I18nKeys.h"
 #include "MappedInputManager.h"
 #include "fontIds.h"
 
 void LanguageSelectActivity::onEnter() {
   Activity::onEnter();
 
-  // Set current selection based on current language
-  const auto currentLang = static_cast<uint8_t>(I18N.getLanguage());
-  const auto* begin = std::begin(SORTED_LANGUAGE_INDICES);
-  const auto* end = std::end(SORTED_LANGUAGE_INDICES);
-  const auto* it = std::find(begin, end, currentLang);
-  selectedIndex = (it != end) ? std::distance(begin, it) : 0;
+  languages = language_packs::available();
+  selectedIndex = 0;
+  for (int i = 0; i < itemCount(); ++i) {
+    if (languages[i].code == I18N.languageCode()) selectedIndex = i;
+  }
 
   requestUpdate();
 }
 
-void LanguageSelectActivity::onExit() { Activity::onExit(); }
+void LanguageSelectActivity::onExit() {
+  Activity::onExit();
+  languages.clear();
+  languages.shrink_to_fit();
+}
 
 void LanguageSelectActivity::loop() {
   auto activateSelected = [this] { handleSelection(); };
@@ -43,7 +44,7 @@ void LanguageSelectActivity::loop() {
   const int contentTop = metrics.topPadding + metrics.headerHeight + metrics.verticalSpacing;
   const int contentHeight =
       renderer.getScreenHeight() - contentTop - metrics.buttonHintsHeight - metrics.verticalSpacing;
-  switch (handleListTouch(selectedIndex, totalItems, contentTop, contentHeight, false)) {
+  switch (handleListTouch(selectedIndex, itemCount(), contentTop, contentHeight, false)) {
     case ListTouchResult::Activated:
       activateSelected();
       return;
@@ -56,50 +57,51 @@ void LanguageSelectActivity::loop() {
   const int pageItems = UITheme::getNumberOfItemsPerPage(renderer, true, false, true, false);
   const auto swipe = mappedInput.wasSwipe();
   if (swipe == MappedInputManager::SwipeDir::Up) {
-    selectedIndex = ButtonNavigator::nextPageIndex(static_cast<int>(selectedIndex), totalItems, pageItems);
+    selectedIndex = ButtonNavigator::nextPageIndex(static_cast<int>(selectedIndex), itemCount(), pageItems);
     requestUpdate();
     return;
   }
   if (swipe == MappedInputManager::SwipeDir::Down) {
-    selectedIndex = ButtonNavigator::previousPageIndex(static_cast<int>(selectedIndex), totalItems, pageItems);
+    selectedIndex = ButtonNavigator::previousPageIndex(static_cast<int>(selectedIndex), itemCount(), pageItems);
     requestUpdate();
     return;
   }
 
   // Handle navigation
   buttonNavigator.onNextRelease([this] {
-    selectedIndex = ButtonNavigator::nextIndex(static_cast<int>(selectedIndex), totalItems);
+    selectedIndex = ButtonNavigator::nextIndex(static_cast<int>(selectedIndex), itemCount());
     requestUpdate();
   });
 
   buttonNavigator.onPreviousRelease([this] {
-    selectedIndex = ButtonNavigator::previousIndex(static_cast<int>(selectedIndex), totalItems);
+    selectedIndex = ButtonNavigator::previousIndex(static_cast<int>(selectedIndex), itemCount());
     requestUpdate();
   });
 
   buttonNavigator.onNextContinuous([this, pageItems] {
-    selectedIndex = ButtonNavigator::nextPageIndex(static_cast<int>(selectedIndex), totalItems, pageItems);
+    selectedIndex = ButtonNavigator::nextPageIndex(static_cast<int>(selectedIndex), itemCount(), pageItems);
     requestUpdate();
   });
 
   buttonNavigator.onPreviousContinuous([this, pageItems] {
-    selectedIndex = ButtonNavigator::previousPageIndex(static_cast<int>(selectedIndex), totalItems, pageItems);
+    selectedIndex = ButtonNavigator::previousPageIndex(static_cast<int>(selectedIndex), itemCount(), pageItems);
     requestUpdate();
   });
 }
 
 void LanguageSelectActivity::handleSelection() {
-  const uint8_t langIndex = SORTED_LANGUAGE_INDICES[selectedIndex];
-
+  if (selectedIndex < 0 || selectedIndex >= itemCount()) return;
+  const std::string code = languages[selectedIndex].code;
+  bool applied = false;
   {
     RenderLock lock(*this);
-    I18N.setLanguage(static_cast<Language>(langIndex));
+    applied = language_packs::apply(code.c_str());
   }
-
-  SETTINGS.language = langIndex;
-  SETTINGS.saveToFile();
-
-  // Return to previous page
+  if (applied && strcmp(SETTINGS.language, code.c_str()) != 0) {
+    strncpy(SETTINGS.language, code.c_str(), sizeof(SETTINGS.language) - 1);
+    SETTINGS.language[sizeof(SETTINGS.language) - 1] = '\0';
+    SETTINGS.saveToFile();
+  }
   onBack();
 }
 
@@ -115,13 +117,14 @@ void LanguageSelectActivity::render(RenderLock&&) {
   // Current language marker
   const int contentTop = metrics.topPadding + metrics.headerHeight + metrics.verticalSpacing;
   const int contentHeight = pageHeight - contentTop - metrics.buttonHintsHeight - metrics.verticalSpacing;
-  const auto currentLang = static_cast<uint8_t>(I18N.getLanguage());
+  const std::string current = I18N.languageCode();
+  const int hintHeight = renderer.getLineHeight(SMALL_FONT_ID) * 2;
   GUI.drawList(
-      renderer, Rect{0, contentTop, pageWidth, contentHeight}, totalItems, selectedIndex,
-      [this](int index) { return I18N.getLanguageName(static_cast<Language>(SORTED_LANGUAGE_INDICES[index])); },
-      nullptr, nullptr,
-      [this, currentLang](int index) { return SORTED_LANGUAGE_INDICES[index] == currentLang ? tr(STR_SELECTED) : ""; },
-      true);
+      renderer, Rect{0, contentTop, pageWidth, contentHeight - hintHeight}, itemCount(), selectedIndex,
+      [this](int index) { return languages[index].name; }, nullptr, nullptr,
+      [this, &current](int index) { return languages[index].code == current ? tr(STR_SELECTED) : ""; }, true);
+  GUI.drawHelpText(renderer, Rect{0, contentTop + contentHeight - hintHeight, pageWidth, hintHeight},
+                   tr(STR_LANGUAGE_PACK_HINT));
 
   // Button hints
   const auto labels = mappedInput.mapLabels(tr(STR_BACK), tr(STR_SELECT), tr(STR_DIR_UP), tr(STR_DIR_DOWN));

@@ -1,66 +1,9 @@
-# Translators
+# 译者指南
 
-Below is a list of translator credits for languages with known contributors.
-Official UI language support is determined by the YAML files in
-`lib/I18n/translations/`; see [i18n.md](./i18n.md) for the current supported
-language list.
+StockStick 固件内置简体中文，其它语言通过 SD 卡语言包提供，完整机制见 [i18n.md](i18n.md)。
 
-## Contributing
-
-If you'd like to add your name to this list, please open a PR adding yourself and your Github link. Thank you!
-
-## French
-- [Spigaw](https://github.com/Spigaw)
-- [CaptainFrito](https://github.com/CaptainFrito)
-
-## German
-- [DavidOrtmann](https://github.com/DavidOrtmann)
-
-## Czech
-- [brbla](https://github.com/brbla)
-
-## Portuguese (Brazil)
-- [yagofarias](https://github.com/yagofarias)
-
-## Portuguese (Portugal)
-- [victordomingos](https://github.com/victordomingos)
-
-## Italian
-- [andreaturchet](https://github.com/andreaturchet)
-- [fragolinux](https://github.com/fragolinux)
-- [alan0ford](https://github.com/alan0ford)
-
-## Russian
-- [madebyKir](https://github.com/madebyKir)
-- [mrtnvgr](https://github.com/mrtnvgr)
-
-## Spanish
-- [yeyeto2788](https://github.com/yeyeto2788)
-- [Skrzakk](https://github.com/Skrzakk)
-- [pablohc](https://github.com/pablohc)
-- [DaniPhii](https://github.com/DaniPhii)
-- [lpla](https://github.com/lpla)
-
-## Swedish
-- [dawiik](https://github.com/dawiik)
-- [steka](https://github.com/steka)
-
-## Romanian
-- [ariel-lindemann](https://github.com/ariel-lindemann)
-
-## Catalan
-- [angeldenom](https://github.com/angeldenom)
-- [lpla](https://github.com/lpla)
-
-## Finnish
-- [plahteenlahti](https://github.com/plahteenlahti)
-
-## Ukrainian
-- [mirus-ua](https://github.com/mirus-ua)
-- [KymAndriy](https://github.com/KymAndriy)
-
-## Belarusian
-- [Dexif](https://github.com/dexif)
-
-## Danish
-- [hajisan](https://github.com/hajisan)
+1. 复制 `lib/I18n/translations/english.yaml` 为新文件（或修改已有语言文件）。
+2. 设置 `_language_name`（语言本名）、`_language_code`（2–7 位大写代码）、`_order`（不能为 `"0"`，那是内置中文）。
+3. 翻译各 `STR_*` 的值；支持 `\\`、`\"`、`\n` 转义；以 `#` 开头的行为注释。
+4. 运行 `python3 scripts/build_lang_pack.py <CODE>`，把 `dist/lang/<CODE>.lang` 复制到 SD 卡
+   `/.crosspoint/lang/` 后在设备上验证。

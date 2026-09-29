@@ -3,16 +3,17 @@
 #include <GfxRenderer.h>
 #include <I18n.h>
 
-#include <functional>
+#include <vector>
 
 #include "activities/Activity.h"
 #include "components/UITheme.h"
 #include "util/ButtonNavigator.h"
+#include "util/LanguagePacks.h"
 
 class MappedInputManager;
 
 /**
- * Activity for selecting UI language
+ * Selects the UI language: the built-in catalogue or an SD-card language pack.
  */
 class LanguageSelectActivity final : public Activity {
  public:
@@ -30,5 +31,6 @@ class LanguageSelectActivity final : public Activity {
   void onBack() { finish(); }
   ButtonNavigator buttonNavigator;
   int selectedIndex = 0;
-  constexpr static uint8_t totalItems = getLanguageCount();
+  std::vector<language_packs::PackInfo> languages;
+  int itemCount() const { return static_cast<int>(languages.size()); }
 };

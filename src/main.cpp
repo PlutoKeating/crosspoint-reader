@@ -31,6 +31,7 @@
 #include "fontIds.h"
 #include "images/LoadingIcon.h"
 #include "util/ButtonNavigator.h"
+#include "util/LanguagePacks.h"
 #include "util/ScreenshotUtil.h"
 
 GfxRenderer renderer(display);
@@ -237,7 +238,7 @@ void setup() {
 
   SETTINGS.loadFromFile();
   APP_STATE.loadFromFile();
-  I18N.setLanguage(static_cast<Language>(SETTINGS.language));
+  language_packs::apply(SETTINGS.language);
   UITheme::getInstance().reload();
   ButtonNavigator::setMappedInputManager(mappedInputManager);
 
