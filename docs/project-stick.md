@@ -1,34 +1,39 @@
 # Project.Stick integration
 
-> New development: [Studio protocol](studio-protocol.md). Existing reader functions remain available.
+> See also: [Studio protocol](studio-protocol.md), [firmware versioning and OTA](firmware-ota.md),
+> [i18n](i18n.md).
 
+This private fork turns upstream CrossPoint into the dedicated StockStick
+firmware. Since 2.0.0 the ebook reader, library, web file transfer, OPDS,
+KOReader and Calibre integrations are removed; the firmware keeps the device
+platform (display, input, power, SD, Wi-Fi, BLE, settings, SD/recovery
+flashing) and the StockStick surfaces. X3 is the product target; X3/X4
+runtime detection is kept so other panels can be added later.
 
-This private fork intentionally adds an external synchronization connector that
-is outside upstream CrossPoint's temporarily closed scope. Project.Stick targets
-the Xteink X3 (ESP32-C3, no PSRAM) only; it is not proposed as an upstream
-multi-device feature.
-
-The current production firmware release is `1.5.0-project-stick.11`. It keeps
-the X3-wide 20-second physical-button keyguard and TLS connection reuse from
-`.10`, while refining the keyguard into the non-destructive overlay behavior
-described below. Release binaries are built with the version string from
-`platformio.ini`.
+The firmware identity lives in `platformio.ini` (`version = 2.0.0`,
+`build = 20000`) and is embedded in every image; see
+[firmware-ota.md](firmware-ota.md) for release and upgrade rules. The UI is
+built in Simplified Chinese; other languages load from SD-card packs.
 
 ## Runtime flow
 
 1. Cold boots, ordinary restarts, and quick-resume wakeups open
    `ProjectStickActivity` by default. Recovery firmware mode, crash reporting,
    and explicit silent-restart targets retain their dedicated routes; holding
-   Back during boot remains an escape hatch to the reader Home screen.
-2. The activity opens in offline mode immediately. Wi-Fi is optional; when it
-   is available the service creates a persistent UUID v4 identity, obtains a
+   Back during boot opens the system menu (StockStick / Settings) instead.
+2. The activity opens in offline mode immediately and reconnects to saved
+   Wi-Fi networks in the background (last network first, 15 s per attempt,
+   exponential backoff up to 5 min), so boot, deep-sleep wake and OTA restarts
+   come back online without user input; the offline->online edge registers and
+   polls immediately. Once online the service creates a persistent UUID v4 identity, obtains a
    device bearer credential, and shows the short-lived binding code returned by
    `/api/v2/device/pairing`. The bearer credential is persisted on SD but never
    written to logs or rendered. After the mini program claims the code, the
    service registers as the bound device. If an older backend reports the
    pairing as already claimed before local state has observed `bound=true`, the
    firmware continues to authenticated registration instead of stopping at the
-   pairing response.
+   pairing response. An unbound identity whose token the server rejects (401)
+   is replaced by a fresh identity instead of failing forever.
 3. The manifest is streamed through a 512-byte parser and written to a
    temporary SD file. Its entries become a compact release snapshot under
    `/.crosspoint/project_stick/snapshots/<version>.idx`.
@@ -85,6 +90,9 @@ The production service defaults to:
 https://stockstick.plutokeating.beer
 ```
 
+TLS pins ISRG Root X2, ISRG Root X1 and GTS Root R4 (`src/project_stick/StudioTrust.h`);
+the production certificate currently chains to ISRG Root X2.
+
 Override it at build time without editing source:
 
 ```ini
@@ -115,10 +123,9 @@ active Release so offline boots render the last synchronized theme.
 
 ## X3 controls
 
-Project.Stick is currently a Chinese-language product surface. Its schedule
-labels, synchronization timestamp, and feedback confirmations intentionally use
-the English fallback catalogue so the required Chinese wording remains stable
-even when the reader shell is set to another locale.
+All StockStick strings come from the built-in Simplified Chinese catalogue
+(`lib/I18n/translations/chinese.yaml`); an SD-card language pack can override
+them (see [i18n.md](i18n.md)).
 
 - The four protruding front buttons are protected by a global X3 keyguard in
   every activity. After 20 seconds without button or touch activity, all
@@ -148,7 +155,8 @@ even when the reader shell is set to another locale.
   completed background manifest synchronization.
 - Press the front-right button to re-evaluate the current schedule, select
   another copy, and, when online, check for a new release.
-- The front confirm button opens Wi-Fi selection; the front back button returns home.
+- The front confirm button opens Wi-Fi selection; the front back button opens the
+  system menu (StockStick / Settings).
 - Before binding, the content area shows a clear mini-program instruction and
   the current eight-character code. The ordinary content UI appears as soon as
   the next authenticated registration reports `bound=true`.
@@ -182,6 +190,10 @@ CROSSPOINT_SIM_CONTENT_REFRESH_SECONDS=5 pio run -e simulator -t run_simulator
   and content downloads therefore never hold two network links concurrently;
   completed responses reuse the same clean keep-alive connection during one
   sync burst to avoid repeated TLS handshakes.
+- Studio polls (every 5 s) keep that connection between polls only while the
+  heap has at least 80 KiB free with a 32 KiB contiguous block; the sync worker
+  closes it after 45 s without work. A stale connection is retried once on a
+  fresh one by SecureHttpClient.
 - Release downloads stream directly to SD; copy/hash helpers use a 1 KiB heap
   buffer. Manifest entries, content copies, used IDs, seen alerts, and pending
   events all have explicit caps.

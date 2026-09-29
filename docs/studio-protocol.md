@@ -2,8 +2,7 @@
 
 Full product definition, use cases, diagrams and API contract are in the adjacent
 [StockStick product documentation](../../Project.StockStick/docs/product/README.md).
-This firmware preserves the existing reader, library, OPDS and reading sync.
-Product/mini-program ebook workflows are excluded. This document is not a
+Since 2.0.0 the firmware no longer contains the upstream ebook reader. This document is not a
 physical-device acceptance report.
 
 ## Pixels and SSP1
@@ -43,7 +42,7 @@ valid visual.
 
 Studio desktop input is direct. Portable mode's first press after the configured
 idle interval only unlocks. Studio bypasses the older global keyguard while it
-owns the foreground; reader/other activities retain their original keyguard.
+owns the foreground; other activities retain their original keyguard.
 Unlock/next/useful overlays use the same glyphs and physical 56×40 rectangle at
 (236,732) as the mini-program runtime preview, for two seconds. Only the companion
 activity draws Studio content. `displayBuffer` completion is the software receipt
@@ -103,13 +102,12 @@ checks current owner/grant and epoch. `accepted_ble_task` releases offline prote
 
 ## OTA
 
-`studio_ota:1` enables the owner-controlled command API. The device checks battery
-at least30%, pauses BLE, streams the authenticated catalog artifact, verifies size
-and SHA256, requests installation confirmation again, uses the existing validated
-SD flasher, reports restarting and reboots. Server completion requires the reported
-version to match. Withdrawn/cancelled commands cannot begin installation. Existing
-recovery firmware/SD update paths remain available; power-loss and boot recovery
-must be exercised on X3. Simulator OTA and BLE adapters do not perform hardware work.
+`studio_ota:1` enables the owner-controlled command API and `ota:2` the
+current protocol: resumable downloads, image identity checks, trial boot with
+automatic rollback and outcome reports. The studio poll's `command_pending`
+flag gates `/commands` polling. The complete lifecycle, release tooling and
+server contract are in [firmware-ota.md](firmware-ota.md). Simulator OTA and
+BLE adapters do not perform hardware work.
 
 ## Build and verification
 
@@ -121,8 +119,7 @@ ctest --test-dir build/test -R 'ProjectStick|StudioProgram' --output-on-failure
 
 Release uses the IDF BLE controller and NimBLE-Arduino peripheral host, with LTO.
 Check the actual binary-size verifier as well as the outer PlatformIO status:
-nested size failures must not be hidden by an outer SUCCESS. Existing reader code
-is retained. Native SDL builds also compile this state/render path; the adjacent
+nested size failures must not be hidden by an outer SUCCESS. Native SDL builds also compile this state/render path; the adjacent
 StockStick `scripts/studio-native-fixture.ts` and `check-studio-screens.ts` verify
 exact pixels for base cards, unlock and next feedback. See its QUICK_START for the
 isolated offline fixture command. Neither these tests nor the build certify real

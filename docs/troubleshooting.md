@@ -1,60 +1,31 @@
-# Troubleshooting
+# 故障排查
 
-This document shows common issues and possible solutions while using the device features.
+## 一直显示“离线”
 
-- [Troubleshooting](#troubleshooting)
-    - [Cannot See the Device on the Network](#cannot-see-the-device-on-the-network)
-    - [Connection Drops or Times Out](#connection-drops-or-times-out)
-    - [Upload Fails](#upload-fails)
-    - [Saved Password Not Working](#saved-password-not-working)
+- 设备只会自动连接**已保存**的网络。按前面板第 2 键打开 Wi-Fi 设置，选择网络并保存密码。
+- 自动重连失败后会按 10 秒、20 秒……最长 5 分钟的间隔重试；关闭 Wi-Fi 设置页会立即重试。
+- 仅支持 2.4 GHz 网络；需要网页认证（Portal）的网络无法使用。
 
-### Cannot See the Device on the Network
+## 一直显示绑定码 / 绑定后没有内容
 
-**Problem:** Browser shows "Cannot connect" or "Site can't be reached"
+- 绑定码 10 分钟有效，过期后设备会自动刷新。
+- 如果设备 SD 卡数据被复制或恢复过，服务端可能拒绝旧身份；未绑定的设备会自动生成新身份并显示新绑定码。
 
-**Solutions:**
+## 固件更新失败
 
-1. Verify both devices are on the correct network
-   - Check your computer/phone Wi-Fi settings
-   - In **Join Network** mode, your computer/phone and CrossPoint Reader must be on the same Wi-Fi network
-   - In **Create Hotspot** mode, your computer/phone must be connected to the `CrossPoint-Reader` hotspot
-2. Double-check the IP address
-   - Make sure you typed it correctly
-   - Include `http://` at the beginning
-   - Try the displayed IP address if `http://crosspoint.local/` does not resolve
-3. Try disabling VPN if you're using one
-4. Some networks have "client isolation" enabled - use Create Hotspot mode or check with your network administrator
+| 现象 / 原因 | 处理 |
+|---|---|
+| `Battery below 30%` | 充电后重试 |
+| `Firmware download failed` | 网络中断；重新联网后会从断点继续下载 |
+| `Firmware checksum mismatch` | 下载内容损坏，已删除，重试即可 |
+| `NOT_STOCKSTICK_IMAGE` / `VERSION_MISMATCH` | 固件目录登记有误，请联系运营更正 |
+| `BELOW_MINIMUM_BUILD` | 目标版本过旧，不允许降级安装 |
+| `Rolled back from … (…)` | 新固件试运行失败，已自动恢复旧版本；请把原因反馈给开发 |
 
-### Connection Drops or Times Out
+## 设备无法启动
 
-**Problem:** Wi-Fi connection is unstable
+1. 长按电源键数秒强制关机，再开机。
+2. 进入恢复模式：按住左侧键再按电源键开机，选择 SD 卡上的固件 `.bin` 刷入。
+3. 仍无法启动时，通过 USB 使用 `pio run -e gh_release -t upload` 刷机。
 
-**Solutions:**
-
-1. Move closer to the Wi-Fi router, or use Create Hotspot mode for a direct connection
-2. Check signal strength on the device (should be at least `||` or better)
-3. Avoid interference from other devices
-4. Try a different Wi-Fi network if available
-
-### Upload Fails
-
-**Problem:** File upload doesn't complete or shows an error
-
-**Solutions:**
-
-1. Check that the SD card has enough free space
-2. Check that the filename is valid for the SD card filesystem
-3. Try uploading a smaller file first to test
-4. Refresh the browser page and try again
-5. If WebSocket upload fails repeatedly, refresh the page and retry with the HTTP fallback path
-
-### Saved Password Not Working
-
-**Problem:** Device fails to connect with saved credentials
-
-**Solutions:**
-
-1. When connection fails, you'll be prompted to "Forget Network"
-2. Select **Yes** to remove the saved password
-3. Reconnect and enter the password again
-4. Choose to save the new password
+发生崩溃后设备会显示“系统崩溃”页面，并把详细报告保存到 SD 卡 `crash_report.txt`，反馈问题时请附上。

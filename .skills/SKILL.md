@@ -1,7 +1,9 @@
-# CrossPoint Reader Development Guide
+# StockStick Firmware Development Guide
 
-Project: Open-source e-reader firmware for Xteink X4 (ESP32-C3)
-Mission: Provide a lightweight, high-performance reading experience focused on EPUB rendering on constrained hardware.
+Project: StockStick device firmware for the Xteink X3 (ESP32-C3), forked from CrossPoint Reader. X3/X4 runtime detection is kept.
+Mission: Reliable StockStick content display, Wi-Fi/BLE synchronization and safe OTA on constrained hardware.
+Scope: see `SCOPE.md`. The ebook reader, web file transfer, OPDS, KOReader and Calibre were removed in 2.0.0; do not reintroduce them.
+Key docs: `docs/firmware-ota.md` (versioning, release, OTA, trial boot), `docs/project-stick.md`, `docs/studio-protocol.md`, `docs/i18n.md`.
 
 ## AI Agent Identity and Cognitive Rules
 * Role: Senior Embedded Systems Engineer (ESP-IDF/Arduino-ESP32 specialized).
@@ -47,7 +49,8 @@ find src -name "*.cpp" -o -name "*.h" | xargs clang-format -i
 * Flash: 16MB (Instruction storage and static data)
 * Display: 800x480 E-Ink (Slow refresh, monochrome, 1-2s full update)
   * Framebuffer: 48,000 bytes (800 × 480 ÷ 8)
-* Storage: SD Card (Used for books and aggressive caching)
+* Storage: SD Card (StockStick content, Studio frames, OTA staging, language packs)
+* OTA slots: two app partitions of 6,553,600 bytes each; the partition table cannot change over OTA, so every change must check the final image size.
 
 ### The Resource Protocol
 1. Stack Safety: Limit local function variables to < 256 bytes. The ESP32-C3 default stack is small; use std::unique_ptr or static pools for larger buffers.
@@ -101,10 +104,7 @@ These flags in `platformio.ini` fundamentally affect firmware behavior:
 -DEINK_DISPLAY_SINGLE_BUFFER_MODE=1  // Single framebuffer (saves 48KB RAM!)
 -DARDUINO_USB_MODE=1                 // Enable USB CDC
 -DARDUINO_USB_CDC_ON_BOOT=1          // Serial available immediately at boot
--DXML_CONTEXT_BYTES=1024             // XML parser memory limit (EPUB parsing)
 -DUSE_UTF8_LONG_NAMES=1              // SD card long filename support
--DMINIZ_NO_ZLIB_COMPATIBLE_NAMES=1   // Avoid zlib name conflicts
--DXML_GE=0                           // Disable XML general entities (security)
 -DDESTRUCTOR_CLOSES_FILE=1           // FsFile destructor auto-closes (SdFat)
 ```
 
@@ -123,12 +123,12 @@ These flags in `platformio.ini` fundamentally affect firmware behavior:
 - See [lib/GfxRenderer/GfxRenderer.cpp:439-440](../lib/GfxRenderer/GfxRenderer.cpp) for malloc usage
 
 ### Directory Structure
-* lib/: Internal libraries (Epub engine, GfxRenderer, UITheme, I18n)
+* lib/: Internal libraries (GfxRenderer, EpdFont, I18n, ProjectStick core logic incl. StickFirmware)
   * lib/hal/: Hardware Abstraction Layer (HalDisplay, HalGPIO, HalStorage)
   * lib/I18n/: Internationalization (translations in `translations/*.yaml`, generated string tables)
 * src/activities/: UI logic using the Activity Lifecycle (onEnter, loop, onExit)
 * freeink-sdk/: Low-level SDK (EInkDisplay, InputManager, BatteryMonitor, SDCardManager)
-* .crosspoint/: SD-based binary cache for EPUB metadata and pre-rendered layout sections
+* .crosspoint/: SD state (settings, project_stick/ releases, studio/ frames and OTA staging, lang/ packs)
 
 ### Hardware Abstraction Layer (HAL)
 
@@ -171,11 +171,11 @@ if (Storage.openFileForRead("MODULE", "/path/to/file.bin", file)) {
 ## Coding Standards
 
 ### Naming Conventions
-* Classes: PascalCase (e.g., EpubReaderActivity)
+* Classes: PascalCase (e.g., ProjectStickActivity)
 * Methods/Variables: camelCase (e.g., renderPage())
 * Constants: UPPER_SNAKE_CASE (e.g., MAX_BUFFER_SIZE)
 * Private Members: memberVariable (no prefix)
-* File Names: Match Class names (e.g., EpubReaderActivity.cpp)
+* File Names: Match Class names (e.g., ProjectStickActivity.cpp)
 
 ### Header Guards
 * Use #pragma once for all header files.
@@ -445,42 +445,19 @@ void onExit()   { /* free: vTaskDelete, free buffer, close member FsFiles */ Act
 
 **Stack Sizing** (in BYTES, not words):
 - **2048**: Simple rendering (most activities)
-- **4096**: Network, EPUB parsing
+- **4096**: Network
 - Monitor: `uxTaskGetStackHighWaterMark()` if crashes
 
 **Rules**: Always `vTaskDelete()` in `onExit()` before destruction. Use mutex if shared state.
 
 ### Global Font Loading
 
-**Source**: [src/main.cpp:40-115](../src/main.cpp)
+**Source**: `src/main.cpp` (`setupDisplayAndFonts`)
 
-**All fonts are loaded as global static objects** at firmware startup:
-- Noto Serif: 12, 14, 16, 18pt (4 styles each: regular, bold, italic, bold-italic)
-- Noto Sans: 12, 14, 16, 18pt (4 styles each)
-- Ubuntu UI fonts: 10, 12pt (2 styles)
-
-**Total**: ~80+ global `EpdFont` and `EpdFontFamily` objects
-
-**Compilation Flag**:
-```cpp
-#ifndef OMIT_FONTS
-  // Most fonts loaded here
-#endif
-```
-
-**Implications**:
-- Fonts stored in **Flash** (marked as `static const` in `lib/EpdFont/builtinFonts/`)
-- Font rendering data cached in **DRAM** when first used
-- `OMIT_FONTS` can reduce binary size for minimal builds
-- Font IDs defined in [src/fontIds.h](../src/fontIds.h)
-
-**Usage**:
-```cpp
-#include "fontIds.h"
-
-renderer.insertFont(FONT_UI_MEDIUM, ui12FontFamily);
-renderer.drawText(FONT_UI_MEDIUM, x, y, "Hello", true);
-```
+Built-in fonts are global `EpdFont`/`EpdFontFamily` objects: Ubuntu UI 10/12 pt (regular/bold, with Hebrew,
+Arabic presentation forms and Vietnamese), Noto Sans 8 pt (small), and Noto Sans SC 12/13 pt (Chinese UI
+fallback and StockStick body text). Reader body fonts were removed in 2.0.0. Font IDs are in `src/fontIds.h`
+(generated by `lib/EpdFont/scripts/build-font-ids.sh`).
 
 ---
 
@@ -563,10 +540,10 @@ clang-format -i src/**/*.cpp src/**/*.h
    - Always `vTaskDelete()` in `onExit()` BEFORE activity destruction
    - Set pointers to `nullptr` after `free()`
 
-4. **Corrupt Cache Files**:
-   - Delete `.crosspoint/` directory on SD card
-   - Forces clean re-parse of all EPUBs
-   - Check file format versions in [docs/file-formats.md](../docs/file-formats.md)
+4. **Corrupt SD State**:
+   - StockStick release snapshots and objects under `.crosspoint/project_stick/` are revalidated by SHA-256 and
+     re-downloaded; Studio partial transfers under `.crosspoint/studio/` resume or are discarded
+   - Deleting `.crosspoint/` resets settings, pairing identity and Wi-Fi credentials (device must be re-bound)
 
 5. **Watchdog Timeout**:
    - Loop/task blocked for >5 seconds
@@ -703,19 +680,13 @@ Tested in all 4 orientations with 5MB+ files.
 
 **NEVER manually edit these files** - they are regenerated automatically:
 
-1. **HTML Headers** (generated by `scripts/build_html.py`):
-   - `src/network/html/*.generated.h`
-   - **Source**: HTML templates in `data/html/` directory
-   - **Triggered**: During PlatformIO `pre:` build step
-   - **To modify**: Edit source HTML in `data/html/`, not generated headers
-
-2. **I18n Headers** (generated by `scripts/gen_i18n.py`):
+1. **I18n Headers** (generated by `scripts/gen_i18n.py`):
    - `lib/I18n/I18nKeys.h`, `lib/I18n/I18nStrings.h`, `lib/I18n/I18nStrings.cpp`
    - **Source**: YAML translation files in `lib/I18n/translations/` (one per language)
    - **To modify**: Edit source YAML files, then run `python scripts/gen_i18n.py lib/I18n/translations lib/I18n/`
    - **Commit**: Source YAML files only. All three generated files (`I18nKeys.h`, `I18nStrings.h`, `I18nStrings.cpp`) are in `.gitignore` and regenerated at build time.
 
-3. **Build Artifacts** (in `.gitignore`):
+2. **Build Artifacts** (in `.gitignore`):
    - `.pio/` - PlatformIO build output
    - `build/` - Compiled binaries
    - `*.generated.h` - Any auto-generated headers
@@ -723,19 +694,12 @@ Tested in all 4 orientations with 5MB+ files.
 
 ### Modifying Generated Content Workflow
 
-**To change HTML pages**:
-1. Edit source: `data/html/<pagename>.html`
-2. Build: `pio run` (auto-triggers `scripts/build_html.py`)
-3. Generated headers update: `src/network/html/<pagename>Html.generated.h`
-4. **Commit ONLY** source HTML, NOT generated `.generated.h` files
-
 **To add/modify translations (i18n)**:
-1. Edit or add YAML file: `lib/I18n/translations/<language>.yaml`
-   - Each file must contain: `_language_name`, `_language_code`, `_order`, and `STR_*` keys
-   - English (`english.yaml`) is the reference; missing keys in other languages fall back to English
-2. Run generator: `python scripts/gen_i18n.py lib/I18n/translations lib/I18n/`
-3. Generated files update: `I18nKeys.h`, `I18nStrings.h`, `I18nStrings.cpp`
-4. **Commit** source YAML files only. All three generated files are in `.gitignore` and regenerated at build time.
+1. Add the key to `lib/I18n/translations/chinese.yaml` (the only compiled catalogue and the key reference) and
+   English text to `english.yaml` (fallback for SD packs). See `docs/i18n.md`.
+2. The build runs `scripts/gen_i18n.py`; it fails if source references a key missing from `chinese.yaml`.
+3. Other languages ship as SD packs: `python3 scripts/build_lang_pack.py`.
+4. **Commit** source YAML files only; `I18nKeys.h`, `I18nStrings.h`, `I18nStrings.cpp` are generated and gitignored.
 
 **To use translated strings in code**:
 ```cpp
@@ -802,9 +766,8 @@ build_flags =
 
 **Human tester scope** (flag these for the user):
 6. 🔲 **Device**: Test on hardware
-7. 🔲 **Orientations**: Verify all 4 modes (Portrait/Inverted/Landscape CW/CCW)
-8. 🔲 **Heap**: `ESP.getFreeHeap()` > 50KB, no leaks
-9. 🔲 **Cache**: If EPUB modified, delete `.crosspoint/` and verify re-parse
+7. 🔲 **OTA**: Run the on-device checklist in `docs/firmware-ota.md` for any OTA/boot/flash change
+8. 🔲 **Heap**: `ESP.getFreeHeap()` > 50KB with Wi-Fi, TLS and BLE active, no leaks
 
 ### CI/CD Pipeline Awareness
 
@@ -843,79 +806,16 @@ build_flags =
 
 ---
 
-## Cache Management and Invalidation
+## Firmware Versioning and OTA
 
-### Cache Structure on SD Card
-
-**Location**: `.crosspoint/` directory on SD card root
-
-**Structure**: `.crosspoint/epub_<hash>/{book.bin, progress.bin, cover.bmp, sections/*.bin}`
-
-**Hash**: `std::hash<std::string>{}(filepath)` → Moving/renaming file = new hash = lost progress
-
-### Cache Invalidation Rules
-
-**Cache is automatically invalidated when**:
-1. **File format version changes** (see `docs/file-formats.md`)
-   - `book.bin` version number incremented
-   - `section.bin` version number incremented
-2. **Render settings change**:
-   - Font family or size (`SETTINGS.fontFamily`, `SETTINGS.fontSize`)
-   - Line spacing (`SETTINGS.lineSpacing`)
-   - Paragraph spacing (`SETTINGS.extraParagraphSpacing`)
-   - Screen margins (`SETTINGS.screenMargin`)
-3. **Viewport dimensions change**:
-   - Screen orientation change
-   - Display resolution change
-4. **Book file modified**:
-   - Moved, renamed, or content changed (new hash)
-
-**Manual Cache Clear** (safe operations):
-```bash
-# Delete ALL caches (forces full regeneration)
-rm -rf /path/to/sd/.crosspoint/
-
-# Delete specific book cache
-rm -rf /path/to/sd/.crosspoint/epub_<hash>/
-
-# Keep progress, delete only rendered sections
-rm -rf /path/to/sd/.crosspoint/epub_<hash>/sections/
-```
-
-**When to Clear Cache**:
-- EPUB parsing errors after code changes to `lib/Epub/`
-- Corrupt rendering (missing text, wrong layout)
-- Testing cache generation logic
-- After modifying:
-  - `lib/Epub/Epub/Section.cpp`
-  - `lib/Epub/Epub/BookMetadataCache.cpp`
-  - Render settings in `CrossPointSettings`
-
-### Cache File Format Versioning
-
-**Source**: `lib/Epub/Epub/Section.cpp`, `lib/Epub/Epub/BookMetadataCache.cpp`
-
-**Current Versions** (as of docs/file-formats.md):
-- `book.bin`: **Version 7** (metadata structure)
-- `section.bin`: **Version 25** (layout structure)
-
-**Version Increment Rules**:
-1. **ALWAYS increment version** BEFORE changing binary structure
-2. Version mismatch → Cache auto-invalidated and regenerated
-3. Document format changes in `docs/file-formats.md`
-
-**Example** (incrementing section format version):
-```cpp
-// lib/Epub/Epub/Section.cpp
-static constexpr uint8_t SECTION_FILE_VERSION = 26;  // Was 25, now 26
-
-// Add new field to structure
-struct PageLine {
-  // ... existing fields ...
-  uint16_t newField;  // New field added
-};
-```
+- Bump `[crosspoint] version` and `build` in `platformio.ini` together; `build` must strictly increase
+  (`major*10000 + minor*100 + patch` for final releases). Never lower `min_install_build` below 20000.
+- Every image embeds `stick_firmware_descriptor` (`src/platform/StickFirmwareDescriptor.cpp`); installers
+  reject images without it (except recovery mode).
+- Package releases only with `scripts/firmware_release.py`; follow the on-device checklist in
+  `docs/firmware-ota.md` before registering a build in the catalogue.
+- Code that runs before `ota_trial::onBoot()` in `setup()` cannot be rolled back by the app; keep it minimal.
 
 ---
 
-Philosophy: We are building a dedicated e-reader, not a Swiss Army knife. If a feature adds RAM pressure without significantly improving the reading experience, it is Out of Scope.
+Philosophy: We are building a dedicated StockStick device, not a Swiss Army knife. If a feature adds RAM pressure or image size without serving StockStick content, sync or device operations, it is Out of Scope.
