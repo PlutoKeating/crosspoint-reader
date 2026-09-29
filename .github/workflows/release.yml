@@ -1,4 +1,4 @@
-name: Compile Release
+name: StockStick Release
 on:
   push:
     tags:
@@ -32,16 +32,23 @@ jobs:
           key: pio-${{ runner.os }}-${{ hashFiles('platformio.ini') }}
           restore-keys: pio-${{ runner.os }}-
 
-      - name: Build CrossPoint
-        run: pio run -e gh_release
+      - name: Check tag matches firmware version
+        run: |
+          VERSION=$(python3 -c "import configparser; c=configparser.ConfigParser(); c.read('platformio.ini'); print(c['crosspoint']['version'])")
+          test "${GITHUB_REF_NAME#v}" = "$VERSION" || { echo "tag $GITHUB_REF_NAME != version $VERSION"; exit 1; }
+
+      - name: Build and package StockStick release
+        run: |
+          NOTES=RELEASE_NOTES.md
+          test -f "$NOTES" || NOTES=""
+          python3 scripts/firmware_release.py --build ${NOTES:+--notes "$NOTES"}
 
       - name: Upload Artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: CrossPoint-${{ github.ref_name }}
+          name: StockStick-${{ github.ref_name }}
           path: |
+            dist/firmware/
             .pio/build/gh_release/bootloader.bin
-            .pio/build/gh_release/firmware.bin
-            .pio/build/gh_release/firmware.elf
-            .pio/build/gh_release/firmware.map
             .pio/build/gh_release/partitions.bin
+            .pio/build/gh_release/firmware.map
