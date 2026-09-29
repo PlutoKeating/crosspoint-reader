@@ -29,6 +29,12 @@ class ProjectStickActivity final : public Activity {
   uint32_t lastStudioPollMs = 0;
   uint32_t studioGeneration = 0;
   uint32_t firmwareUpdateGeneration = 0;
+  // Button hint blocks (front hints and side feedback hints) appear on a key
+  // action and hide after BUTTON_HINT_TIMEOUT_MS without one; never while locked.
+  static constexpr uint32_t BUTTON_HINT_TIMEOUT_MS = 5000;
+  bool buttonHintsVisible = false;
+  uint32_t lastKeyActionMs = 0;
+  void updateButtonHints(uint32_t nowMs);
   WifiAutoConnect wifiAutoConnect;
   void renderFirmwareUpdate();
   uint32_t lastManifestAttemptMs = 0;

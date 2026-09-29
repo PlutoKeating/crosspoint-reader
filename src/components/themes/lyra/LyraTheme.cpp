@@ -355,14 +355,17 @@ void LyraTheme::drawButtonHints(GfxRenderer& renderer, const char* btn1, const c
   renderer.setOrientation(GfxRenderer::Orientation::Portrait);
 
   const int pageHeight = renderer.getScreenHeight();
-  constexpr int buttonWidth = 80;
+  // Sized for Chinese labels: they render with the Noto Sans SC 12 fallback
+  // (34 px line), so text is centred on the resolved font's line height.
+  const bool x3 = gpio.deviceIsX3();
+  const int buttonWidth = x3 ? 88 : 86;
   constexpr int buttonHeight = LyraMetrics::values.buttonHintsHeight;
   constexpr int buttonY = LyraMetrics::values.buttonHintsHeight;  // Distance from bottom
-  constexpr int textYOffset = 7;                                  // Distance from top of button to text baseline
-  // X3 has wider screen in portrait (528 vs 480), use more spacing
-  constexpr int x4ButtonPositions[] = {58, 146, 254, 342};
-  constexpr int x3ButtonPositions[] = {65, 157, 291, 383};
-  const int* buttonPositions = gpio.deviceIsX3() ? x3ButtonPositions : x4ButtonPositions;
+  constexpr int textPadding = 6;
+  // Same centres as the physical buttons; X3 is wider in portrait (528 vs 480).
+  constexpr int x4ButtonPositions[] = {55, 143, 251, 339};
+  constexpr int x3ButtonPositions[] = {61, 153, 287, 379};
+  const int* buttonPositions = x3 ? x3ButtonPositions : x4ButtonPositions;
   const char* labels[] = {btn1, btn2, btn3, btn4};
 
   for (int i = 0; i < 4; i++) {
@@ -372,10 +375,12 @@ void LyraTheme::drawButtonHints(GfxRenderer& renderer, const char* btn1, const c
       renderer.fillRoundedRect(x, pageHeight - buttonY, buttonWidth, buttonHeight, cornerRadius, Color::White);
       renderer.drawRoundedRect(x, pageHeight - buttonY, buttonWidth, buttonHeight, 1, cornerRadius, true, true, false,
                                false, true);
-      const auto fittedLabel = renderer.truncatedText(SMALL_FONT_ID, labels[i], buttonWidth - 8);
+      const auto fittedLabel = renderer.truncatedText(SMALL_FONT_ID, labels[i], buttonWidth - textPadding * 2);
       const int textWidth = renderer.getTextWidth(SMALL_FONT_ID, fittedLabel.c_str());
       const int textX = x + (buttonWidth - 1 - textWidth) / 2;
-      renderer.drawText(SMALL_FONT_ID, textX, pageHeight - buttonY + textYOffset, fittedLabel.c_str());
+      const int lineHeight = renderer.getTextLineHeight(SMALL_FONT_ID, fittedLabel.c_str());
+      const int textY = pageHeight - buttonY + std::max(0, (buttonHeight - lineHeight) / 2);
+      renderer.drawText(SMALL_FONT_ID, textX, textY, fittedLabel.c_str());
     }
   }
 

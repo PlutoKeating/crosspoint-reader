@@ -285,10 +285,16 @@ void RoundedRaffTheme::drawButtonHints(GfxRenderer& renderer, const char* btn1, 
   const int sidePadding = 20;
   const int groupGap = 10;
   const int bottomMargin = 10;
-  const int hintHeight = RoundedRaffMetrics::values.buttonHintsHeight - 10;  // 30px total guide height
+  const int hintHeight = RoundedRaffMetrics::values.buttonHintsHeight - 10;  // 36px total guide height
   const int groupWidth = (pageWidth - sidePadding * 2 - groupGap) / 2;
   const int hintY = pageHeight - hintHeight - bottomMargin;
-  const int textY = hintY + (hintHeight - renderer.getLineHeight(kGuideFontId)) / 2;
+  // Centre on the tallest resolved font among the labels: Chinese labels use
+  // the Noto Sans SC 12 fallback, whose line is much taller than the guide font.
+  int lineHeight = renderer.getLineHeight(kGuideFontId);
+  for (const char* label : {btn1, btn2, btn3, btn4}) {
+    if (label && label[0] != '\0') lineHeight = std::max(lineHeight, renderer.getTextLineHeight(kGuideFontId, label));
+  }
+  const int textY = hintY + std::max(0, (hintHeight - lineHeight) / 2);
 
   const bool backDisabled = (btn1 == nullptr || btn1[0] == '\0');
   const int leftGroupX = sidePadding;

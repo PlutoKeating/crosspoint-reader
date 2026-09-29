@@ -161,7 +161,7 @@ void BaseTheme::drawButtonHints(GfxRenderer& renderer, const char* btn1, const c
   constexpr int buttonWidth = 106;
   constexpr int buttonHeight = BaseMetrics::values.buttonHintsHeight;
   constexpr int buttonY = BaseMetrics::values.buttonHintsHeight;  // Distance from bottom
-  constexpr int textYOffset = 7;                                  // Distance from top of button to text baseline
+  constexpr int textPadding = 6;
   // X3 has wider screen in portrait (528 vs 480), use more spacing
   constexpr int x4ButtonPositions[] = {25, 130, 245, 350};
   constexpr int x3ButtonPositions[] = {38, 154, 268, 384};
@@ -174,10 +174,13 @@ void BaseTheme::drawButtonHints(GfxRenderer& renderer, const char* btn1, const c
       const int x = buttonPositions[i];
       renderer.fillRect(x, pageHeight - buttonY, buttonWidth, buttonHeight, false);
       renderer.drawRect(x, pageHeight - buttonY, buttonWidth, buttonHeight);
-      const auto fittedLabel = renderer.truncatedText(UI_10_FONT_ID, labels[i], buttonWidth - 8);
+      const auto fittedLabel = renderer.truncatedText(UI_10_FONT_ID, labels[i], buttonWidth - textPadding * 2);
       const int textWidth = renderer.getTextWidth(UI_10_FONT_ID, fittedLabel.c_str());
       const int textX = x + (buttonWidth - 1 - textWidth) / 2;
-      renderer.drawText(UI_10_FONT_ID, textX, pageHeight - buttonY + textYOffset, fittedLabel.c_str());
+      // Centre on the resolved font (Chinese labels use the 34 px Noto Sans SC line).
+      const int lineHeight = renderer.getTextLineHeight(UI_10_FONT_ID, fittedLabel.c_str());
+      const int textY = pageHeight - buttonY + std::max(0, (buttonHeight - lineHeight) / 2);
+      renderer.drawText(UI_10_FONT_ID, textX, textY, fittedLabel.c_str());
     }
   }
 

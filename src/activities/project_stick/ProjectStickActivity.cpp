@@ -69,16 +69,20 @@ void drawFeedbackHints(const GfxRenderer& renderer) {
 
 void drawNetworkStatusTag(const GfxRenderer& renderer, const Rect& headerBounds, int rightInset, bool connected) {
   const char* label = connected ? tr(STR_PROJECT_STICK_STATUS_ONLINE) : tr(STR_PROJECT_STICK_STATUS_OFFLINE);
-  const int textHeight = renderer.getLineHeight(SMALL_FONT_ID);
+  // Chinese labels resolve to the Noto Sans SC 12 fallback; size the tag to
+  // the font that actually renders so the glyphs stay inside the outline.
+  const int textHeight = renderer.getTextLineHeight(SMALL_FONT_ID, label);
   const int tagHeight = textHeight + 4;
-  const int tagWidth = NETWORK_TAG_HORIZONTAL_PADDING * 2 + NETWORK_TAG_DOT_SIZE + NETWORK_TAG_DOT_GAP +
+  // The pill's ends are half-circles; keep content clear of the curve.
+  const int horizontalPadding = NETWORK_TAG_HORIZONTAL_PADDING + tagHeight / 4;
+  const int tagWidth = horizontalPadding * 2 + NETWORK_TAG_DOT_SIZE + NETWORK_TAG_DOT_GAP +
                        renderer.getTextWidth(SMALL_FONT_ID, label);
   const bool hasSecondHeaderRow = headerBounds.height >= 60;
   const int safeRightInset = hasSecondHeaderRow ? rightInset : std::max(rightInset, COMPACT_HEADER_BATTERY_RESERVE);
   const int tagX = renderer.getScreenWidth() - safeRightInset - tagWidth;
   const int tagY = hasSecondHeaderRow ? headerBounds.y + headerBounds.height - tagHeight - NETWORK_TAG_BOTTOM_GAP
                                       : headerBounds.y + (headerBounds.height - tagHeight) / 2;
-  const int dotX = tagX + NETWORK_TAG_HORIZONTAL_PADDING;
+  const int dotX = tagX + horizontalPadding;
   const int dotY = tagY + (tagHeight - NETWORK_TAG_DOT_SIZE) / 2;
 
   renderer.drawRoundedRect(tagX, tagY, tagWidth, tagHeight, 1, tagHeight / 2, true);
@@ -226,7 +230,30 @@ void ProjectStickActivity::updateState(const project_stick::SyncReport& report) 
 
 bool ProjectStickActivity::handlesKeyguard() { return !StudioFrame::instance().snapshot().hash.empty(); }
 
+void ProjectStickActivity::updateButtonHints(const uint32_t nowMs) {
+  // The keyguard (20 s idle) always engages after the 5 s hint timeout, and
+  // while locked the render task only overlays the lock icon, so hints are
+  // never on screen in the locked state.
+  if (mappedInput.isKeyguardLocked()) {
+    buttonHintsVisible = false;
+    return;
+  }
+  if (mappedInput.wasAnyPressed() || mappedInput.wasAnyReleased()) {
+    lastKeyActionMs = nowMs;
+    if (!buttonHintsVisible) {
+      buttonHintsVisible = true;
+      requestUpdate();
+    }
+    return;
+  }
+  if (buttonHintsVisible && nowMs - lastKeyActionMs >= BUTTON_HINT_TIMEOUT_MS) {
+    buttonHintsVisible = false;
+    requestUpdate();
+  }
+}
+
 void ProjectStickActivity::loop() {
+  updateButtonHints(millis());
   studio_ble::tick();
   if (service.refreshOwnership()) requestUpdate();
   auto& frame = StudioFrame::instance();
@@ -535,9 +562,12 @@ void ProjectStickActivity::render(RenderLock&&) {
     }
   }
 
-  drawFeedbackHints(renderer);
+  const bool showHints = buttonHintsVisible && !mappedInput.isKeyguardLocked();
+  if (showHints) drawFeedbackHints(renderer);
   drawFeedbackBubble(width);
-  GUI.drawButtonHints(renderer, tr(STR_BACK), tr(STR_PROJECT_STICK_CONNECT_WIFI), "", tr(STR_PROJECT_STICK_REFRESH));
+  if (showHints) {
+    GUI.drawButtonHints(renderer, tr(STR_BACK), tr(STR_PROJECT_STICK_CONNECT_WIFI), "", tr(STR_PROJECT_STICK_REFRESH));
+  }
   renderer.displayBuffer();
 }
 
