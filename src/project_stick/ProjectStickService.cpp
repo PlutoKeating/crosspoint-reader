@@ -4,9 +4,13 @@
 
 #include "StudioBluetooth.h"
 #include "StudioFrame.h"
+#include "FirmwareInstall.h"
+#include "FirmwareUpdateState.h"
 #include "network/FirmwareFlasher.h"
-#ifndef SIMULATOR
+#include "network/OtaTrial.h"
+// WiFi.h also has a simulator shim; the trial health signal needs link state on both.
 #include <WiFi.h>
+#ifndef SIMULATOR
 #include <sys/time.h>
 
 #include "StudioTrust.h"
@@ -15,6 +19,7 @@
 #include <Arduino.h>
 #include <ArduinoJson.h>
 #include <HalClock.h>
+#include <HalGPIO.h>
 #include <HalStorage.h>
 #include <Logging.h>
 #include <Memory.h>
@@ -45,6 +50,22 @@ namespace {
 std::recursive_mutex projectStickStateMutex;
 using ProjectStickStateLock = std::lock_guard<std::recursive_mutex>;
 bool projectStickStoreInitialized = false;
+
+// Firmware identity and capabilities sent with pairing and registration.
+void describeFirmware(JsonDocument& request) {
+  request["firmware_version"] = CROSSPOINT_VERSION;
+  request["firmware_build"] = firmware_install::runningBuild();
+  JsonObject capabilities = request["capabilities"].to<JsonObject>();
+  capabilities["protocol"] = 2;
+  capabilities["studio"] = 1;
+  capabilities["studio_program"] = 1;
+  capabilities["studio_ota"] = 1;
+  // OTA protocol 2: resumable firmware download (offset), image identity
+  // checks, trial boot with automatic rollback and outcome reports.
+  capabilities["ota"] = 2;
+  capabilities["themes"] = true;
+  capabilities["panel"] = gpio.deviceIsX3() ? "xteink_x3" : "xteink_x4";
+}
 
 bool trustedClockReady() {
 #ifndef SIMULATOR
@@ -338,14 +359,7 @@ bool ProjectStickService::ensurePairing(int& status) {
   }
   JsonDocument request;
   request["device_id"] = deviceId;
-  request["firmware_version"] = CROSSPOINT_VERSION;
-  JsonObject capabilities = request["capabilities"].to<JsonObject>();
-  capabilities["protocol"] = 2;
-  capabilities["studio"] = 1;
-  capabilities["studio_program"] = 1;
-  capabilities["studio_ota"] = 1;
-  capabilities["themes"] = true;
-  capabilities["panel"] = "xteink_x3";
+  describeFirmware(request);
   std::string body;
   serializeJson(request, body);
   std::string response;
@@ -383,15 +397,8 @@ bool ProjectStickService::registerDevice(int& status) {
     ProjectStickStateLock lock(projectStickStateMutex);
     request["device_id"] = PROJECT_STICK_STORE.deviceId;
   }
-  request["firmware_version"] = CROSSPOINT_VERSION;
   request["applied_revision"] = PROJECT_STICK_STORE.profileRevision;
-  JsonObject capabilities = request["capabilities"].to<JsonObject>();
-  capabilities["protocol"] = 2;
-  capabilities["studio"] = 1;
-  capabilities["studio_program"] = 1;
-  capabilities["studio_ota"] = 1;
-  capabilities["themes"] = true;
-  capabilities["panel"] = "xteink_x3";
+  describeFirmware(request);
   std::string body;
   serializeJson(request, body);
 
@@ -1069,6 +1076,7 @@ bool ProjectStickService::requestPost(const std::string& path, const std::string
       http.addHeader("Authorization", "Bearer " + deviceToken);
     }
     status = http.sendRequest("POST", body);
+    ota_trial::noteApiResult(status, WiFi.status() == WL_CONNECTED);
     response = http.getString();
 #ifdef SIMULATOR
     const bool complete = true;
@@ -1139,6 +1147,7 @@ bool ProjectStickService::fetchAuthenticated(const std::string& url,
     if (http.getStatus() != 200) return true;
     return onData(data, length);
   });
+  ota_trial::noteApiResult(status, WiFi.status() == WL_CONNECTED);
 #ifdef SIMULATOR
   const bool complete = true;
 #else
@@ -1571,78 +1580,210 @@ void ProjectStickService::syncStudio() {
   report(task, size > StudioFrame::BYTES && frame.snapshot().card.empty() ? "scheduled" : "refreshing", hash);
 }
 
+namespace {
+constexpr char FIRMWARE_TEMP[] = "/.crosspoint/studio/firmware.tmp";
+constexpr char FIRMWARE_META[] = "/.crosspoint/studio/firmware.meta";
+// Both OTA slots in partitions.csv are 0x640000 bytes.
+constexpr size_t MAX_FIRMWARE_BYTES = 0x640000;
+constexpr size_t MIN_FIRMWARE_BYTES = 100000;
+constexpr uint8_t MIN_OTA_BATTERY_PERCENT = 30;
+
+struct InstallContext {
+  const char* commandId;
+  const char* version;
+};
+}  // namespace
+
 bool ProjectStickService::syncStudioCommand() {
 #ifndef SIMULATOR
+  reportFirmwareOutcome();
   std::string response;
   if (!fetchJson(baseUrl + "/api/v2/device/commands?device_id=" + PROJECT_STICK_STORE.deviceId, response, 2048))
     return false;
   JsonDocument doc;
   if (deserializeJson(doc, response) || doc["command"].isNull()) return false;
   const std::string id = doc["command"]["id"] | "", hash = doc["command"]["sha256"] | "";
+  const std::string version = doc["command"]["version"] | "";
   const size_t size = doc["command"]["bytes"] | size_t(0);
-  auto report = [&](const char* state, const char* error = "") {
+  auto report = [&](const char* state, const char* error = "", int progress = -1) {
     JsonDocument body;
     body["device_id"] = PROJECT_STICK_STORE.deviceId;
     body["id"] = id;
     body["state"] = state;
     body["error"] = error;
+    if (progress >= 0) body["progress"] = progress;
     std::string json, result;
     serializeJson(body, json);
     int status = 0;
     return requestPost("/api/v2/device/commands", json, result, status) && status == 200;
   };
-  if (id.size() != 36 || !validSha256(hash) || size < 100000 || size > 6553600) {
+  auto fail = [&](const char* error) {
+    firmware_update::fail(error);
+    report("failed", error);
+    studio_ble::pause(false);
+    return true;
+  };
+  if (id.size() != 36 || !validSha256(hash) || version.empty() || version.size() > 32 || size < MIN_FIRMWARE_BYTES ||
+      size > MAX_FIRMWARE_BYTES) {
     report("failed", "Invalid firmware metadata");
     return true;
   }
-  if (powerManager.getBatteryPercentage() < 30) {
+  if (powerManager.getBatteryPercentage() < MIN_OTA_BATTERY_PERCENT) {
     report("failed", "Battery below 30%; charge before retrying");
     return true;
   }
   if (StudioFrame::instance().busy() || studio_ble::connected()) return true;
   studio_ble::pause(true);
   HalPowerManager::Lock powerLock;
-  const char* path = "/.crosspoint/studio/firmware.tmp";
-  std::string downloadedHash;
-  if (!report("downloading")) {
+  firmware_update::begin(version.c_str(), size);
+  if (!report("downloading", "", 0)) {
+    firmware_update::reset();
     studio_ble::pause(false);
     return true;
   }
-  if (!fetchToFile(baseUrl + "/api/v2/device/firmware?device_id=" + PROJECT_STICK_STORE.deviceId + "&command_id=" + id,
-                   path, size)) {
-    report("failed", "Firmware download failed");
-    studio_ble::pause(false);
-    return true;
-  }
+  if (!downloadFirmware(id, hash, size)) return fail("Firmware download failed");
+
+  firmware_update::setPhase(firmware_update::Phase::Verifying);
   report("verifying");
+  std::string downloadedHash;
   HalFile file;
-  const bool opened = Storage.openFileForRead("STUDIO", path, file);
-  const bool sized = opened && file.size() == size;
+  const bool sized = Storage.openFileForRead("STUDIO", FIRMWARE_TEMP, file) && file.size() == size;
   file.close();
-  if (!sized || !hashFile(path, downloadedHash) || downloadedHash != hash) {
-    Storage.remove(path);
-    report("failed", "Firmware checksum mismatch");
-    studio_ble::pause(false);
-    return true;
+  if (!sized || !hashFile(FIRMWARE_TEMP, downloadedHash) || downloadedHash != hash) {
+    Storage.remove(FIRMWARE_TEMP);
+    Storage.remove(FIRMWARE_META);
+    return fail("Firmware checksum mismatch");
   }
+  const auto candidate = firmware_install::inspect(FIRMWARE_TEMP, version.c_str());
+  if (!candidate.ok()) {
+    Storage.remove(FIRMWARE_TEMP);
+    Storage.remove(FIRMWARE_META);
+    return fail(stick_fw::installVerdictName(candidate.verdict));
+  }
+  // The server re-checks here that the catalogue entry was not withdrawn.
   if (!report("installing")) {
+    firmware_update::fail("Install not confirmed by server");
     studio_ble::pause(false);
     return true;
   }
-  const auto result = firmware_flash::flashFromSdPath(path, nullptr, nullptr);
-  Storage.remove(path);
-  if (result != firmware_flash::Result::OK) {
-    report("failed", firmware_flash::resultName(result));
-    studio_ble::pause(false);
-    return true;
-  }
+  firmware_update::setPhase(firmware_update::Phase::Installing);
+  InstallContext context{id.c_str(), version.c_str()};
+  auto onProgress = +[](size_t written, size_t, void*) { firmware_update::setProgress(written); };
+  auto armTrial = +[](const esp_partition_t* dest, void* ctx) {
+    const auto* install = static_cast<const InstallContext*>(ctx);
+    return ota_trial::arm(dest, install->commandId, install->version);
+  };
+  const auto result = firmware_flash::flashFromSdPath(FIRMWARE_TEMP, onProgress, &context, false, armTrial);
+  if (result != firmware_flash::Result::OK) return fail(firmware_flash::resultName(result));
+  Storage.remove(FIRMWARE_TEMP);
+  Storage.remove(FIRMWARE_META);
+  firmware_update::setPhase(firmware_update::Phase::Restarting);
   report("restarting");
-  delay(300);
+  delay(1500);  // lets the UI paint the restarting state
   ESP.restart();
   return true;
 #else
   return false;
 #endif
+}
+
+bool ProjectStickService::downloadFirmware(const std::string& id, const std::string& hash, size_t size) {
+  // A partial download survives errors, power loss and reboots; it is resumed
+  // only for the same command, hash and size.
+  const std::string meta = id + " " + hash + " " + std::to_string(size);
+  size_t offset = 0;
+  {
+    HalFile metaFile;
+    char stored[128] = {};
+    if (Storage.openFileForRead("STUDIO", FIRMWARE_META, metaFile)) {
+      const int read = metaFile.read(stored, sizeof(stored) - 1);
+      stored[read > 0 ? read : 0] = '\0';
+    }
+    metaFile.close();
+    HalFile partial;
+    if (meta == stored && Storage.openFileForRead("STUDIO", FIRMWARE_TEMP, partial)) offset = partial.size();
+    partial.close();
+    if (offset > size || meta != stored) {
+      offset = 0;
+      Storage.remove(FIRMWARE_TEMP);
+      Storage.mkdir("/.crosspoint/studio");
+      if (!Storage.openFileForWrite("STUDIO", FIRMWARE_META, metaFile) ||
+          metaFile.write(reinterpret_cast<const uint8_t*>(meta.data()), meta.size()) != meta.size()) {
+        return false;
+      }
+      metaFile.close();
+    }
+  }
+  if (offset > 0) LOG_INF("OTA", "Resuming firmware download at %u/%u", (unsigned)offset, (unsigned)size);
+
+  std::string deviceToken;
+  {
+    ProjectStickStateLock lock(projectStickStateMutex);
+    deviceToken = PROJECT_STICK_STORE.deviceToken;
+  }
+  for (uint8_t attempt = 0; attempt < 4 && offset < size; ++attempt) {
+    if (!trustedClockReady()) return false;
+    std::string url = baseUrl + "/api/v2/device/firmware?device_id=" + PROJECT_STICK_STORE.deviceId +
+                      "&command_id=" + id;
+    if (offset > 0) url += "&offset=" + std::to_string(offset);
+    HalFile output = Storage.open(FIRMWARE_TEMP, O_WRONLY | O_CREAT | O_APPEND);
+    if (!output) return false;
+    if (!http.begin(url)) return false;
+    http.addHeader("Authorization", "Bearer " + deviceToken);
+    bool restartFromZero = false;
+    const size_t requested = offset;
+    const int status = http.GET([&](const uint8_t* data, size_t length) {
+      const int code = http.getStatus();
+      // A server that ignores `offset` answers 200 with the whole image.
+      if (requested > 0 && code == 200) {
+        restartFromZero = true;
+        return false;
+      }
+      if (code != 200 && code != 206) return true;  // error body: drop it
+      if (length > size - offset || output.write(data, length) != length) return false;
+      offset += length;
+      firmware_update::setProgress(offset);
+      return true;
+    });
+    output.flush();
+    output.close();
+    ota_trial::noteApiResult(status, WiFi.status() == WL_CONNECTED);
+    if (restartFromZero) {
+      LOG_INF("OTA", "Server does not support resume; restarting download");
+      Storage.remove(FIRMWARE_TEMP);
+      offset = 0;
+      continue;
+    }
+    if (status == 404 || status == 401 || status == 403 || status == 409) return false;  // withdrawn or not ours
+    LOG_INF("OTA", "Firmware download pass: status=%d received %u/%u", status, (unsigned)offset, (unsigned)size);
+    if (offset < size && attempt < 3) delay(1000UL << attempt);
+  }
+  return offset == size;
+}
+
+void ProjectStickService::reportFirmwareOutcome() {
+  const auto outcome = ota_trial::pendingOutcome();
+  if (!outcome.pending) return;
+  // Confirmed installs complete on the server when the device reports the new
+  // version; only rollbacks need an explicit failure report.
+  if (!outcome.rolledBack || outcome.commandId[0] == '\0') {
+    ota_trial::clearOutcome();
+    return;
+  }
+  JsonDocument body;
+  body["device_id"] = PROJECT_STICK_STORE.deviceId;
+  body["id"] = outcome.commandId;
+  body["state"] = "failed";
+  char error[96];
+  snprintf(error, sizeof(error), "Rolled back from %s (%s)", outcome.version, outcome.reason);
+  body["error"] = error;
+  std::string json, result;
+  serializeJson(body, json);
+  int status = 0;
+  // 409 means the server already closed the command; either way it is settled.
+  if (requestPost("/api/v2/device/commands", json, result, status) && (status == 200 || status == 409)) {
+    ota_trial::clearOutcome();
+  }
 }
 
 void ProjectStickService::sendStudioFeedback(const std::string& task, const std::string& card, bool useful) {

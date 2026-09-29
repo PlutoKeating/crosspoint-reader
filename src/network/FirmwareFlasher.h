@@ -1,5 +1,7 @@
 #pragma once
 
+#include <esp_partition.h>
+
 #include <cstddef>
 #include <cstdint>
 
@@ -35,6 +37,11 @@ enum class Result {
 // Progress callback: called after every chunk write. `written`/`total` are bytes.
 using ProgressCb = void (*)(size_t written, size_t total, void* ctx);
 
+// Called after the image is fully written and before otadata is switched to
+// it. Returning false aborts the install and leaves the running slot selected.
+// Used to arm the trial-boot record at exactly the right moment.
+using BeforeSwitchCb = bool (*)(const esp_partition_t* dest, void* ctx);
+
 // Open `sdPath`, validate it looks like an ESP32 image, then stream it into the
 // next OTA app partition with interleaved 64 KiB erase + sector writes. On
 // success switches otadata via ota_boot::switchTo. Caller is responsible for
@@ -45,7 +52,8 @@ using ProgressCb = void (*)(size_t written, size_t total, void* ctx);
 // the user the confirmation prompt) skip the redundant second pass. Defaults
 // to false so callers without prior validation (any future entry point) keep
 // the defense-in-depth check.
-Result flashFromSdPath(const char* sdPath, ProgressCb onProgress, void* ctx, bool alreadyValidated = false);
+Result flashFromSdPath(const char* sdPath, ProgressCb onProgress, void* ctx, bool alreadyValidated = false,
+                       BeforeSwitchCb beforeSwitch = nullptr);
 
 // Full-image integrity check that mirrors the bootloader's verification:
 // header magic, segment table walk, XOR checksum, and SHA256 trailer (when

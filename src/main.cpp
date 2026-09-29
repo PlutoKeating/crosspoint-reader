@@ -32,6 +32,7 @@
 #include "images/LoadingIcon.h"
 #include "util/ButtonNavigator.h"
 #include "util/LanguagePacks.h"
+#include "network/OtaTrial.h"
 #include "util/ScreenshotUtil.h"
 
 GfxRenderer renderer(display);
@@ -148,6 +149,7 @@ void enterDeepSleep(bool fromTimeout = false) {
   // Commit to sleeping before goToSleep() runs the outgoing activity's onExit():
   // a WiFi activity would otherwise silentRestart() here and reboot instead.
   deepSleepInProgress = true;
+  ota_trial::onCleanShutdown();
   activityManager.goToSleep(fromTimeout);
 
   if (isQuickResumeSleep) {
@@ -211,6 +213,9 @@ void setup() {
 #endif
 
   HalSystem::begin();
+  // Before anything heavy: a trial image that keeps crashing must get back to
+  // the previous slot even if later init is what fails.
+  ota_trial::onBoot();
 
   // Read-and-clear so a panic later in setup() doesn't loop into silent reboot.
   // RTC_NOINIT memory is uninitialized on cold boot, so only the magic counts.
@@ -480,6 +485,8 @@ void loop() {
   if (gpio.wasUsbStateChanged()) {
     activityManager.requestUpdate();
   }
+
+  ota_trial::tick();
 
   const unsigned long activityStartTime = millis();
   activityManager.loop();

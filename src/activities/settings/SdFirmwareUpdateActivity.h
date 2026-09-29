@@ -42,6 +42,9 @@ class SdFirmwareUpdateActivity : public Activity {
   bool recoveryMode = false;
 
   std::string firmwarePath;
+  // Set when the chosen image carries a StockStick descriptor; only those arm a trial boot.
+  bool stockStickImage = false;
+  std::string imageVersion;
   size_t firmwareSize = 0;
   size_t writtenBytes = 0;
   unsigned int lastRenderedPercent = 101;

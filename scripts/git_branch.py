@@ -76,7 +76,15 @@ def get_base_version(project_dir):
     return config.get('crosspoint', 'version')
 
 
+def inject_commit(env):
+    # Every environment embeds the source commit in the StockStick image
+    # descriptor (src/platform/StickFirmwareDescriptor.cpp).
+    commit = get_git_short_sha(env['PROJECT_DIR'])[:15]
+    env.Append(CPPDEFINES=[('STOCKSTICK_FW_COMMIT', f'\\"{commit}\\"')])
+
+
 def inject_version(env):
+    inject_commit(env)
     # Only applies to the dev (default) environment; release envs set the
     # version via build_flags in platformio.ini and are unaffected.
     if env['PIOENV'] != 'default':

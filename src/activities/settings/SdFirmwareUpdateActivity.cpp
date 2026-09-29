@@ -13,6 +13,8 @@
 #include "components/UITheme.h"
 #include "fontIds.h"
 #include "network/FirmwareFlasher.h"
+#include "network/OtaTrial.h"
+#include "project_stick/FirmwareInstall.h"
 
 void SdFirmwareUpdateActivity::onEnter() {
   Activity::onEnter();
@@ -106,6 +108,28 @@ bool SdFirmwareUpdateActivity::validateFirmware() {
     }
     return false;
   }
+
+  // Identify the image. Settings only installs StockStick builds that fit this
+  // device; recovery mode stays permissive so any bootable image can rescue a
+  // device, but only identified StockStick images get a trial boot.
+  const auto candidate = firmware_install::inspect(firmwarePath.c_str(), nullptr);
+  stockStickImage = candidate.identity == stick_fw::IdentifyResult::Ok;
+  imageVersion = stockStickImage ? candidate.info.version : "";
+  if (!candidate.ok() && !recoveryMode) {
+    switch (candidate.verdict) {
+      case stick_fw::InstallVerdict::BelowMinimumBuild:
+        errorMessage = tr(STR_FIRMWARE_TOO_OLD);
+        break;
+      case stick_fw::InstallVerdict::WrongChip:
+      case stick_fw::InstallVerdict::UnsupportedBoard:
+        errorMessage = tr(STR_FIRMWARE_WRONG_DEVICE);
+        break;
+      default:
+        errorMessage = tr(STR_FIRMWARE_NOT_STOCKSTICK);
+        break;
+    }
+    return false;
+  }
   return true;
 }
 
@@ -120,6 +144,7 @@ void SdFirmwareUpdateActivity::promptConfirmation() {
   std::string body = firmwarePath;
   const auto pos = body.find_last_of('/');
   if (pos != std::string::npos) body = body.substr(pos + 1);
+  if (!imageVersion.empty()) body += " · " + imageVersion;
 
   startActivityForResult(std::make_unique<ConfirmationActivity>(renderer, mappedInput, heading, body),
                          [this](const ActivityResult& result) { onConfirmationResult(result); });
@@ -162,7 +187,13 @@ void SdFirmwareUpdateActivity::performUpdate() {
   // pre-confirmation pass. The alreadyValidated parameter on the API stays
   // for callers (e.g. an OTA staging path) where the same byte stream was
   // just hashed and there's no removable-media gap.
-  const auto result = firmware_flash::flashFromSdPath(firmwarePath.c_str(), progressCb, this);
+  auto armTrial = +[](const esp_partition_t* dest, void* ctx) {
+    auto* self = static_cast<SdFirmwareUpdateActivity*>(ctx);
+    if (!self->stockStickImage) return true;
+    return ota_trial::arm(dest, "", self->imageVersion.c_str());
+  };
+  const auto result =
+      firmware_flash::flashFromSdPath(firmwarePath.c_str(), progressCb, this, /*alreadyValidated=*/false, armTrial);
   if (result != firmware_flash::Result::OK) {
     LOG_ERR("FW", "flash failed: %s", firmware_flash::resultName(result));
     errorMessage = tr(STR_FIRMWARE_WRITE_FAILED);
