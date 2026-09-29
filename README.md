@@ -30,6 +30,10 @@ pio run -e default             # 开发构建（带分支与提交号的版本�
 pio run -e default -t upload   # USB 刷机
 ```
 
+首次构建（或 `custom_sdkconfig` 变化后）会先用 ESP-IDF 重新编译 Arduino 框架库，耗时较长。
+LTO 由 `build_unflags = -fno-lto` 交给 pioarduino 只对应用代码开启，不要在 `build_flags` 中加 `-flto`，
+否则干净环境中的框架库编译会失败。
+
 版本号、构建号与最低安装构建号只在 `platformio.ini` 的 `[crosspoint]` 中维护。
 打包 OTA 发布见 [docs/firmware-ota.md](docs/firmware-ota.md#3-发布流程)：
 

@@ -23,3 +23,6 @@ def check_image_size(source, target, env):
 
 
 env.AddPostAction("$BUILD_DIR/${PROGNAME}.bin", check_image_size)
+# A .bin retrieved from the build cache skips the action above; checkprogsize
+# runs on every build, so the final image is always verified.
+env.AddPostAction("checkprogsize", check_image_size)
