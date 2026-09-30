@@ -93,29 +93,34 @@ All StockStick strings come from the built-in Simplified Chinese catalogue
 (`lib/I18n/translations/chinese.yaml`); an SD-card language pack can override
 them (see [i18n.md](i18n.md)).
 
+- All hints share one 1-bit visual language (since 2.2.1): black rounded chips
+  (NOTO Sans SC 12 bold, white text, 38 px high, 20 px icons) with a 2-pixel
+  white halo so they never merge with card pixels; feedback windows are white
+  cards with a 2-pixel border in the same radius family.
 - Any key action pops up the button hints and they hide after 5 seconds
-  without one. Front hints read 返回 / Wi-Fi / – / 同步 (换一张 while a Studio
-  card is shown); on a Studio card the side keys are also outlined with thumbs
-  icons and the labels 没啥用 (left) / 有用 (right). Hints never show while
-  locked.
+  without one. Front chips sit above the four physical front keys: 返回 /
+  Wi-Fi / – / 同步 (换一张 while a Studio card is shown), the unassigned slot
+  stays empty. On a Studio card the side keys get edge tabs flush with the
+  screen edge: thumb-down 没啥用 (left) and 有用 thumb-up (right). Hints never
+  show while locked.
 - A device-wide Nokia-style keyguard (since 2.2.0 also on the Studio card page)
   locks after 20 seconds without button or touch activity: all non-power
-  button events are suppressed and only a 12-pixel lock icon is added at the
-  top left; content keeps updating underneath. The power button always works
-  and cloud synchronization continues.
+  button events are suppressed and only a small lock icon is added at the top
+  left; content keeps updating underneath. The power button always works and
+  cloud synchronization continues.
 - Unlock by releasing the left side key, then the right side key. A key press
-  while locked shows `屏幕已锁定，请依次按左、右侧边键解锁` with the two keys
-  marked 1 and 2; after the left step the prompt inverts to
-  `左侧键已确认，请按右侧边键解锁`, the left key shows a check, the right key is
-  filled and a chevron cue slides toward it in three 150 ms frames. Right-first
-  does nothing, a front key restarts at the left step, and the unlocking right
-  release is consumed (it never sends feedback).
+  while locked shows the chip `屏幕已锁定 · 依次按左、右侧边键` with step tabs 1
+  (black, next) and 2 (outlined) at the side keys; after the left step the
+  prompt becomes `左键已确认 · 请按右侧边键`, the left tab shows a check, the
+  right tab turns black and chevrons walk toward it in three 150 ms frames.
+  Right-first does nothing, a front key restarts at the left step, and the
+  unlocking right release is consumed (it never sends feedback).
 - With a Studio frame installed: the left side key is "没啥用" (show the next
   card, `studio_next`) and the right side key is "有用" (keep the card,
-  `studio_useful`). Each shows a white, thin-outlined feedback window without a
-  tail that slides from its key's edge to the centre in discrete frames over
-  360 ms (`没啥用！那试试下一条` / `有用！那就去执行`) and clears after 2.2 s.
-  The front-right key selects the next card without feedback.
+  `studio_useful`). Each shows a feedback card with its thumb icon that slides
+  from its key's edge to the centre in discrete frames over 360 ms
+  (`没啥用！那试试下一条` / `有用！那就去执行`) and clears after 2.2 s. The
+  front-right key selects the next card without feedback.
 - Without a Studio frame, Back opens the system menu (StockStick / Settings),
   Confirm opens Wi-Fi selection, and the front-right key registers and polls
   Studio immediately.
