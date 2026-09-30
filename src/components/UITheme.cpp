@@ -9,9 +9,18 @@
 #include <memory>
 
 #include "MappedInputManager.h"
+#include "components/StickOverlays.h"
 #include "components/themes/BaseTheme.h"
 #include "components/themes/lyra/LyraTheme.h"
 #include "components/themes/roundedraff/RoundedRaffTheme.h"
+
+// Screens reserve exactly the shared front-key bar and side pills.
+static_assert(BaseMetrics::values.buttonHintsHeight == stick_overlay::FRONT_BAR_HEIGHT);
+static_assert(LyraMetrics::values.buttonHintsHeight == stick_overlay::FRONT_BAR_HEIGHT);
+static_assert(RoundedRaffMetrics::values.buttonHintsHeight == stick_overlay::FRONT_BAR_HEIGHT);
+static_assert(BaseMetrics::values.sideButtonHintsWidth == stick_overlay::SIDE_HINT_WIDTH);
+static_assert(LyraMetrics::values.sideButtonHintsWidth == stick_overlay::SIDE_HINT_WIDTH);
+static_assert(RoundedRaffMetrics::values.sideButtonHintsWidth == stick_overlay::SIDE_HINT_WIDTH);
 
 UITheme UITheme::instance;
 

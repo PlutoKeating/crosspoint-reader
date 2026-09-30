@@ -29,8 +29,8 @@ constexpr ThemeMetrics values = {.batteryWidth = 16,
                                  .homeRecentBooksCount = 1,
                                  .homeContinueReadingInMenu = false,
                                  .homeMenuTopOffset = 16,
-                                 .buttonHintsHeight = 46,
-                                 .sideButtonHintsWidth = 30,
+                                 .buttonHintsHeight = 64,
+                                 .sideButtonHintsWidth = 56,
                                  .progressBarHeight = 16,
                                  .progressBarMarginTop = 1,
                                  .statusBarHorizontalMargin = 5,
@@ -90,9 +90,6 @@ class LyraTheme : public BaseTheme {
                 const std::function<std::string(int index)>& rowSubtitle,
                 const std::function<UIIcon(int index)>& rowIcon, const std::function<std::string(int index)>& rowValue,
                 bool highlightValue, const std::function<bool(int index)>& rowDimmed = nullptr) const override;
-  void drawButtonHints(GfxRenderer& renderer, const char* btn1, const char* btn2, const char* btn3,
-                       const char* btn4) const override;
-  void drawSideButtonHints(const GfxRenderer& renderer, const char* topBtn, const char* bottomBtn) const override;
   void drawButtonMenu(GfxRenderer& renderer, Rect rect, int buttonCount, int selectedIndex,
                       const std::function<std::string(int index)>& buttonLabel,
                       const std::function<UIIcon(int index)>& rowIcon) const override;

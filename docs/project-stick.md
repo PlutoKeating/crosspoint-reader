@@ -93,31 +93,41 @@ All StockStick strings come from the built-in Simplified Chinese catalogue
 (`lib/I18n/translations/chinese.yaml`); an SD-card language pack can override
 them (see [i18n.md](i18n.md)).
 
-- All hints share one 1-bit visual language (since 2.2.1): black rounded chips
-  (NOTO Sans SC 12 bold, white text, 38 px high, 20 px icons) with a 2-pixel
-  white halo so they never merge with card pixels; feedback windows are white
-  cards with a 2-pixel border in the same radius family.
-- Any key action pops up the button hints and they hide after 5 seconds
-  without one. Front chips sit above the four physical front keys: 返回 /
-  Wi-Fi / – / 同步 (换一张 while a Studio card is shown), the unassigned slot
-  stays empty. On a Studio card the side keys get edge tabs flush with the
-  screen edge: thumb-down 没啥用 (left) and 有用 thumb-up (right). Hints never
-  show while locked.
+- Every key hint on the device, on every screen, comes from one
+  implementation (`src/components/StickOverlays.cpp`, since 2.2.2); the
+  themes' `drawButtonHints` / `drawSideButtonHints` delegate to it and are not
+  themeable. One light outline language: white fills, 2-pixel black outlines,
+  Noto Sans SC 10 regular labels (about 20 px), 20 px 2-stroke icons.
+  - Front keys: a white bar across the bottom 64 px (it covers whatever is
+    underneath) with a 2-pixel rule on top; each assigned label sits over its
+    physical key with a small solid triangle pointing down at it. Unassigned
+    keys leave their slot empty. Themes reserve the bar as `buttonHintsHeight`.
+  - Side keys: white pills (40 px high, fully rounded) inset 10 px from the
+    edge, centred on the key, with a small solid triangle pointing at it.
+    Themes reserve 56 px per side as `sideButtonHintsWidth`.
+- On the StockStick page any key action pops up the hints and they hide after
+  5 seconds without one. Front labels: 返回 / Wi-Fi / – / 同步 (换一张 while a
+  Studio card is shown). On a Studio card the side pills are thumb-down 没啥用
+  (left) and 有用 thumb-up (right). Hints never show while locked.
 - A device-wide Nokia-style keyguard (since 2.2.0 also on the Studio card page)
   locks after 20 seconds without button or touch activity: all non-power
   button events are suppressed and only a small lock icon is added at the top
-  left; content keeps updating underneath. The power button always works and
+  left (a lock icon in a small outline circle); content keeps updating
+  underneath. The power button always works and
   cloud synchronization continues.
 - Unlock by releasing the left side key, then the right side key. A key press
-  while locked shows the chip `屏幕已锁定 · 依次按左、右侧边键` with step tabs 1
-  (black, next) and 2 (outlined) at the side keys; after the left step the
-  prompt becomes `左键已确认 · 请按右侧边键`, the left tab shows a check, the
-  right tab turns black and chevrons walk toward it in three 150 ms frames.
+  while locked shows `屏幕已锁定 · 依次按左、右侧边键` in the front bar and step
+  pills `1 先按` (filled black: the key to press next, the only filled hint)
+  and `2 再按` (outlined) at the side keys; after the left step the prompt
+  becomes `左键已确认 · 请按右侧边键`, the left pill turns into an outlined
+  `已按` with a check, the right pill is filled and outline chevrons walk
+  toward it in three 150 ms frames.
   Right-first does nothing, a front key restarts at the left step, and the
   unlocking right release is consumed (it never sends feedback).
 - With a Studio frame installed: the left side key is "没啥用" (show the next
   card, `studio_next`) and the right side key is "有用" (keep the card,
-  `studio_useful`). Each shows a feedback card with its thumb icon that slides
+  `studio_useful`). Each shows a feedback card (white, 16 px radius, 2-pixel
+  outline, Noto Sans SC 12 regular) with its thumb icon that slides
   from its key's edge to the centre in discrete frames over 360 ms
   (`没啥用！那试试下一条` / `有用！那就去执行`) and clears after 2.2 s. The
   front-right key selects the next card without feedback.

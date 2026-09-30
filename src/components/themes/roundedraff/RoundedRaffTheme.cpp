@@ -16,13 +16,11 @@
 namespace {
 constexpr int kCoverRadius = 18;
 constexpr int kMenuRadius = 30;
-constexpr int kBottomRadius = 15;
 constexpr int kRowRadius = 20;
 constexpr int kInteractiveInsetX = 20;
 constexpr int kSelectableRowGap = 6;
 constexpr int kTitleFontId = UI_12_FONT_ID;     // Requested main title size: 12px
 constexpr int kSubtitleFontId = SMALL_FONT_ID;  // Requested subtitle size: 8px
-constexpr int kGuideFontId = SMALL_FONT_ID;     // Closest available to requested 6px
 
 void drawScrollBar(const GfxRenderer& renderer, Rect rect, int itemCount, int pageStartIndex, int pageItems) {
   if (itemCount <= 0 || pageItems <= 0 || itemCount <= pageItems) {
@@ -269,65 +267,4 @@ void RoundedRaffTheme::drawList(const GfxRenderer& renderer, Rect rect, int item
   }
 
   drawScrollBar(renderer, rect, itemCount, pageStartIndex, pageItems);
-}
-
-void RoundedRaffTheme::drawButtonHints(GfxRenderer& renderer, const char* btn1, const char* btn2, const char* btn3,
-                                       const char* btn4) const {
-  if (gpio.hasTouch()) {
-    return;
-  }
-
-  const GfxRenderer::Orientation origOrientation = renderer.getOrientation();
-  renderer.setOrientation(GfxRenderer::Orientation::Portrait);
-
-  const int pageWidth = renderer.getScreenWidth();
-  const int pageHeight = renderer.getScreenHeight();
-  const int sidePadding = 20;
-  const int groupGap = 10;
-  const int bottomMargin = 10;
-  const int hintHeight = RoundedRaffMetrics::values.buttonHintsHeight - 10;  // 36px total guide height
-  const int groupWidth = (pageWidth - sidePadding * 2 - groupGap) / 2;
-  const int hintY = pageHeight - hintHeight - bottomMargin;
-  // Centre on the tallest resolved font among the labels: Chinese labels use
-  // the Noto Sans SC 12 fallback, whose line is much taller than the guide font.
-  int lineHeight = renderer.getLineHeight(kGuideFontId);
-  for (const char* label : {btn1, btn2, btn3, btn4}) {
-    if (label && label[0] != '\0') lineHeight = std::max(lineHeight, renderer.getTextLineHeight(kGuideFontId, label));
-  }
-  const int textY = hintY + std::max(0, (hintHeight - lineHeight) / 2);
-
-  const bool backDisabled = (btn1 == nullptr || btn1[0] == '\0');
-  const int leftGroupX = sidePadding;
-  const int rightGroupX = leftGroupX + groupWidth + groupGap;
-  const std::string backLabel = backDisabled ? "" : std::string(btn1);
-  // Callers should provide the button labels. If a label is not specified, it should render empty.
-  const std::string selectText = (btn2 && btn2[0] != '\0') ? std::string(btn2) : "";
-  const std::string upText = (btn3 && btn3[0] != '\0') ? std::string(btn3) : "";
-  const std::string downText = (btn4 && btn4[0] != '\0') ? std::string(btn4) : "";
-
-  // Ensure button hints always "win" visually even if other elements accidentally render into this area.
-  renderer.fillRect(leftGroupX, hintY, groupWidth, hintHeight, false);
-  renderer.fillRect(rightGroupX, hintY, groupWidth, hintHeight, false);
-
-  renderer.drawRoundedRect(leftGroupX, hintY, groupWidth, hintHeight, 2, kBottomRadius, true);
-  const int selectWidth = renderer.getTextWidth(kGuideFontId, selectText.c_str(), EpdFontFamily::REGULAR);
-  const int downWidth = renderer.getTextWidth(kGuideFontId, downText.c_str(), EpdFontFamily::REGULAR);
-  constexpr int innerEdgePadding = 16;
-
-  const int backX = leftGroupX + innerEdgePadding;
-  const int selectX = leftGroupX + groupWidth - innerEdgePadding - selectWidth;
-  const int upX = rightGroupX + innerEdgePadding;
-  const int downX = rightGroupX + groupWidth - innerEdgePadding - downWidth;
-
-  if (!backDisabled) {
-    renderer.drawText(kGuideFontId, backX, textY, backLabel.c_str(), true, EpdFontFamily::REGULAR);
-  }
-  renderer.drawText(kGuideFontId, selectX, textY, selectText.c_str(), true, EpdFontFamily::REGULAR);
-
-  renderer.drawRoundedRect(rightGroupX, hintY, groupWidth, hintHeight, 2, kBottomRadius, true);
-
-  renderer.drawText(kGuideFontId, upX, textY, upText.c_str(), true, EpdFontFamily::REGULAR);
-  renderer.drawText(kGuideFontId, downX, textY, downText.c_str(), true, EpdFontFamily::REGULAR);
-
-  renderer.setOrientation(origOrientation);
 }

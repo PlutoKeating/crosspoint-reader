@@ -850,7 +850,7 @@ void KeyboardEntryActivity::render(RenderLock&&) {
 
   const fui::Rect kbRect = keyboardRect();
 
-  const int tipsLh = renderer.getLineHeight(SMALL_FONT_ID);
+  const int tipsLh = renderer.getTextLineHeight(SMALL_FONT_ID, tr(STR_KB_TIPS)) + 2;
   const int underlineBottom = inputStartY + inputHeight + lineHeight + metrics.verticalSpacing + 4;
   auto drawTip = [&](const char* tip, int y) { renderer.drawCenteredText(SMALL_FONT_ID, y, tip, true); };
 

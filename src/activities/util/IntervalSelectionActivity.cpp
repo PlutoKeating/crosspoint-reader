@@ -162,8 +162,10 @@ void IntervalSelectionActivity::render(RenderLock&&) {
   // Two-line step hint: front buttons do the small step, side buttons the large step. Built from
   // separate label + value strings (rather than splitting one localized sentence) so the layout
   // doesn't depend on translators preserving a hidden separator.
+  // Line pitch follows the font actually used (CJK text routes to the fallback font).
+  const int hintLh = renderer.getTextLineHeight(SMALL_FONT_ID, I18N.get(StrId::STR_STEP_HINT_FRONT));
   drawStepHintLine(barY + 30, StrId::STR_STEP_HINT_FRONT, smallStep);
-  drawStepHintLine(barY + 52, StrId::STR_STEP_HINT_SIDE, largeStep);
+  drawStepHintLine(barY + 30 + hintLh + 4, StrId::STR_STEP_HINT_SIDE, largeStep);
 
   const auto labels = mappedInput.mapLabels(tr(STR_BACK), tr(STR_SELECT), "-", "+");
   GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);

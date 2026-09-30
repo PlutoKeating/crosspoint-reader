@@ -129,8 +129,8 @@ constexpr ThemeMetrics values = {.batteryWidth = 15,
                                  .homeRecentBooksCount = 1,
                                  .homeContinueReadingInMenu = false,
                                  .homeMenuTopOffset = 10,
-                                 .buttonHintsHeight = 46,
-                                 .sideButtonHintsWidth = 30,
+                                 .buttonHintsHeight = 64,
+                                 .sideButtonHintsWidth = 56,
                                  .progressBarHeight = 16,
                                  .progressBarMarginTop = 1,
                                  .statusBarHorizontalMargin = 5,
@@ -183,9 +183,10 @@ class BaseTheme {
   void drawBatteryRight(const GfxRenderer& renderer, Rect rect,
                         bool showPercentage = true) const;  // Right aligned (UI headers)
   virtual void fillBatteryIcon(const GfxRenderer& renderer, Rect rect, uint16_t percentage) const;
-  virtual void drawButtonHints(GfxRenderer& renderer, const char* btn1, const char* btn2, const char* btn3,
-                               const char* btn4) const;
-  virtual void drawSideButtonHints(const GfxRenderer& renderer, const char* topBtn, const char* bottomBtn) const;
+  // Key hints are not themeable: every theme draws them through StickOverlays.
+  void drawButtonHints(GfxRenderer& renderer, const char* btn1, const char* btn2, const char* btn3,
+                       const char* btn4) const;
+  void drawSideButtonHints(const GfxRenderer& renderer, const char* topBtn, const char* bottomBtn) const;
   virtual int getListRowStep(bool hasSubtitle) const;
   virtual int getListPageItems(int contentHeight, bool hasSubtitle) const;
   virtual void drawList(const GfxRenderer& renderer, Rect rect, int itemCount, int selectedIndex,

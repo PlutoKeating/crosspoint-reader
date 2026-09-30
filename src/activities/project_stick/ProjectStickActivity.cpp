@@ -397,7 +397,7 @@ void ProjectStickActivity::drawOverlays(const bool studio) {
     return;
   }
   if (buttonHintsVisible) {
-    if (studio) stick_overlay::drawSideKeyHints(renderer, feedbackBubble == stick_overlay::Bubble::None);
+    if (studio) stick_overlay::drawCardSideKeyHints(renderer, feedbackBubble == stick_overlay::Bubble::None);
     stick_overlay::drawFrontKeyHints(renderer, tr(STR_PROJECT_STICK_BACK), tr(STR_PROJECT_STICK_CONNECT_WIFI), "",
                                      studio ? tr(STR_PROJECT_STICK_NEXT_CARD) : tr(STR_PROJECT_STICK_SYNC));
   }

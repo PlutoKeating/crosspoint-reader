@@ -54,9 +54,10 @@ EpdFont ui12RegularFont(&ubuntu_12_regular);
 EpdFont ui12BoldFont(&ubuntu_12_bold);
 EpdFontFamily ui12FontFamily(&ui12RegularFont, &ui12BoldFont);
 
-// Flash-resident Simplified Chinese UI fallback plus the larger Project.Stick
-// body face. Keeping the UI at 12 pt prevents this page from resizing Chinese
-// text elsewhere in the firmware.
+// Flash-resident Simplified Chinese faces: 10 pt for key hints and small UI
+// text, 12 pt UI fallback, and the larger Project.Stick body face.
+EpdFont builtinChinese10Font(&notosanssc_10_regular);
+EpdFontFamily builtinChinese10FontFamily(&builtinChinese10Font);
 EpdFont builtinChinese12Font(&notosanssc_12_regular);
 EpdFontFamily builtinChinese12FontFamily(&builtinChinese12Font);
 EpdFont builtinChinese13Font(&notosanssc_13_regular);
@@ -185,9 +186,10 @@ void setupDisplayAndFonts(bool seamless = false) {
   renderer.insertFont(UI_10_FONT_ID, ui10FontFamily);
   renderer.insertFont(UI_12_FONT_ID, ui12FontFamily);
   renderer.insertFont(SMALL_FONT_ID, smallFontFamily);
+  renderer.insertFont(NOTOSANSSC_10_FONT_ID, builtinChinese10FontFamily);
   renderer.insertFont(NOTOSANSSC_12_FONT_ID, builtinChinese12FontFamily);
   renderer.insertFont(NOTOSANSSC_13_FONT_ID, builtinChinese13FontFamily);
-  renderer.setDefaultFallbackFont(SMALL_FONT_ID, NOTOSANSSC_12_FONT_ID);
+  renderer.setDefaultFallbackFont(SMALL_FONT_ID, NOTOSANSSC_10_FONT_ID);
   renderer.setDefaultFallbackFont(UI_10_FONT_ID, NOTOSANSSC_12_FONT_ID);
   renderer.setDefaultFallbackFont(UI_12_FONT_ID, NOTOSANSSC_12_FONT_ID);
 

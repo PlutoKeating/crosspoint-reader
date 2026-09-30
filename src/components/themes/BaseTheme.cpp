@@ -12,6 +12,7 @@
 #include <string>
 
 #include "I18n.h"
+#include "components/StickOverlays.h"
 #include "components/UITheme.h"
 #include "components/icons/bookmark.h"
 #include "fontIds.h"
@@ -148,112 +149,17 @@ void BaseTheme::drawProgressBar(const GfxRenderer& renderer, Rect rect, const si
   renderer.drawCenteredText(UI_10_FONT_ID, rect.y + rect.height + 15, percentText.c_str());
 }
 
+// Every screen's key hints share the StickOverlays implementation.
 void BaseTheme::drawButtonHints(GfxRenderer& renderer, const char* btn1, const char* btn2, const char* btn3,
                                 const char* btn4) const {
-  if (gpio.hasTouch()) {
-    return;
-  }
-
   const GfxRenderer::Orientation orig_orientation = renderer.getOrientation();
   renderer.setOrientation(GfxRenderer::Orientation::Portrait);
-
-  const int pageHeight = renderer.getScreenHeight();
-  constexpr int buttonWidth = 106;
-  constexpr int buttonHeight = BaseMetrics::values.buttonHintsHeight;
-  constexpr int buttonY = BaseMetrics::values.buttonHintsHeight;  // Distance from bottom
-  constexpr int textPadding = 6;
-  // X3 has wider screen in portrait (528 vs 480), use more spacing
-  constexpr int x4ButtonPositions[] = {25, 130, 245, 350};
-  constexpr int x3ButtonPositions[] = {38, 154, 268, 384};
-  const int* buttonPositions = gpio.deviceIsX3() ? x3ButtonPositions : x4ButtonPositions;
-  const char* labels[] = {btn1, btn2, btn3, btn4};
-
-  for (int i = 0; i < 4; i++) {
-    // Only draw if the label is non-empty
-    if (labels[i] != nullptr && labels[i][0] != '\0') {
-      const int x = buttonPositions[i];
-      renderer.fillRect(x, pageHeight - buttonY, buttonWidth, buttonHeight, false);
-      renderer.drawRect(x, pageHeight - buttonY, buttonWidth, buttonHeight);
-      const auto fittedLabel = renderer.truncatedText(UI_10_FONT_ID, labels[i], buttonWidth - textPadding * 2);
-      const int textWidth = renderer.getTextWidth(UI_10_FONT_ID, fittedLabel.c_str());
-      const int textX = x + (buttonWidth - 1 - textWidth) / 2;
-      // Centre on the resolved font (Chinese labels use the 34 px Noto Sans SC line).
-      const int lineHeight = renderer.getTextLineHeight(UI_10_FONT_ID, fittedLabel.c_str());
-      const int textY = pageHeight - buttonY + std::max(0, (buttonHeight - lineHeight) / 2);
-      renderer.drawText(UI_10_FONT_ID, textX, textY, fittedLabel.c_str());
-    }
-  }
-
+  stick_overlay::drawFrontKeyHints(renderer, btn1, btn2, btn3, btn4);
   renderer.setOrientation(orig_orientation);
 }
 
 void BaseTheme::drawSideButtonHints(const GfxRenderer& renderer, const char* topBtn, const char* bottomBtn) const {
-  if (gpio.hasTouch()) {
-    return;
-  }
-
-  const int screenWidth = renderer.getScreenWidth();
-  constexpr int buttonWidth = BaseMetrics::values.sideButtonHintsWidth;  // Width on screen (height when rotated)
-  constexpr int buttonHeight = 80;                                       // Height on screen (width when rotated)
-  constexpr int buttonMargin = 4;
-
-  if (gpio.deviceIsX3()) {
-    // X3 layout: Up on left side, Down on right side, positioned higher
-    constexpr int x3ButtonY = 155;
-
-    if (topBtn != nullptr && topBtn[0] != '\0') {
-      const int leftX = buttonMargin;
-      renderer.drawRect(leftX, x3ButtonY, buttonWidth, buttonHeight);
-      const int textWidth = renderer.getTextWidth(SMALL_FONT_ID, topBtn);
-      const int textHeight = renderer.getTextHeight(SMALL_FONT_ID);
-      const int textX = leftX + (buttonWidth - textHeight) / 2;
-      const int textY = x3ButtonY + (buttonHeight + textWidth) / 2;
-      renderer.drawTextRotated90CW(SMALL_FONT_ID, textX, textY, topBtn);
-    }
-
-    if (bottomBtn != nullptr && bottomBtn[0] != '\0') {
-      const int rightX = screenWidth - buttonMargin - buttonWidth;
-      renderer.drawRect(rightX, x3ButtonY, buttonWidth, buttonHeight);
-      const int textWidth = renderer.getTextWidth(SMALL_FONT_ID, bottomBtn);
-      const int textHeight = renderer.getTextHeight(SMALL_FONT_ID);
-      const int textX = rightX + (buttonWidth - textHeight) / 2;
-      const int textY = x3ButtonY + (buttonHeight + textWidth) / 2;
-      renderer.drawTextRotated90CW(SMALL_FONT_ID, textX, textY, bottomBtn);
-    }
-  } else {
-    // X4 layout: Both buttons stacked on right side
-    constexpr int topButtonY = 345;
-    const char* labels[] = {topBtn, bottomBtn};
-    const int x = screenWidth - buttonMargin - buttonWidth;
-
-    if (topBtn != nullptr && topBtn[0] != '\0') {
-      renderer.drawLine(x, topButtonY, x + buttonWidth - 1, topButtonY);
-      renderer.drawLine(x, topButtonY, x, topButtonY + buttonHeight - 1);
-      renderer.drawLine(x + buttonWidth - 1, topButtonY, x + buttonWidth - 1, topButtonY + buttonHeight - 1);
-    }
-
-    if ((topBtn != nullptr && topBtn[0] != '\0') || (bottomBtn != nullptr && bottomBtn[0] != '\0')) {
-      renderer.drawLine(x, topButtonY + buttonHeight, x + buttonWidth - 1, topButtonY + buttonHeight);
-    }
-
-    if (bottomBtn != nullptr && bottomBtn[0] != '\0') {
-      renderer.drawLine(x, topButtonY + buttonHeight, x, topButtonY + 2 * buttonHeight - 1);
-      renderer.drawLine(x + buttonWidth - 1, topButtonY + buttonHeight, x + buttonWidth - 1,
-                        topButtonY + 2 * buttonHeight - 1);
-      renderer.drawLine(x, topButtonY + 2 * buttonHeight - 1, x + buttonWidth - 1, topButtonY + 2 * buttonHeight - 1);
-    }
-
-    for (int i = 0; i < 2; i++) {
-      if (labels[i] != nullptr && labels[i][0] != '\0') {
-        const int y = topButtonY + i * buttonHeight;
-        const int textWidth = renderer.getTextWidth(SMALL_FONT_ID, labels[i]);
-        const int textHeight = renderer.getTextHeight(SMALL_FONT_ID);
-        const int textX = x + (buttonWidth - textHeight) / 2;
-        const int textY = y + (buttonHeight + textWidth) / 2;
-        renderer.drawTextRotated90CW(SMALL_FONT_ID, textX, textY, labels[i]);
-      }
-    }
-  }
+  stick_overlay::drawSideKeyHints(renderer, topBtn, bottomBtn);
 }
 
 int BaseTheme::getListRowStep(bool hasSubtitle) const {

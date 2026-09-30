@@ -101,7 +101,7 @@ void ButtonRemapActivity::render(RenderLock&&) {
         return getRoleName(i);
       }
     }
-    return "-";
+    return "";  // unassigned keys leave their hint slot empty
   };
 
   const auto& metrics = UITheme::getInstance().getMetrics();
