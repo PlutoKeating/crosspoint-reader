@@ -1,5 +1,7 @@
 #pragma once
 
+#include <ProjectStickPollPolicy.h>
+
 #include <string>
 
 #include "activities/Activity.h"
@@ -29,7 +31,11 @@ class ProjectStickActivity final : public Activity {
   ProjectStickService service;
   State state = State::Connecting;
   uint32_t backgroundResultSequence = 0;
-  uint32_t lastStudioPollMs = 0;
+  // Studio target polls follow the server's studio_poll_seconds (default
+  // 60 s); see ProjectStickPollPolicy.h.
+  project_stick::StudioPollSchedule studioPolls;
+  bool bleWasConnected = false;
+  bool reportPollRequested = false;
   uint32_t studioGeneration = 0;
   uint32_t firmwareUpdateGeneration = 0;
   // Front button hints appear on a key action and hide after

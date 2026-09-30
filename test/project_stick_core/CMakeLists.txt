@@ -23,3 +23,6 @@ target_sources(ProjectStickCoreTest PRIVATE ${REPO_ROOT}/lib/ProjectStick/BleSet
                ${REPO_ROOT}/lib/ProjectStick/BleCrypto.cpp BleSetupProtocolTest.cpp)
 target_compile_definitions(ProjectStickCoreTest PRIVATE BLE_CRYPTO_OPENSSL)
 target_link_libraries(ProjectStickCoreTest PRIVATE OpenSSL::Crypto)
+
+# Request cadence: Studio poll schedule and shared API backoff (header-only).
+target_sources(ProjectStickCoreTest PRIVATE PollPolicyTest.cpp)

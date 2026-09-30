@@ -23,6 +23,7 @@
 #include <HalStorage.h>
 #include <Logging.h>
 #include <Memory.h>
+#include <ProjectStickPollPolicy.h>
 #include <SecureHttpClient.h>
 #include <esp_system.h>
 #include <mbedtls/sha256.h>
@@ -53,6 +54,40 @@ bool projectStickStoreInitialized = false;
 // Bumped when a BLE bind replaces the device token/owner; pairing and
 // registration responses started before the bump are dropped.
 std::atomic<uint32_t> bleBindingGeneration{0};
+
+// One backoff gate for every cloud request, shared by the UI-side and the
+// background service instances: an overloaded or rate-limiting server (429,
+// 5xx, unreachable) is left alone for 30 s .. 10 min instead of being retried.
+std::mutex apiBackoffMutex;
+project_stick::ApiBackoff apiBackoff;
+
+void noteApiResult(int status, const std::string& retryAfter) {
+  std::lock_guard<std::mutex> lock(apiBackoffMutex);
+  const uint32_t retryAfterSeconds = project_stick::parseRetryAfterSeconds(retryAfter.c_str());
+  const bool wasBlocked = apiBackoff.failures() > 0;
+  apiBackoff.record(millis(), status, retryAfterSeconds);
+  if (project_stick::isBackoffStatus(status))
+    LOG_ERR("STICK", "API status %d: backing off (failures=%u retry-after=%us)", status,
+            (unsigned)apiBackoff.failures(), (unsigned)retryAfterSeconds);
+  else if (wasBlocked)
+    LOG_INF("STICK", "API reachable again; backoff cleared");
+}
+
+// The simulator's HTTP shim exposes no response headers; it falls back to the
+// exponential backoff on 429.
+std::string retryAfterHeader(freeink::SecureHttpClient& client) {
+#ifdef SIMULATOR
+  (void)client;
+  return "";
+#else
+  return client.getHeader("retry-after");
+#endif
+}
+
+bool apiBlockedNow() {
+  std::lock_guard<std::mutex> lock(apiBackoffMutex);
+  return apiBackoff.blocked(millis());
+}
 
 // Firmware identity and capabilities sent with pairing and registration.
 void describeFirmware(JsonDocument& request) {
@@ -294,6 +329,8 @@ bool ProjectStickService::registerDevice(int& status) {
     PROJECT_STICK_STORE.pollIntervalSeconds = std::clamp<uint32_t>(doc["poll_interval_seconds"] | 300, 30, 86400);
     PROJECT_STICK_STORE.alertPollIntervalSeconds =
         std::clamp<uint32_t>(doc["alert_poll_interval_seconds"] | 30, 10, 3600);
+    if (!doc["studio_poll_seconds"].isNull())
+      PROJECT_STICK_STORE.studioPollSeconds = project_stick::clampStudioPollSeconds(doc["studio_poll_seconds"] | int64_t(0));
     PROJECT_STICK_STORE.tradingDay = doc["is_trading_day"] | false;
     adoptOwner(doc["owner_id"] | "");
     PROJECT_STICK_STORE.bound = doc["bound"] | false;
@@ -417,13 +454,20 @@ bool ProjectStickService::requestPost(const std::string& path, const std::string
     return false;
   }
 #endif
-  for (uint8_t attempt = 0; attempt < 3; ++attempt) {
+  if (apiBlockedNow()) {
+    LOG_INF("STICK", "POST %s skipped: API backoff active", path.c_str());
+    return false;
+  }
+  // One extra attempt, and only for a transport failure (dropped keep-alive,
+  // Wi-Fi hiccup). A server answer, including 429/5xx, is never retried here:
+  // the shared backoff decides when the next request may go out.
+  for (uint8_t attempt = 0; attempt < 2; ++attempt) {
     const uint32_t attemptStartedMs = millis();
 #ifndef SIMULATOR
-    LOG_INF("STICK", "POST %s attempt %u/3 (heap=%u max=%u)", path.c_str(), (unsigned)attempt + 1,
+    LOG_INF("STICK", "POST %s attempt %u/2 (heap=%u max=%u)", path.c_str(), (unsigned)attempt + 1,
             (unsigned)ESP.getFreeHeap(), (unsigned)ESP.getMaxAllocHeap());
 #else
-    LOG_INF("STICK", "POST %s attempt %u/3 (simulator OpenSSL)", path.c_str(), (unsigned)attempt + 1);
+    LOG_INF("STICK", "POST %s attempt %u/2 (simulator OpenSSL)", path.c_str(), (unsigned)attempt + 1);
 #endif
     if (!http.begin(baseUrl + path)) {
       LOG_ERR("STICK", "POST %s has an invalid URL", path.c_str());
@@ -446,20 +490,24 @@ bool ProjectStickService::requestPost(const std::string& path, const std::string
 #else
     const bool complete = http.responseComplete();
 #endif
-    if (status > 0 && complete && status < 500) {
+    if (status > 0 && complete) {
+      noteApiResult(status, retryAfterHeader(http));
       LOG_INF("STICK", "POST %s completed (status=%d bytes=%u time=%ums)", path.c_str(), status,
               (unsigned)response.size(), (unsigned)(millis() - attemptStartedMs));
-      return true;
+      // 429 and 5xx are answers too, but callers treat them as failures.
+      return status != 429 && status < 500;
     }
     LOG_ERR("STICK", "POST %s failed (status=%d complete=%u bytes=%u)", path.c_str(), status, complete ? 1u : 0u,
             (unsigned)response.size());
-    if (attempt < 2) delay(250UL << attempt);
+    if (attempt == 0) delay(500);
   }
+  noteApiResult(status > 0 ? status : -1, "");
   return false;
 }
 
 bool ProjectStickService::fetchJson(const std::string& url, std::string& response, size_t maxBytes) {
-  for (uint8_t attempt = 0; attempt < 3; ++attempt) {
+  // Same policy as requestPost: one retry, for transport failures only.
+  for (uint8_t attempt = 0; attempt < 2; ++attempt) {
     response.clear();
     response.reserve(std::min<size_t>(maxBytes, 4096));
     const bool ok = fetchAuthenticated(url, [&response, maxBytes](const uint8_t* data, size_t length) {
@@ -468,7 +516,8 @@ bool ProjectStickService::fetchJson(const std::string& url, std::string& respons
       return true;
     });
     if (ok) return true;
-    if (attempt < 2) delay(250UL << attempt);
+    if (lastFetchStatus > 0) break;
+    if (attempt == 0) delay(500);
   }
   response.clear();
   return false;
@@ -482,7 +531,12 @@ bool ProjectStickService::fetchAuthenticated(const std::string& url,
     ProjectStickStateLock lock(projectStickStateMutex);
     deviceToken = PROJECT_STICK_STORE.deviceToken;
   }
+  lastFetchStatus = 0;
   if (!trustedClockReady()) return false;
+  if (apiBlockedNow()) {
+    lastFetchStatus = 429;  // not a transport failure: do not retry
+    return false;
+  }
   if (!http.begin(url)) return false;
   // Same pinned-root client with or without a credential; the ESP-IDF HTTP
   // client (and the mbedTLS TLS stack it pulls in) is not linked.
@@ -498,6 +552,10 @@ bool ProjectStickService::fetchAuthenticated(const std::string& url,
   const bool complete = http.responseComplete();
 #endif
   const bool success = status == 200 && complete && !http.callbackAborted();
+  // A body cut short by the network counts as a transport failure; a local
+  // abort (storage full) says nothing about the server.
+  lastFetchStatus = status > 0 && !complete && !http.callbackAborted() ? -1 : status;
+  noteApiResult(lastFetchStatus, retryAfterHeader(http));
   return success;
 }
 
@@ -630,6 +688,19 @@ uint32_t ProjectStickService::pollIntervalSeconds() const {
   ProjectStickStateLock lock(projectStickStateMutex);
   return PROJECT_STICK_STORE.pollIntervalSeconds;
 }
+uint32_t ProjectStickService::studioPollSeconds() const {
+  ProjectStickStateLock lock(projectStickStateMutex);
+  return PROJECT_STICK_STORE.studioPollSeconds;
+}
+bool ProjectStickService::apiBlocked() { return apiBlockedNow(); }
+bool ProjectStickService::apiRateLimited() {
+  std::lock_guard<std::mutex> lock(apiBackoffMutex);
+  return apiBackoff.rateLimited(millis());
+}
+bool ProjectStickService::clearBackoffForManualSync() {
+  std::lock_guard<std::mutex> lock(apiBackoffMutex);
+  return apiBackoff.clearForManual(millis());
+}
 uint32_t ProjectStickService::alertPollIntervalSeconds() const {
   ProjectStickStateLock lock(projectStickStateMutex);
   return PROJECT_STICK_STORE.alertPollIntervalSeconds;
@@ -716,6 +787,14 @@ void ProjectStickService::syncStudio() {
   JsonDocument doc;
   if (deserializeJson(doc, response)) return;
   adoptOwner(doc["owner_id"] | "");
+  if (!doc["studio_poll_seconds"].isNull()) {
+    ProjectStickStateLock lock(projectStickStateMutex);
+    const uint32_t seconds = project_stick::clampStudioPollSeconds(doc["studio_poll_seconds"] | int64_t(0));
+    if (PROJECT_STICK_STORE.studioPollSeconds != seconds) {
+      PROJECT_STICK_STORE.studioPollSeconds = seconds;
+      PROJECT_STICK_STORE.saveToFile();
+    }
+  }
   flushEvents();
   if (ota_trial::hasPendingOutcome()) reportFirmwareOutcome();
   // Servers with OTA protocol 2 say whether a command is queued; older ones

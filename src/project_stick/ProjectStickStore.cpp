@@ -1,5 +1,7 @@
 #include "ProjectStickStore.h"
 
+#include <ProjectStickPollPolicy.h>
+
 #include <algorithm>
 #include <utility>
 
@@ -11,6 +13,7 @@ void ProjectStickStore::toJson(JsonDocument& doc) const {
   doc["owner_id"] = ownerId;
   doc["poll_interval_seconds"] = pollIntervalSeconds;
   doc["alert_poll_interval_seconds"] = alertPollIntervalSeconds;
+  doc["studio_poll_seconds"] = studioPollSeconds;
   doc["is_trading_day"] = tradingDay;
   if (alertUntil.valid) {
     doc["alert_until_day"] = alertUntil.day;
@@ -41,6 +44,7 @@ bool ProjectStickStore::fromJson(JsonVariantConst doc) {
   ownerId = doc["owner_id"] | "";
   pollIntervalSeconds = std::clamp<uint32_t>(doc["poll_interval_seconds"] | 300, 30, 86400);
   alertPollIntervalSeconds = std::clamp<uint32_t>(doc["alert_poll_interval_seconds"] | 30, 10, 3600);
+  studioPollSeconds = project_stick::clampStudioPollSeconds(doc["studio_poll_seconds"] | int64_t(0));
   tradingDay = doc["is_trading_day"] | false;
   alertUntil.day = doc["alert_until_day"] | 0;
   alertUntil.secondOfDay = doc["alert_until_second"] | 0;

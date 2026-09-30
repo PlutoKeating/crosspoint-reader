@@ -44,6 +44,8 @@ void FirmwareUpdateActivity::startCheck() {
     return;
   }
   state = State::Checking;
+  // A user-initiated check may skip an error backoff (not a server rate limit).
+  ProjectStickService::clearBackoffForManualSync();
   awaitingWork = PROJECT_STICK_BACKGROUND_SYNC.requestFirmwareCheck();
   requestUpdate();
 }
@@ -51,6 +53,7 @@ void FirmwareUpdateActivity::startCheck() {
 void FirmwareUpdateActivity::startInstall() {
   state = State::Installing;
   firmware_update::reset();
+  ProjectStickService::clearBackoffForManualSync();
   awaitingWork = PROJECT_STICK_BACKGROUND_SYNC.requestFirmwareInstall(offer.id);
   requestUpdate();
 }

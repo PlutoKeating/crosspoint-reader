@@ -49,6 +49,13 @@ class ProjectStickService {
   uint32_t pendingEventCount() const;
   uint32_t pollIntervalSeconds() const;
   uint32_t alertPollIntervalSeconds() const;
+  uint32_t studioPollSeconds() const;
+  // Shared cloud backoff (429 / 5xx / unreachable): no request goes out while
+  // blocked. rateLimited() is the server-requested (429) part; a manual sync
+  // may clear an error backoff but never a rate limit.
+  static bool apiBlocked();
+  static bool apiRateLimited();
+  static bool clearBackoffForManualSync();
   bool isTradingDay() const;
   bool hasClock() const { return serverTime.valid; }
   bool isBound() const;
@@ -82,6 +89,8 @@ class ProjectStickService {
   bool requestPost(const std::string& path, const std::string& body, std::string& response, int& status);
   bool fetchJson(const std::string& url, std::string& response, size_t maxBytes);
   bool fetchAuthenticated(const std::string& url, const std::function<bool(const uint8_t*, size_t)>& onData);
+  // HTTP status of the last fetchAuthenticated (-1 transport failure, 429 while backing off).
+  int lastFetchStatus = 0;
   bool parseServerTime(const char* value);
   bool hashFile(const std::string& path, std::string& result);
   bool flushEvents();

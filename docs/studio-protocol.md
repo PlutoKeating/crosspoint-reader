@@ -61,8 +61,33 @@ Device-bearer `GET /api/v2/device/studio` returns desired task, payload size/has
 expiry, owner identity, BLE authority and accepted offline task. `frame?offset=`
 streams the remaining payload. POST reports receiving/verification/refresh states,
 `scheduled`, `displayed` with actual card ID, or failure. Late receipts cannot
-complete a newer target. A cloud poll occurs every five seconds while Wi-Fi is
-connected and BLE is idle.
+complete a newer target.
+
+### Poll cadence and backoff
+
+Every device request costs database queries on the server, whose daily budget
+is shared by all devices and the website simulator, so the cadence is set by
+the server and the device never retries hot:
+
+- The Studio target is polled every `studio_poll_seconds` (from `/register` and
+  from every `/studio` response; clamped to 15–3600 s, default 60 s, persisted)
+  while Wi-Fi is connected, the device is bound and BLE is idle.
+- Extra polls, each once: right after coming online (the sync includes the
+  poll), after a BLE session ends (reconciles a BLE-delivered task), and when a
+  cloud card first shows (sends the `displayed` receipt promptly). A manual
+  「同步」 runs a full sync and then three follow-up polls 10 s apart, so a
+  publish made moments earlier is picked up. The front-right 「换一张」 is local
+  only.
+- The `/register` heartbeat runs every `poll_interval_seconds` only while it is
+  due (every 4 h) or the device is unbound (pairing); `/alerts` runs every
+  `alert_poll_interval_seconds`, and only inside trading windows.
+- One backoff gate covers every request. Transport failures, 429 and 5xx block
+  all cloud requests for 30 s, 60 s, 120 s … up to 10 min (reset by any other
+  answer). A 429 honours `Retry-After` in seconds (capped at 10 min; the
+  simulator's HTTP shim exposes no headers and uses the exponential backoff)
+  and shows 「云端繁忙，稍后自动同步」 instead of a sync failure. A manual sync or
+  firmware check may skip an error backoff, never a 429. Requests retry once,
+  only on a transport failure; server answers are never retried in place.
 
 Ownership changes clear Studio data, pending events and alert state and rotate BLE
 credentials; device settings and saved Wi-Fi networks are kept. A revoked fully offline device cannot learn

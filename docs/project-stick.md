@@ -47,10 +47,14 @@ built in Simplified Chinese; other languages load from SD-card packs.
    `is_trading_day` and the register/alert poll intervals. A successful
    registration corrects the working clock; an owner change clears Studio data,
    pending events and alert state and rotates the BLE credential.
-5. While Wi-Fi is up and no BLE session is active, the Studio target is polled
-   every 5 seconds (`/api/v2/device/studio`, see
-   [studio-protocol.md](studio-protocol.md)). A register heartbeat runs at the
-   server-provided poll interval (every 4 hours once bound).
+5. While Wi-Fi is up, the device is bound and no BLE session is active, the
+   Studio target is polled every server-provided `studio_poll_seconds`
+   (default 60 s; `/api/v2/device/studio`), with one-off extra polls after
+   coming online, a BLE session or a newly shown cloud card, and a 3 × 10 s
+   burst after a manual 「同步」. A register heartbeat runs every 4 hours once
+   bound. 429 / 5xx / unreachable back off 30 s → 10 min (429 honours
+   `Retry-After`) across all requests; see "Poll cadence and backoff" in
+   [studio-protocol.md](studio-protocol.md).
 6. Until a Studio frame is installed, a bound device shows `还没有内容` and
    `请在小程序发布官方计划或卡片` (offline: `可在小程序设备页通过蓝牙设置 Wi-Fi`). The mini program
    seeds every account with the official scenes and plan and publishes that plan
@@ -164,7 +168,8 @@ them (see [i18n.md](i18n.md)).
   outline, Noto Sans SC 12 regular) with its thumb icon that slides
   from its key's edge to the centre in discrete frames over 360 ms
   (`没啥用！那试试下一条` / `有用！那就去执行`) and clears after 2.2 s. The
-  front-right key selects the next card without feedback.
+  front-right key selects the next card without feedback (local only, no
+  cloud request).
 - Without a Studio frame, Back opens the system menu (StockStick / Settings),
   Confirm opens Wi-Fi selection, and the front-right key registers and polls
   Studio immediately.
@@ -189,7 +194,7 @@ alerts once after the first successful sync, and
   4 KiB) and parsed with ArduinoJson from a bounded string.
 - Every HTTP GET completes before the next begins; one sync burst reuses the
   same keep-alive TLS connection.
-- Studio polls (every 5 s) keep that connection between polls only while the
+- Studio polls (every `studio_poll_seconds`, default 60 s) keep that connection between polls only while the
   heap has at least 80 KiB free with a 32 KiB contiguous block; the sync worker
   closes it after 45 s without work. A stale connection is retried once on a
   fresh one by SecureHttpClient.

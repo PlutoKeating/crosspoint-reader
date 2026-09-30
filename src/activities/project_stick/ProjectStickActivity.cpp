@@ -30,7 +30,6 @@ constexpr int QR_SIZE = 185;  // whole 5 px modules for version 5 (37 modules)
 constexpr int QR_GAP = 18;
 constexpr int CODE_GAP = 24;
 constexpr int PROMPT_GAP = 12;
-constexpr uint32_t STUDIO_POLL_MS = 5000;
 
 void drawNetworkStatusTag(const GfxRenderer& renderer, const Rect& headerBounds, int rightInset, bool connected) {
   const char* label = connected ? tr(STR_PROJECT_STICK_STATUS_ONLINE) : tr(STR_PROJECT_STICK_STATUS_OFFLINE);
@@ -82,9 +81,13 @@ void ProjectStickActivity::onEnter() {
 }
 
 bool ProjectStickActivity::requestCloudSync(bool registerFirst) {
-  if (WiFi.status() != WL_CONNECTED) return false;
+  if (WiFi.status() != WL_CONNECTED || ProjectStickService::apiBlocked()) return false;
   const bool queued = PROJECT_STICK_BACKGROUND_SYNC.requestSync(registerFirst);
-  if (queued) lastSyncAttemptMs = millis();
+  if (queued) {
+    lastSyncAttemptMs = millis();
+    // A full sync includes the Studio poll.
+    studioPolls.polled(lastSyncAttemptMs);
+  }
   return queued;
 }
 
@@ -97,9 +100,15 @@ void ProjectStickActivity::syncNow() {
     requestUpdate();
     return;
   }
+  if (!ProjectStickService::clearBackoffForManualSync()) {
+    // The server asked devices to slow down; the next attempt is automatic.
+    setStatus(tr(STR_PROJECT_STICK_BUSY));
+    requestUpdate();
+    return;
+  }
   state = State::Connecting;
   setStatus(tr(STR_PROJECT_STICK_SYNCING));
-  requestCloudSync(true);
+  if (requestCloudSync(true)) studioPolls.startBurst();
   requestUpdate();
 }
 
@@ -139,6 +148,12 @@ void ProjectStickActivity::updateState(const project_stick::SyncReport& report) 
       setStatus(tr(STR_PROJECT_STICK_INACTIVE));
       break;
     case ProjectStickService::SyncResult::Failed:
+      if (WiFi.status() == WL_CONNECTED && ProjectStickService::apiRateLimited()) {
+        // Rate limited (429): keep showing the content; retry is automatic.
+        if (state != State::Inactive) state = State::Online;
+        setStatus(tr(STR_PROJECT_STICK_BUSY));
+        break;
+      }
       state = WiFi.status() == WL_CONNECTED ? State::Error : State::Offline;
       setStatus(state == State::Error ? tr(STR_PROJECT_STICK_FAILED) : tr(STR_PROJECT_STICK_OFFLINE));
       break;
@@ -213,8 +228,8 @@ void ProjectStickActivity::loop() {
   auto startOnlineSync = [this] {
     state = State::Connecting;
     setStatus(tr(STR_PROJECT_STICK_SYNCING));
-    requestCloudSync(true);
-    lastStudioPollMs = millis() - STUDIO_POLL_MS;  // poll the Studio target right away
+    // The sync includes a Studio poll; if backoff holds it, poll once allowed.
+    if (!requestCloudSync(true)) studioPolls.pollNow();
     requestUpdate();
   };
   if (!firmware_update::snapshot().busy() && wifiAutoConnect.tick(millis()) && state != State::Inactive) {
@@ -239,8 +254,23 @@ void ProjectStickActivity::loop() {
     studioGeneration = frame.generation();
     requestUpdate();
   }
-  if (!studio_ble::connected() && WiFi.status() == WL_CONNECTED && millis() - lastStudioPollMs >= STUDIO_POLL_MS) {
-    if (PROJECT_STICK_BACKGROUND_SYNC.requestStudioPoll()) lastStudioPollMs = millis();
+  // One follow-up poll after a BLE session (reconciles a BLE-delivered task)
+  // and once when a cloud card first shows (sends the "displayed" receipt).
+  const bool bleConnected = studio_ble::connected();
+  if (bleWasConnected && !bleConnected && service.isBound()) studioPolls.pollNow();
+  bleWasConnected = bleConnected;
+  if (frame.needsReport() && frame.displaySnapshot().origin == "cloud") {
+    if (!reportPollRequested) {
+      reportPollRequested = true;
+      studioPolls.pollNow();
+    }
+  } else {
+    reportPollRequested = false;
+  }
+  studioPolls.setIntervalSeconds(service.studioPollSeconds());
+  if (!bleConnected && service.isBound() && WiFi.status() == WL_CONNECTED && !ProjectStickService::apiBlocked() &&
+      studioPolls.due(millis())) {
+    if (PROJECT_STICK_BACKGROUND_SYNC.requestStudioPoll()) studioPolls.polled(millis());
   }
   applyBackgroundResult();
 #ifdef SIMULATOR
@@ -285,24 +315,30 @@ void ProjectStickActivity::loop() {
   if (frontButton == HalGPIO::BTN_RIGHT) {
     if (!studio.hash.empty()) {
       // With a Studio program installed the right key is the manual "next card".
+      // Local only: the program plays on the device, the scheduled Studio
+      // poll picks up anything new.
       frame.tick(studioNow, 1, alertUntil);
       requestUpdate();
-      requestCloudSync(project_stick::registrationDue(millis(), lastRegisterMs));
       return;
     }
     syncNow();
     return;
   }
 
-  // Periodic register heartbeat keeps binding, owner and clock current; the
-  // Studio target itself is polled every few seconds above.
+  // Periodic sync every poll_interval_seconds, only when there is something
+  // the Studio poll does not cover: the register heartbeat (binding, owner,
+  // clock; every 4 h) or pairing while unbound. The Studio target itself is
+  // polled on its own schedule above. Nothing goes out while the shared API
+  // backoff holds (429 / 5xx / unreachable).
   const uint32_t nowMs = millis();
-  if (!studio_ble::connected() && state != State::Inactive && WiFi.status() == WL_CONNECTED &&
+  const bool cloudAllowed = !studio_ble::connected() && state != State::Inactive && WiFi.status() == WL_CONNECTED &&
+                            !ProjectStickService::apiBlocked();
+  const bool registerDue = project_stick::registrationDue(nowMs, lastRegisterMs);
+  if (cloudAllowed && (registerDue || !service.isBound()) &&
       nowMs - lastSyncAttemptMs >= service.pollIntervalSeconds() * 1000UL) {
-    requestCloudSync(project_stick::registrationDue(nowMs, lastRegisterMs) || !service.isBound());
+    requestCloudSync(true);
   }
-  if (!studio_ble::connected() && state != State::Inactive && WiFi.status() == WL_CONNECTED &&
-      nowMs - lastAlertPollMs >= service.alertPollIntervalSeconds() * 1000UL) {
+  if (cloudAllowed && nowMs - lastAlertPollMs >= service.alertPollIntervalSeconds() * 1000UL) {
     if (PROJECT_STICK_BACKGROUND_SYNC.requestAlertPoll()) lastAlertPollMs = nowMs;
   }
 }
