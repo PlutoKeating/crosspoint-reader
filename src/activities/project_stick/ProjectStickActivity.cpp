@@ -144,12 +144,9 @@ void ProjectStickActivity::updateState(const project_stick::SyncReport& report) 
   requestUpdate();
 }
 
-bool ProjectStickActivity::handlesKeyguard() { return !StudioFrame::instance().snapshot().hash.empty(); }
-
 void ProjectStickActivity::updateButtonHints(const uint32_t nowMs) {
-  // The keyguard (20 s idle) always engages after the 5 s hint timeout, and
-  // while locked the render task only overlays the lock icon, so hints are
-  // never on screen in the locked state.
+  // Hints appear on any key action and hide after 5 s; the 20 s keyguard
+  // always engages later, and locked presses show the unlock prompt instead.
   if (mappedInput.isKeyguardLocked()) {
     buttonHintsVisible = false;
     return;
@@ -168,8 +165,41 @@ void ProjectStickActivity::updateButtonHints(const uint32_t nowMs) {
   }
 }
 
+void ProjectStickActivity::showFeedbackBubble(const stick_overlay::Bubble bubble) {
+  {
+    RenderLock lock;
+    feedbackBubble = bubble;
+    feedbackBubbleStartedMs = millis();
+    feedbackBubbleFrame = 0;
+  }
+  requestUpdate(true);
+}
+
+// Advances the bubble through its discrete slide frames, then clears it.
+void ProjectStickActivity::updateFeedbackBubble() {
+  bool repaint = false;
+  {
+    RenderLock lock;
+    if (feedbackBubble == stick_overlay::Bubble::None) return;
+    const uint32_t elapsed = millis() - feedbackBubbleStartedMs;
+    if (elapsed >= stick_overlay::BUBBLE_VISIBLE_MS || mappedInput.isKeyguardLocked()) {
+      feedbackBubble = stick_overlay::Bubble::None;
+      repaint = true;
+    } else {
+      const uint8_t frame =
+          std::min<uint32_t>(stick_overlay::BUBBLE_FINAL_FRAME, elapsed / stick_overlay::BUBBLE_FRAME_MS);
+      if (frame != feedbackBubbleFrame) {
+        feedbackBubbleFrame = frame;
+        repaint = true;
+      }
+    }
+  }
+  if (repaint) requestUpdate();
+}
+
 void ProjectStickActivity::loop() {
   updateButtonHints(millis());
+  updateFeedbackBubble();
   studio_ble::tick();
   if (service.refreshOwnership()) requestUpdate();
   auto& frame = StudioFrame::instance();
@@ -211,28 +241,24 @@ void ProjectStickActivity::loop() {
   // ("一般": next card) and BTN_DOWN is on the right edge ("有用": keep).
   if (mappedInput.wasReleased(MappedInputManager::Button::Up)) {
     if (!studio.hash.empty()) {
+      service.sendStudioFeedback(studio.task, studio.card, false);
       frame.tick(studioNow, 1, alertUntil);
-      if (frame.feedback() != 1) service.sendStudioFeedback(studio.task, studio.card, false);
-      requestUpdate();
+      showFeedbackBubble(stick_overlay::Bubble::Meh);
     }
     return;
   }
   if (mappedInput.wasReleased(MappedInputManager::Button::Down)) {
     if (!studio.hash.empty()) {
       frame.tick(studioNow, 2, alertUntil);
-      if (frame.feedback() != 1)
-        service.sendStudioFeedback(frame.displaySnapshot().task, frame.displaySnapshot().card, true);
-      requestUpdate();
+      service.sendStudioFeedback(frame.displaySnapshot().task, frame.displaySnapshot().card, true);
+      showFeedbackBubble(stick_overlay::Bubble::Useful);
     }
     return;
   }
 
-  // Fixed physical front-button positions: Back / Wi-Fi / unassigned / Sync.
+  // Fixed physical front-button positions: Back / Wi-Fi / unassigned / Sync
+  // (or "换一张" while a Studio card is shown).
   const int frontButton = mappedInput.getPressedFrontButton();
-  if (frontButton >= 0 && !studio.hash.empty() && frame.guardKey(studioNow)) {
-    requestUpdate();
-    return;
-  }
   if (frontButton == HalGPIO::BTN_BACK) {
     onGoHome(HomeMenuItem::PROJECT_STICK);
     return;
@@ -360,10 +386,22 @@ void ProjectStickActivity::renderStatusScreen() {
                               true);
   }
 
-  if (buttonHintsVisible && !mappedInput.isKeyguardLocked()) {
-    GUI.drawButtonHints(renderer, tr(STR_BACK), tr(STR_PROJECT_STICK_CONNECT_WIFI), "", tr(STR_PROJECT_STICK_SYNC));
+}
+
+// Transient layers over the frame or status screen: the unlock prompt while
+// locked, otherwise the key hints and the feedback window.
+void ProjectStickActivity::drawOverlays(const bool studio) {
+  if (mappedInput.isKeyguardLocked()) {
+    stick_overlay::drawKeyguard(renderer, mappedInput.keyguardState(), mappedInput.isKeyguardPromptVisible(),
+                                mappedInput.keyguardCueFrame());
+    return;
   }
-  renderer.displayBuffer();
+  if (buttonHintsVisible) {
+    if (studio) stick_overlay::drawSideKeyHints(renderer, feedbackBubble == stick_overlay::Bubble::None);
+    GUI.drawButtonHints(renderer, tr(STR_BACK), tr(STR_PROJECT_STICK_CONNECT_WIFI), "",
+                        studio ? tr(STR_PROJECT_STICK_NEXT_CARD) : tr(STR_PROJECT_STICK_SYNC));
+  }
+  if (studio) stick_overlay::drawFeedbackBubble(renderer, feedbackBubble, feedbackBubbleFrame);
 }
 
 void ProjectStickActivity::render(RenderLock&&) {
@@ -373,13 +411,24 @@ void ProjectStickActivity::render(RenderLock&&) {
     return;
   }
   if (StudioFrame::instance().render(renderer)) {
+    drawOverlays(true);
     renderer.displayBuffer();
+    // Overlays are transient; the card underneath is what was displayed.
     StudioFrame::instance().displayed();
     return;
   }
-  // An installed program with no current frame keeps the last visual.
-  if (!StudioFrame::instance().snapshot().hash.empty()) return;
+  // An installed program with no current frame keeps the last visual; only
+  // the lock can be layered onto it.
+  if (!StudioFrame::instance().snapshot().hash.empty()) {
+    if (mappedInput.isKeyguardLocked()) {
+      drawOverlays(false);
+      renderer.displayBuffer();
+    }
+    return;
+  }
   renderStatusScreen();
+  drawOverlays(false);
+  renderer.displayBuffer();
 }
 
 void ProjectStickActivity::setStatus(const char* text) {

@@ -23,6 +23,7 @@ bool MappedInputManager::updateKeyguard(const uint32_t nowMs, const bool enabled
     keyguardStarted = true;
     publishedKeyguardState.store(keyguard.state(), std::memory_order_release);
     publishedKeyguardPromptVisible.store(false, std::memory_order_release);
+    publishedKeyguardCueFrame.store(0, std::memory_order_release);
     return changed;
   }
   if (!keyguardStarted) {
@@ -36,6 +37,7 @@ bool MappedInputManager::updateKeyguard(const uint32_t nowMs, const bool enabled
         nowMs, activity ? project_stick::Keyguard::Input::Activity : project_stick::Keyguard::Input::None);
     publishedKeyguardState.store(keyguard.state(), std::memory_order_release);
     publishedKeyguardPromptVisible.store(keyguard.promptVisible(), std::memory_order_release);
+    publishedKeyguardCueFrame.store(0, std::memory_order_release);
     return changed;
   }
 
@@ -55,7 +57,10 @@ bool MappedInputManager::updateKeyguard(const uint32_t nowMs, const bool enabled
     input = project_stick::Keyguard::Input::ButtonActivity;
   }
   suppressButtonsThisFrame = input != project_stick::Keyguard::Input::None;
-  const bool changed = keyguard.update(nowMs, input);
+  bool changed = keyguard.update(nowMs, input);
+  const uint8_t cue = keyguard.cueFrame(nowMs);
+  if (cue != publishedKeyguardCueFrame.load(std::memory_order_relaxed)) changed = true;
+  publishedKeyguardCueFrame.store(cue, std::memory_order_release);
   publishedKeyguardState.store(keyguard.state(), std::memory_order_release);
   publishedKeyguardPromptVisible.store(keyguard.promptVisible(), std::memory_order_release);
   return changed;

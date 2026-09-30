@@ -40,13 +40,17 @@ actual program card and current override context. With no current scheduled fram
 a newly installed program is `scheduled`, not `displayed`, and retains the last
 valid visual.
 
-Studio desktop input is direct. Portable mode's first press after the configured
-idle interval only unlocks. Studio bypasses the older global keyguard while it
-owns the foreground; other activities retain their original keyguard.
-Unlock/next/useful overlays use the same glyphs and physical 56×40 rectangle at
-(236,732) as the mini-program runtime preview, for two seconds. Only the companion
-activity draws Studio content. `displayBuffer` completion is the software receipt
-boundary, not a physical panel-readback sensor.
+Since 2.2.0 every key that reaches Studio acts: the device-wide Nokia keyguard
+(20 s idle, left-then-right unlock) owns locking on the Studio page as on every
+other page, so the plan's `keyguardSeconds` no longer locks input and `mode`
+only selects the idle power policy. The playback engine's portable first-press
+unlock is bypassed by refreshing `lastKey` before each key event. Key hints, the
+left/right feedback windows and the lock prompt are transient overlays drawn
+over the frame (see [project-stick.md](project-stick.md#x3-controls)); they do
+not alter the stored card, and the software receipt still reports the card
+underneath. Only the companion activity draws Studio content. `displayBuffer`
+completion is the software receipt boundary, not a physical panel-readback
+sensor.
 
 Portable idle CPU policy keeps scheduling and BLE running. Battery lifetime and
 BLE/TLS memory coexistence require X3 measurements, not simulator estimates.
@@ -121,6 +125,6 @@ Release uses the IDF BLE controller and NimBLE-Arduino peripheral host, with LTO
 Check the actual binary-size verifier as well as the outer PlatformIO status:
 nested size failures must not be hidden by an outer SUCCESS. Native SDL builds also compile this state/render path; the adjacent
 StockStick `scripts/studio-native-fixture.ts` and `check-studio-screens.ts` verify
-exact pixels for base cards, unlock and next feedback. See its QUICK_START for the
+exact pixels for base cards. See its QUICK_START for the
 isolated offline fixture command. Neither these tests nor the build certify real
 BLE throughput, mobile permissions, panel refresh, power usage or OTA boot safety.

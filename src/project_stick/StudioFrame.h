@@ -36,8 +36,6 @@ class StudioFrame {
   void restore();
   bool hasProgram() const;
   bool portable() const;
-  bool guardKey(int64_t now);
-  int feedback() const;
   int64_t nextBoundary(int64_t now) const;
   Snapshot snapshot() const;
   Snapshot displaySnapshot() const;
@@ -55,8 +53,6 @@ class StudioFrame {
   size_t pixelOffset = 0, headerOffset = 0;
   int selectedFrame = -1, alertFrame = -1;
   bool alertDisplayed = false;
-  int feedbackSignal = 0;
-  uint32_t feedbackAt = 0;
   bool readProgram(const Snapshot& snapshot, studio::Program& result, size_t& start);
   HalFile output;
   mbedtls_sha256_context sha{};

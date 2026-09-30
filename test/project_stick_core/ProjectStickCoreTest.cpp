@@ -49,6 +49,22 @@ TEST(ProjectStickKeyguard, UnlockRequiresLeftThenRight) {
   EXPECT_FALSE(keyguard.promptVisible());
 }
 
+TEST(ProjectStickKeyguard, RightKeyCueAnimatesOnlyAfterTheLeftStep) {
+  Keyguard keyguard;
+  keyguard.begin(0);
+  ASSERT_TRUE(keyguard.update(Keyguard::LOCK_AFTER_MS));
+  EXPECT_EQ(keyguard.cueFrame(20500), 0);
+  ASSERT_TRUE(keyguard.update(21000, Keyguard::Input::LeftSide));
+  EXPECT_EQ(keyguard.cueFrame(21000), 0);
+  EXPECT_EQ(keyguard.cueFrame(21000 + Keyguard::CUE_FRAME_MS), 1);
+  EXPECT_EQ(keyguard.cueFrame(21000 + 10 * Keyguard::CUE_FRAME_MS), Keyguard::CUE_FINAL_FRAME);
+  // A repeated left release keeps the running cue instead of restarting it.
+  keyguard.update(21100, Keyguard::Input::LeftSide);
+  EXPECT_EQ(keyguard.cueFrame(21000 + Keyguard::CUE_FRAME_MS), 1);
+  ASSERT_TRUE(keyguard.update(22000, Keyguard::Input::RightSide));
+  EXPECT_EQ(keyguard.cueFrame(22500), 0);
+}
+
 TEST(ProjectStickKeyguard, FrontButtonRestartsAnIncompleteUnlock) {
   Keyguard keyguard;
   keyguard.begin(0);

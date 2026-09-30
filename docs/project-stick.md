@@ -93,27 +93,32 @@ All StockStick strings come from the built-in Simplified Chinese catalogue
 (`lib/I18n/translations/chinese.yaml`); an SD-card language pack can override
 them (see [i18n.md](i18n.md)).
 
-- The four protruding front buttons are protected by a global X3 keyguard in
-  every activity except while a Studio frame owns the screen (Studio has its own
-  portable-mode lock, see [studio-protocol.md](studio-protocol.md)). After 20
-  seconds without button or touch activity, all non-power button events are
-  suppressed. Locking only adds a 12-pixel-high lock icon at the top left.
-- Unlocking follows the Nokia-style physical sequence: release the left side
-  button, then release the right side button. Pressing any non-power button
-  reveals `请依次按左、右侧边键解锁`; after the first step it changes to
-  `左侧键已确认，请按右侧边键解锁`. The right-side release that unlocks is
-  consumed. The power button remains available while locked, and cloud
-  synchronization continues in the background.
-- With a Studio frame installed: the left side button (`Up`) is "一般" (show
-  the next card, `studio_next`), the right side button (`Down`) is "有用" (keep
-  the card, `studio_useful`), and the front-right button selects the next card
-  without feedback. Feedback overlays use the physical 56×40 box at (236,732)
-  for two seconds, identical to the mini program's run simulation.
-- Without a Studio frame the front hints read 返回 / Wi-Fi / – / 同步: Back opens
-  the system menu (StockStick / Settings), Confirm opens Wi-Fi selection, and
-  the front-right button registers and polls Studio immediately. The hints
-  appear on any key action, hide after 5 seconds without one and never show
-  while locked.
+- Any key action pops up the button hints and they hide after 5 seconds
+  without one. Front hints read 返回 / Wi-Fi / – / 同步 (换一张 while a Studio
+  card is shown); on a Studio card the side keys are also outlined with thumbs
+  icons and the labels 没啥用 (left) / 有用 (right). Hints never show while
+  locked.
+- A device-wide Nokia-style keyguard (since 2.2.0 also on the Studio card page)
+  locks after 20 seconds without button or touch activity: all non-power
+  button events are suppressed and only a 12-pixel lock icon is added at the
+  top left; content keeps updating underneath. The power button always works
+  and cloud synchronization continues.
+- Unlock by releasing the left side key, then the right side key. A key press
+  while locked shows `屏幕已锁定，请依次按左、右侧边键解锁` with the two keys
+  marked 1 and 2; after the left step the prompt inverts to
+  `左侧键已确认，请按右侧边键解锁`, the left key shows a check, the right key is
+  filled and a chevron cue slides toward it in three 150 ms frames. Right-first
+  does nothing, a front key restarts at the left step, and the unlocking right
+  release is consumed (it never sends feedback).
+- With a Studio frame installed: the left side key is "没啥用" (show the next
+  card, `studio_next`) and the right side key is "有用" (keep the card,
+  `studio_useful`). Each shows a white, thin-outlined feedback window without a
+  tail that slides from its key's edge to the centre in discrete frames over
+  360 ms (`没啥用！那试试下一条` / `有用！那就去执行`) and clears after 2.2 s.
+  The front-right key selects the next card without feedback.
+- Without a Studio frame, Back opens the system menu (StockStick / Settings),
+  Confirm opens Wi-Fi selection, and the front-right key registers and polls
+  Studio immediately.
 
 ## Desktop simulator
 

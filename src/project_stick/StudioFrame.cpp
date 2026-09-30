@@ -235,7 +235,6 @@ bool StudioFrame::commit() {
   alertFrame = -1;
   alertDisplayed = false;
   pixelOffset = 0;
-  feedbackSignal = 0;
   if (incoming.size > BYTES) {
     savedProgram = incoming;
     program = std::move(nextProgram);
@@ -342,30 +341,18 @@ bool StudioFrame::render(const GfxRenderer& renderer) {
       if (row[x / 8] & (0x80 >> (x & 7))) renderer.drawPixel(x, y, true);
   }
   file.close();
-  if (feedbackSignal > 0 && feedbackSignal <= 3) {
-    static const uint8_t glyphs[3][8] = {{0x1c, 0x22, 0x20, 0x7e, 0x42, 0x5a, 0x42, 0x7e},
-                                         {0x08, 0x0c, 0xfe, 0xff, 0xfe, 0x0c, 0x08, 0},
-                                         {0, 0x01, 0x03, 0x86, 0xcc, 0x78, 0x30, 0}};
-    for (int y = 0; y < 40; y++)
-      for (int x = 0; x < 56; x++) {
-        const int gx = (x - 16) / 3, gy = (y - 8) / 3;
-        const bool ink = x == 0 || x == 55 || y == 0 || y == 39 ||
-                         (x >= 16 && y >= 8 && gx < 8 && gy < 8 && (glyphs[feedbackSignal - 1][gy] & (0x80 >> gx)));
-        renderer.drawPixel(x + 236, y + 732, ink);
-      }
-  }
   return true;
 }
 void StudioFrame::displayed() {
   std::lock_guard<std::recursive_mutex> lock(mutex);
   if (alertFrame >= 0) {
-    if (!alertDisplayed && feedbackSignal == 0) {
+    if (!alertDisplayed) {
       alertDisplayed = true;
       reportPending = true;
     }
     return;
   }
-  if (!active.displayed && feedbackSignal == 0 && (active.size == BYTES || selectedFrame >= 0)) {
+  if (!active.displayed && (active.size == BYTES || selectedFrame >= 0)) {
     active.displayed = true;
     reportPending = true;
   }
@@ -542,7 +529,6 @@ void StudioFrame::restore() {
   alertFrame = -1;
   alertDisplayed = false;
   active.displayed = false;
-  feedbackSignal = 0;
   selectedFrame = -1;
   pixelOffset = headerOffset;
   persist();
@@ -556,10 +542,6 @@ void StudioFrame::tick(int64_t now, int event, int64_t alertUntil) {
   std::lock_guard<std::recursive_mutex> lock(mutex);
   if (now <= 0) return;
   if (active.expires > 0 && now >= active.expires) restore();
-  if (feedbackSignal && millis() - feedbackAt > 2000) {
-    feedbackSignal = 0;
-    ++revision;
-  }
   if (active.hash.empty()) return;
   if (active.size == BYTES) {
     int overlay = -1;
@@ -575,21 +557,17 @@ void StudioFrame::tick(int64_t now, int event, int64_t alertUntil) {
       ++revision;
     }
     if (!event) return;
-    const bool locked = program.mode == "portable" && program.keyguard > 0 && now - playback.lastKey > program.keyguard;
     playback.lastKey = now;
-    feedbackSignal = locked ? 1 : event == 1 ? 2 : 3;
-    feedbackAt = millis();
-    ++revision;
-    if (locked || alertFrame >= 0 || event != 1 || savedProgram.hash.empty()) return;
+    // "Next" on a temporary card returns to the installed program.
+    if (alertFrame >= 0 || event != 1 || savedProgram.hash.empty()) return;
     restore();
   }
   if (program.cardIds.empty()) return;
+  // The device-wide Nokia keyguard owns locking since 2.2.0, so every key that
+  // reaches Studio acts: refresh lastKey first so the program's own
+  // portable-mode first-press unlock never swallows it.
+  if (event) playback.lastKey = now;
   const int index = studio::step(program, playback, now, event, alertUntil);
-  if (event && playback.signal) {
-    feedbackSignal = playback.signal;
-    feedbackAt = millis();
-    ++revision;
-  }
   if (index < 0) return;
   if (index != selectedFrame) {
     selectedFrame = index;
@@ -607,26 +585,9 @@ int64_t StudioFrame::nextBoundary(int64_t now) const {
   return now > 1735689600 && !savedProgram.hash.empty() ? studio::boundary(program, now) : -1;
 }
 
-bool StudioFrame::guardKey(int64_t now) {
-  std::lock_guard<std::recursive_mutex> lock(mutex);
-  const bool locked = program.mode == "portable" && program.keyguard > 0 && now - playback.lastKey > program.keyguard;
-  playback.lastKey = now;
-  if (locked) {
-    feedbackSignal = 1;
-    feedbackAt = millis();
-    ++revision;
-  }
-  return locked;
-}
-
 bool StudioFrame::portable() const {
   std::lock_guard<std::recursive_mutex> lock(mutex);
   return !savedProgram.hash.empty() && program.mode == "portable";
-}
-
-int StudioFrame::feedback() const {
-  std::lock_guard<std::recursive_mutex> lock(mutex);
-  return feedbackSignal;
 }
 
 void StudioFrame::collectGarbage() {

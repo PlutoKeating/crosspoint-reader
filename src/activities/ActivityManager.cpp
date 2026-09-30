@@ -8,6 +8,7 @@
 
 #include "boot_sleep/BootActivity.h"
 #include "boot_sleep/SleepActivity.h"
+#include "components/StickOverlays.h"
 #include "components/UITheme.h"
 #include "fontIds.h"
 #include "home/CrashActivity.h"
@@ -45,7 +46,7 @@ void ActivityManager::renderTaskLoop() {
     // Acquire the lock before reading currentActivity to avoid a TOCTOU race
     // where the main task deletes the activity between the null-check and render().
     RenderLock lock;
-    if (mappedInput.isKeyguardLocked()) {
+    if (mappedInput.isKeyguardLocked() && !(currentActivity && currentActivity->composesKeyguardOverlay())) {
       HalPowerManager::Lock powerLock;
       renderKeyguard(std::move(lock));
     } else if (currentActivity) {
@@ -65,34 +66,10 @@ void ActivityManager::renderTaskLoop() {
 }
 
 void ActivityManager::renderKeyguard(RenderLock&&) {
-  const int width = renderer.getScreenWidth();
-  const int height = renderer.getScreenHeight();
-  const bool leftCompleted = mappedInput.keyguardState() == project_stick::Keyguard::State::AwaitRight;
-
   // Preserve the current activity framebuffer. Locking is a status overlay,
   // not a navigation event or a replacement screen.
-  constexpr int iconHeight = BaseMetrics::values.batteryHeight;
-  constexpr int iconWidth = 12;
-  constexpr int iconX = 12;
-  constexpr int iconY = BaseMetrics::values.topPadding;
-  renderer.fillRect(iconX, iconY, iconWidth, iconHeight, false);
-  renderer.drawRoundedRect(iconX + 3, iconY, iconWidth - 6, 8, 1, 3, true);
-  renderer.fillRoundedRect(iconX, iconY + 5, iconWidth, iconHeight - 5, 2, Color::Black);
-  renderer.fillRect(iconX + iconWidth / 2, iconY + 8, 1, 3, false);
-
-  if (mappedInput.isKeyguardPromptVisible()) {
-    constexpr int bubbleHeight = 42;
-    constexpr int bubbleBottomMargin = 8;
-    const int bubbleWidth = std::min(width - 24, 440);
-    const int bubbleX = (width - bubbleWidth) / 2;
-    const int bubbleY = height - bubbleHeight - bubbleBottomMargin;
-    renderer.fillRoundedRect(bubbleX, bubbleY, bubbleWidth, bubbleHeight, 10, Color::White);
-    renderer.drawRoundedRect(bubbleX, bubbleY, bubbleWidth, bubbleHeight, 2, 10, true);
-    const Rect bubble{bubbleX + 12, bubbleY, bubbleWidth - 24, bubbleHeight};
-    UITheme::drawCenteredText(renderer, bubble, UI_10_FONT_ID, bubbleY + 10,
-                              leftCompleted ? "左侧键已确认，请按右侧边键解锁" : "请依次按左、右侧边键解锁", true,
-                              EpdFontFamily::BOLD);
-  }
+  stick_overlay::drawKeyguard(renderer, mappedInput.keyguardState(), mappedInput.isKeyguardPromptVisible(),
+                              mappedInput.keyguardCueFrame());
   renderer.displayBuffer();
 }
 

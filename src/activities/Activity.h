@@ -43,6 +43,10 @@ class Activity {
 
   virtual bool skipLoopDelay() { return false; }
   virtual bool handlesKeyguard() { return false; }
+  // True when render() draws the keyguard overlay itself while locked (so the
+  // activity keeps updating its content underneath); otherwise the manager only
+  // overlays the lock on the last framebuffer.
+  virtual bool composesKeyguardOverlay() const { return false; }
   virtual bool allowIdlePowerSaving() { return false; }
   virtual bool preventAutoSleep() { return false; }
   // Returns true when the activity schedules its own forced refresh.

@@ -33,6 +33,8 @@ class MappedInputManager {
     return publishedKeyguardState.load(std::memory_order_acquire);
   }
   bool isKeyguardPromptVisible() const { return publishedKeyguardPromptVisible.load(std::memory_order_acquire); }
+  // Frame of the "press the right key" cue after the left unlock step.
+  uint8_t keyguardCueFrame() const { return publishedKeyguardCueFrame.load(std::memory_order_acquire); }
   bool wasPressed(Button button) const;
   bool wasReleased(Button button) const;
   bool isPressed(Button button) const;
@@ -98,6 +100,7 @@ class MappedInputManager {
   project_stick::Keyguard keyguard;
   std::atomic<project_stick::Keyguard::State> publishedKeyguardState{project_stick::Keyguard::State::Unlocked};
   std::atomic<bool> publishedKeyguardPromptVisible{false};
+  std::atomic<uint8_t> publishedKeyguardCueFrame{0};
   bool keyguardStarted = false;
   bool suppressButtonsThisFrame = false;
 };

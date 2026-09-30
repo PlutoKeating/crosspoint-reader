@@ -1,6 +1,7 @@
 #pragma once
 
 #include "activities/Activity.h"
+#include "components/StickOverlays.h"
 #include "network/WifiAutoConnect.h"
 #include "project_stick/ProjectStickBackgroundSync.h"
 #include "project_stick/ProjectStickService.h"
@@ -15,7 +16,9 @@ class ProjectStickActivity final : public Activity {
   void render(RenderLock&&) override;
   bool preventAutoSleep() override { return true; }
   bool allowIdlePowerSaving() override;
-  bool handlesKeyguard() override;
+  // The device-wide keyguard applies here too; this page draws its overlay so a
+  // card change underneath still shows while locked.
+  bool composesKeyguardOverlay() const override { return true; }
   bool skipLoopDelay() override;
 
  private:
@@ -33,6 +36,13 @@ class ProjectStickActivity final : public Activity {
   bool buttonHintsVisible = false;
   uint32_t lastKeyActionMs = 0;
   void updateButtonHints(uint32_t nowMs);
+  // Feedback window after a side key: slides in from that key's edge.
+  stick_overlay::Bubble feedbackBubble = stick_overlay::Bubble::None;
+  uint32_t feedbackBubbleStartedMs = 0;
+  uint8_t feedbackBubbleFrame = 0;
+  void showFeedbackBubble(stick_overlay::Bubble bubble);
+  void updateFeedbackBubble();
+  void drawOverlays(bool studio);
   WifiAutoConnect wifiAutoConnect;
   void renderFirmwareUpdate();
   void renderStatusScreen();
