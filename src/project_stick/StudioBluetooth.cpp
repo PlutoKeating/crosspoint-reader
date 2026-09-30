@@ -8,6 +8,8 @@
 
 #include "StudioFrame.h"
 #ifndef SIMULATOR
+#include <optional>
+
 #include <Arduino.h>
 #include <NimBLEDevice.h>
 #include <esp_system.h>
@@ -28,6 +30,18 @@ int64_t taskExpires = 0, planBoundary = 0;
 uint32_t epoch = 0, lastActivity = 0;
 bool paused = false;
 bool started = false, authenticated = false, isConnected = false;
+// Setup mode (unbound): one-time key K shown in the QR. Each connection pins
+// its key: a setup session keeps K until disconnect even after a bind.
+std::string setupKey, sessionKey;
+bool sessionSetup = false;
+enum class BindState { None, Pending, Done, Failed };
+BindState bindState = BindState::None;
+std::optional<Binding> pendingBinding;
+std::optional<WifiRequest> pendingWifi;
+bool scanRequested = false;
+WifiState wifiState = WifiState::Idle;
+std::string wifiSsid, wifiError, scanState = "idle";
+std::vector<ble_setup::Network> networks;
 uint16_t connectionHandle = 0xffff;
 mbedtls_aes_context aes{};
 uint8_t counter[16]{}, stream[16]{};
@@ -52,14 +66,7 @@ bool unhex(const std::string& value, uint8_t* output, size_t size) {
   }
   return true;
 }
-std::string mac(const std::string& message) {
-  uint8_t key[32], output[32];
-  if (!unhex(secret, key, 32)) return "";
-  if (mbedtls_md_hmac(mbedtls_md_info_from_type(MBEDTLS_MD_SHA256), key, 32,
-                      reinterpret_cast<const uint8_t*>(message.data()), message.size(), output) != 0)
-    return "";
-  return hex(output, 32);
-}
+std::string mac(const std::string& message) { return ble_setup::mac(sessionKey, message); }
 bool equalProof(const std::string& a, const std::string& b) {
   if (a.size() != 64 || b.size() != 64) return false;
   unsigned diff = 0;
@@ -70,6 +77,8 @@ void resetSession() {
   if (authenticated && state == "receiving") StudioFrame::instance().abort();
   if (authenticated) mbedtls_aes_free(&aes);
   authenticated = false;
+  sessionSetup = secret.empty();
+  sessionKey = sessionSetup ? setupKey : secret;
   control.clear();
   task.clear();
   hash.clear();
@@ -90,7 +99,43 @@ void fail(const char* reason) {
   state = "failed";
   if (authenticated) StudioFrame::instance().abort(true);
 }
+const char* wifiStateName() {
+  switch (wifiState) {
+    case WifiState::Connecting:
+      return "connecting";
+    case WifiState::Connected:
+      return "connected";
+    case WifiState::Failed:
+      return "failed";
+    default:
+      return "idle";
+  }
+}
+void addWifi(JsonDocument& doc) {
+  JsonObject wifi = doc["wifi"].to<JsonObject>();
+  wifi["state"] = wifiStateName();
+  if (!wifiSsid.empty()) wifi["ssid"] = wifiSsid;
+  if (!wifiError.empty()) wifi["error"] = wifiError;
+  doc["scan"] = scanState;
+}
+std::string finishStatus(JsonDocument& doc) {
+  std::string result;
+  serializeJson(doc, result);
+  return scanState == "done" ? ble_setup::withNetworks(result, networks) : result;
+}
 std::string statusJson() {
+  if (sessionSetup) {
+    JsonDocument doc;
+    doc["protocol"] = 3;
+    doc["mode"] = "setup";
+    doc["nonce"] = nonce;
+    doc["fw"] = CROSSPOINT_VERSION;
+    doc["bound"] = bindState == BindState::Done;
+    addWifi(doc);
+    if (!error.empty()) doc["error"] = error;
+    doc["proof"] = mac(ble_setup::setupProofMessage(nonce, identity));
+    return finishStatus(doc);
+  }
   const auto snapshot = StudioFrame::instance().snapshot();
   if (authenticated && snapshot.task == task) {
     if (snapshot.displayed)
@@ -118,9 +163,60 @@ std::string statusJson() {
   } else
     doc["proof"] = mac("hello|" + identity + "|" + nonce + "|" + std::to_string(epoch) + "|" + baseTask + "|" +
                        std::to_string(planBoundary));
-  std::string result;
-  serializeJson(doc, result);
-  return result;
+  addWifi(doc);
+  return finishStatus(doc);
+}
+// Setup ops (protocol 3) never abort a frame transfer; a bad request only
+// sets the STATUS error.
+bool reject(const char* reason) {
+  error = reason;
+  return true;
+}
+bool validOwner(const std::string& owner) { return owner.size() == 36; }
+// Returns true when the control op was a setup/Wi-Fi op (handled here).
+bool handleSetupOp(const std::string& op, JsonDocument& doc) {
+  const std::string proof = doc["proof"] | "";
+  if (op == "scan") {
+    if (!equalProof(proof, mac(ble_setup::scanMessage(nonce)))) return reject("authorization_failed");
+    error.clear();
+    scanRequested = true;
+    scanState = "scanning";
+    return true;
+  }
+  if (op == "wifi") {
+    const std::string ssid = doc["ssid"] | "", pw = doc["pw"] | "";
+    if (!equalProof(proof, mac(ble_setup::wifiMessage(nonce, ssid, pw)))) return reject("authorization_failed");
+    std::string password;
+    if (ssid.empty() || ssid.size() > 32 || !ble_setup::unseal(sessionKey, "wifi3", nonce, pw, password) ||
+        password.size() > 63)
+      return reject("invalid_control");
+    error.clear();
+    pendingWifi = WifiRequest{ssid, password};
+    wifiState = WifiState::Connecting;
+    wifiSsid = ssid;
+    wifiError.clear();
+    return true;
+  }
+  if (op == "bind") {
+    if (!sessionSetup || bindState == BindState::Pending || bindState == BindState::Done)
+      return reject("invalid_control");
+    const std::string owner = doc["owner"] | "", ct = doc["ct"] | "";
+    const uint32_t keyEpoch = doc["epoch"] | uint32_t(0);
+    if (!equalProof(proof, mac(ble_setup::bindMessage(nonce, owner, keyEpoch, ct))))
+      return reject("authorization_failed");
+    std::string plaintext;
+    Binding binding;
+    binding.owner = owner;
+    binding.epoch = keyEpoch;
+    if (!validOwner(owner) || keyEpoch == 0 || !ble_setup::unseal(sessionKey, "bind3", nonce, ct, plaintext) ||
+        !ble_setup::splitBindPlaintext(plaintext, binding.token, binding.secret))
+      return reject("invalid_control");
+    error.clear();
+    pendingBinding = std::move(binding);
+    bindState = BindState::Pending;
+    return true;
+  }
+  return false;
 }
 class ServerCallbacks final : public NimBLEServerCallbacks {
   void onConnect(NimBLEServer* server, NimBLEConnInfo& info) override {
@@ -185,6 +281,11 @@ class Callbacks final : public NimBLECharacteristicCallbacks {
       return;
     }
     const std::string op = doc["op"] | "";
+    if (handleSetupOp(op, doc)) return;
+    if (sessionSetup) {
+      reject("unexpected_control");
+      return;
+    }
     if (op == "begin" && !authenticated) {
       const std::string incomingTask = doc["task"] | "", incomingHash = doc["hash"] | "", proof = doc["proof"] | "";
       const int64_t expires = doc["expires"] | int64_t(0);
@@ -247,6 +348,25 @@ class Callbacks final : public NimBLECharacteristicCallbacks {
 };
 ServerCallbacks serverCallbacks;
 Callbacks callbacks;
+
+void writeCredentials() {
+  Storage.mkdir("/.crosspoint/studio", true);
+  HalFile file;
+  if (Storage.openFileForWrite("STUDIO", CREDENTIALS, file)) {
+    JsonDocument doc;
+    doc["owner_id"] = authorityOwner;
+    doc["device_id"] = identity;
+    doc["secret"] = secret;
+    doc["epoch"] = epoch;
+    serializeJson(doc, file);
+    file.close();
+  }
+}
+bool validIdentity() { return identity.size() == 36; }
+bool validSecret() {
+  uint8_t decoded[32];
+  return unhex(secret, decoded, 32);
+}
 }  // namespace
 void configure(const std::string& deviceId, const std::string& key, uint32_t keyEpoch, const std::string& owner) {
   std::lock_guard<std::recursive_mutex> lock(mutex);
@@ -260,18 +380,9 @@ void configure(const std::string& deviceId, const std::string& key, uint32_t key
   identity = deviceId;
   secret = key;
   epoch = keyEpoch;
+  setupKey.clear();
   if (started && !paused) NimBLEDevice::startAdvertising();
-  Storage.mkdir("/.crosspoint/studio", true);
-  HalFile file;
-  if (Storage.openFileForWrite("STUDIO", CREDENTIALS, file)) {
-    JsonDocument doc;
-    doc["owner_id"] = authorityOwner;
-    doc["device_id"] = identity;
-    doc["secret"] = secret;
-    doc["epoch"] = epoch;
-    serializeJson(doc, file);
-    file.close();
-  }
+  writeCredentials();
 }
 void pause(bool value) {
   std::lock_guard<std::recursive_mutex> lock(mutex);
@@ -280,16 +391,18 @@ void pause(bool value) {
   if (value) {
     NimBLEDevice::getAdvertising()->stop();
     if (isConnected) NimBLEDevice::getServer()->disconnect(connectionHandle);
-  } else if (!secret.empty())
+  } else if (!secret.empty() || !setupKey.empty())
     NimBLEDevice::startAdvertising();
 }
 void revoke() {
   std::lock_guard<std::recursive_mutex> lock(mutex);
+  if (secret.empty()) return;
   if (isConnected) NimBLEDevice::getServer()->disconnect(connectionHandle);
   resetSession();
   identity.clear();
   secret.clear();
   epoch = 0;
+  bindState = BindState::None;
   Storage.remove(CREDENTIALS);
   if (started) NimBLEDevice::getAdvertising()->stop();
 }
@@ -298,19 +411,22 @@ void begin() {
   if (started || paused) return;
   if (secret.empty()) {
     HalFile file;
-    if (!Storage.openFileForRead("STUDIO", CREDENTIALS, file)) return;
-    JsonDocument doc;
-    const auto error = deserializeJson(doc, file);
-    file.close();
-    if (error) return;
-    authorityOwner = doc["owner_id"] | "";
-    identity = doc["device_id"] | "";
-    secret = doc["secret"] | "";
-    epoch = doc["epoch"] | 0;
+    if (Storage.openFileForRead("STUDIO", CREDENTIALS, file)) {
+      JsonDocument doc;
+      const auto parseError = deserializeJson(doc, file);
+      file.close();
+      if (!parseError) {
+        authorityOwner = doc["owner_id"] | "";
+        identity = doc["device_id"] | "";
+        secret = doc["secret"] | "";
+        epoch = doc["epoch"] | 0;
+      }
+    }
   }
-  uint8_t decoded[32];
-  if (identity.size() != 36 || !unhex(secret, decoded, 32)) return;
-  NimBLEDevice::init("StockStick X3");
+  if (!validIdentity() || (!validSecret() && setupKey.empty())) return;
+  if (validSecret()) setupKey.clear();
+  const std::string name = ble_setup::advertisedName(identity);
+  NimBLEDevice::init(name.c_str());
   NimBLEDevice::setMTU(247);
   auto* server = NimBLEDevice::createServer();
   server->setCallbacks(&serverCallbacks, false);
@@ -321,7 +437,7 @@ void begin() {
   service->start();
   auto* advertising = NimBLEDevice::getAdvertising();
   advertising->addServiceUUID(SERVICE);
-  advertising->setName("StockStick X3");
+  advertising->setName(name.c_str());
   advertising->enableScanResponse(true);
   advertising->start();
   started = true;
@@ -344,8 +460,76 @@ bool connected() {
   std::lock_guard<std::recursive_mutex> lock(mutex);
   return isConnected;
 }
+void setup(const std::string& deviceId) {
+  std::lock_guard<std::recursive_mutex> lock(mutex);
+  if (!secret.empty() || deviceId.size() != 36) return;
+  if (identity == deviceId && !setupKey.empty()) return;
+  identity = deviceId;
+  uint8_t key[ble_setup::SETUP_KEY_BYTES];
+  esp_fill_random(key, sizeof(key));
+  setupKey = ble_setup::hex(key, sizeof(key));
+  bindState = BindState::None;
+  if (!started)
+    begin();
+  else if (!paused && !isConnected)
+    NimBLEDevice::startAdvertising();
+}
+std::string setupPayload() {
+  std::lock_guard<std::recursive_mutex> lock(mutex);
+  if (!secret.empty() || setupKey.empty() || !validIdentity()) return "";
+  return ble_setup::setupQrPayload(identity, setupKey);
+}
+bool takeBinding(Binding& out) {
+  std::lock_guard<std::recursive_mutex> lock(mutex);
+  if (!pendingBinding) return false;
+  out = std::move(*pendingBinding);
+  pendingBinding.reset();
+  return true;
+}
+void finishBinding(bool ok, const Binding& binding) {
+  std::lock_guard<std::recursive_mutex> lock(mutex);
+  if (!ok) {
+    bindState = BindState::Failed;
+    error = "bind_failed";
+    return;
+  }
+  // The live setup session keeps K (sessionKey) until the phone disconnects;
+  // the next connection resets into bound mode with this secret.
+  authorityOwner = binding.owner;
+  secret = binding.secret;
+  epoch = binding.epoch;
+  setupKey.clear();
+  bindState = BindState::Done;
+  writeCredentials();
+}
+bool takeWifiRequest(WifiRequest& out) {
+  std::lock_guard<std::recursive_mutex> lock(mutex);
+  if (!pendingWifi) return false;
+  out = std::move(*pendingWifi);
+  pendingWifi.reset();
+  return true;
+}
+bool takeScanRequest() {
+  std::lock_guard<std::recursive_mutex> lock(mutex);
+  const bool requested = scanRequested;
+  scanRequested = false;
+  return requested;
+}
+void reportWifi(WifiState state, const std::string& ssid, const char* reason) {
+  std::lock_guard<std::recursive_mutex> lock(mutex);
+  wifiState = state;
+  wifiSsid = ssid;
+  wifiError = reason ? reason : "";
+}
+void reportScan(bool scanning, std::vector<ble_setup::Network> found) {
+  std::lock_guard<std::recursive_mutex> lock(mutex);
+  scanState = scanning ? "scanning" : "done";
+  if (!scanning) networks = ble_setup::normalizeNetworks(std::move(found));
+}
 }  // namespace studio_ble
 #else
+#include <random>
+
 namespace studio_ble {
 void configure(const std::string&, const std::string&, uint32_t, const std::string&) {}
 void revoke() {}
@@ -353,5 +537,25 @@ void pause(bool) {}
 void begin() {}
 void tick() {}
 bool connected() { return false; }
+// The desktop/web simulator has no BLE radio; it still shows the setup QR so
+// the unbound screen can be previewed.
+namespace {
+std::string simIdentity, simKey;
+}
+void setup(const std::string& deviceId) {
+  if (deviceId.size() != 36 || (simIdentity == deviceId && !simKey.empty())) return;
+  simIdentity = deviceId;
+  std::random_device random;
+  uint8_t key[ble_setup::SETUP_KEY_BYTES];
+  for (auto& byte : key) byte = static_cast<uint8_t>(random());
+  simKey = ble_setup::hex(key, sizeof(key));
+}
+std::string setupPayload() { return simKey.empty() ? "" : ble_setup::setupQrPayload(simIdentity, simKey); }
+bool takeBinding(Binding&) { return false; }
+void finishBinding(bool, const Binding&) {}
+bool takeWifiRequest(WifiRequest&) { return false; }
+bool takeScanRequest() { return false; }
+void reportWifi(WifiState, const std::string&, const char*) {}
+void reportScan(bool, std::vector<ble_setup::Network>) {}
 }  // namespace studio_ble
 #endif

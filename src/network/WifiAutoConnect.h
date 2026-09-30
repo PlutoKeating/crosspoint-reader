@@ -14,6 +14,12 @@ class WifiAutoConnect {
   bool tick(uint32_t nowMs);
   // Retry immediately on the next tick (e.g. after the user closes Wi-Fi setup).
   void retrySoon() { nextAttemptMs = 0; }
+  // Stand aside for `ms` while another owner drives the radio (a Wi-Fi join
+  // or scan requested over BLE setup); an in-flight attempt is abandoned.
+  void holdOff(uint32_t nowMs, uint32_t ms) {
+    connecting = false;
+    nextAttemptMs = nowMs + ms;
+  }
 
   static constexpr uint32_t CONNECT_TIMEOUT_MS = 15000;
   static constexpr uint32_t FIRST_BACKOFF_MS = 10000;

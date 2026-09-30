@@ -1,5 +1,7 @@
 #pragma once
 
+#include <string>
+
 #include "activities/Activity.h"
 #include "components/StickOverlays.h"
 #include "network/WifiAutoConnect.h"
@@ -44,6 +46,27 @@ class ProjectStickActivity final : public Activity {
   void updateFeedbackBubble();
   void drawOverlays(bool studio);
   WifiAutoConnect wifiAutoConnect;
+  // BLE setup (protocol 3): bind, Wi-Fi join and scan requested by the phone.
+  static constexpr uint32_t BLE_WIFI_TIMEOUT_MS = 20000;
+  static constexpr uint32_t BLE_SCAN_TIMEOUT_MS = 15000;
+  static constexpr uint32_t BLE_WIFI_MESSAGE_MS = 6000;
+  std::string setupPayload;
+  std::string bleWifiSsid;
+  bool bleWifiActive = false;
+  bool bleScanActive = false;
+  bool bleScanPending = false;
+  bool syncAfterBle = false;
+  uint32_t bleWifiStartedMs = 0;
+  uint32_t bleScanStartedMs = 0;
+  // Transient status-screen line for a BLE Wi-Fi push (nullptr when none).
+  const char* bleWifiMessage = nullptr;
+  uint32_t bleWifiMessageUntilMs = 0;
+  void tickBleSetup();
+  void startBleWifi(const std::string& ssid, const std::string& password);
+  void pollBleWifi();
+  void startBleScan();
+  void pollBleScan();
+  void showBleWifiMessage(const char* message, uint32_t durationMs);
   void renderFirmwareUpdate();
   void renderStatusScreen();
   uint32_t lastSyncAttemptMs = 0;

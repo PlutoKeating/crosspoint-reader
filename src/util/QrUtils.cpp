@@ -4,15 +4,12 @@
 #include <qrcode.h>
 
 #include <algorithm>
+#include <cstdint>
 #include <memory>
 
 #include "Logging.h"
 
 void QrUtils::drawQrCode(const GfxRenderer& renderer, const Rect& bounds, const std::string& textPayload) {
-  // Dynamically calculate the QR code version based on text length
-  // Version 4 holds ~114 bytes, Version 10 ~395, Version 20 ~1066, up to 40
-  // qrcode.h max version is 40.
-  // Formula: approx version = size / 26 + 1 (very rough estimate, better to find best fit)
   size_t len = textPayload.length();
 
   // Truncate to max QR capacity at a UTF-8 safe boundary to avoid splitting multi-byte sequences
@@ -25,11 +22,13 @@ void QrUtils::drawQrCode(const GfxRenderer& renderer, const Rect& bounds, const 
     payload = truncated.c_str();
   }
 
-  int version = 4;
-  if (len > 114) version = 10;
-  if (len > 395) version = 20;
-  if (len > 1066) version = 30;
-  if (len > 2110) version = 40;
+  // Smallest version whose byte-mode capacity at ECC_LOW holds the payload
+  // (ISO/IEC 18004 table 7). Byte mode applies to any lowercase URL.
+  static constexpr uint16_t BYTE_CAPACITY_L[40] = {
+      17,   32,   53,   78,   106,  134,  154,  192,  230,  271,  321,  367,  425,  458,  520,  586,  644,  718,  792,  858,
+      929,  1003, 1091, 1171, 1273, 1367, 1465, 1528, 1628, 1732, 1840, 1952, 2068, 2188, 2303, 2431, 2563, 2699, 2809, 2953};
+  int version = 1;
+  while (version < 40 && BYTE_CAPACITY_L[version - 1] < len) ++version;
 
   // Make sure we have a large enough buffer on the heap to avoid blowing the stack
   uint32_t bufferSize = qrcode_getBufferSize(version);

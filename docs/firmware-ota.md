@@ -21,8 +21,8 @@
 
 ```ini
 [crosspoint]
-version = 2.2.2            ; semver，展示给用户并与服务端目录比对（≤ 31 字节）
-build = 20202              ; 单调递增的构建号，OTA 比较它而不是字符串
+version = 2.3.0            ; semver，展示给用户并与服务端目录比对（≤ 31 字节）
+build = 20300              ; 单调递增的构建号，OTA 比较它而不是字符串
 min_install_build = 20000  ; 本固件愿意安装的最低构建号
 ```
 

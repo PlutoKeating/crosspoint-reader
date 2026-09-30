@@ -53,6 +53,11 @@ class ProjectStickService {
   bool hasClock() const { return serverTime.valid; }
   bool isBound() const;
   std::string pairingCode() const;
+  std::string deviceId() const;
+  // Stores the credential a phone delivered over BLE setup (protocol 3):
+  // device token, owner and bound=true. Any registration already in flight
+  // with the previous identity state is discarded instead of applied.
+  bool applyBleBinding(const std::string& deviceToken, const std::string& owner);
   project_stick::ShanghaiTime now() const;
 
  private:

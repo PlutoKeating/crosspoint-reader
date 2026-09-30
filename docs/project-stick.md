@@ -29,14 +29,20 @@ built in Simplified Chinese; other languages load from SD-card packs.
    5 min), so boot, deep-sleep wake and OTA restarts come back online without
    user input; the offline->online edge registers and polls immediately.
 3. The service keeps a persistent UUID v4 identity and a device bearer
-   credential obtained from `/api/v2/device/pairing`. The credential is persisted
-   on SD but never written to logs or rendered. While unbound, every sync
-   re-pairs, which refreshes the eight-character binding code (valid for 10
-   minutes on the server), and the screen shows the code and its
-   `stockstick://bind?code=` QR. If the server already committed the claim
+   credential, persisted on SD but never written to logs or rendered. An
+   unbound device (since 2.3.0) runs BLE setup mode and its status screen shows
+   `用小程序扫码绑定` with the setup QR `stockstick://setup?d=<device_id>&k=<K>`
+   (K: 16 random bytes generated in RAM on entering the unbound state; QR
+   version 5-L). The phone binds the device and pushes Wi-Fi over Bluetooth —
+   no working cloud link is needed, and sync errors never replace this screen
+   while unbound. See "BLE setup" below. As a fallback, while online every sync
+   also re-pairs over `/api/v2/device/pairing`, which refreshes the
+   eight-character binding code (valid for 10 minutes); it is shown under the
+   QR as `或输入绑定码 XXXXXXXX`. If the server already committed the claim
    (pairing answers 409), registration continues and returns the authoritative
    `bound` state. An unbound identity whose token the server rejects (401) is
-   replaced by a fresh identity.
+   replaced by a fresh identity, unless a BLE bind replaced the token in the
+   meantime (pairing/registration responses that raced a BLE bind are dropped).
 4. `/api/v2/device/register` returns `bound`, `owner_id`, `server_time`,
    `is_trading_day` and the register/alert poll intervals. A successful
    registration corrects the working clock; an owner change clears Studio data,
@@ -46,11 +52,39 @@ built in Simplified Chinese; other languages load from SD-card packs.
    [studio-protocol.md](studio-protocol.md)). A register heartbeat runs at the
    server-provided poll interval (every 4 hours once bound).
 6. Until a Studio frame is installed, a bound device shows `还没有内容` and
-   `请在小程序发布官方计划或卡片` (or a Wi-Fi prompt when offline). The mini program
+   `请在小程序发布官方计划或卡片` (offline: `可在小程序设备页通过蓝牙设置 Wi-Fi`). The mini program
    seeds every account with the official scenes and plan and publishes that plan
    right after binding, so this screen is normally transient.
 7. Studio feedback events (`studio_next`, `studio_useful`) are persisted in the
    state file and uploaded after the Studio poll; the queue is capped at 32.
+
+## BLE setup (protocol 3, since 2.3.0)
+
+The wire protocol is defined in Project.StockStick
+`docs/product/BLE-SETUP.md`; the firmware side lives in
+`src/project_stick/StudioBluetooth.cpp` (GATT, sessions, ops),
+`lib/ProjectStick/BleSetupProtocol.cpp` (MAC strings, AES-256-CTR seal, QR
+payload, capped STATUS network list; host-tested against the shared vectors)
+and `ProjectStickActivity::tickBleSetup` (applies queued work).
+
+- Advertised name `StockStick-XXXX` (first four hex digits of the device id)
+  in both modes. Unbound: setup mode keyed with K; bound: the cloud-issued
+  secret (protocol 2 `begin`/`commit` unchanged, plus `scan`/`wifi`).
+- Each connection pins its key. After `bind` the live setup session keeps K
+  until the phone disconnects, so the phone can bind and then push Wi-Fi in one
+  connection; the next connection is in bound mode.
+- NimBLE callbacks only verify and queue. The activity loop applies a bind
+  (`ProjectStickService::applyBleBinding`: token, owner, `bound=true`, pairing
+  code cleared, no BLE revoke; then the BLE credential is written like
+  `configure`), a Wi-Fi join (saved to `WifiCredentialStore` and marked last
+  connected; auto-connect stands aside; 20 s, errors `no_ap` /
+  `wrong_password` / `timeout`) and an async scan (top 5 by RSSI, STATUS kept
+  within 512 bytes).
+- Cloud requests wait while a phone is connected over BLE; the offline->online
+  edge and the first registration after a BLE bind run once it disconnects.
+- `studio_ble::revoke()` is a no-op in setup mode, so the unbound register
+  heartbeat never tears down a setup session. The desktop/web simulator has no
+  radio but still renders the setup QR.
 
 ## Market alerts
 

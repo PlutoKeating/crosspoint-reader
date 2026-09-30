@@ -28,6 +28,7 @@
 #include <mbedtls/sha256.h>
 
 #include <algorithm>
+#include <atomic>
 #include <cctype>
 #include <cstdio>
 #include <cstdlib>
@@ -49,6 +50,9 @@ namespace {
 std::recursive_mutex projectStickStateMutex;
 using ProjectStickStateLock = std::lock_guard<std::recursive_mutex>;
 bool projectStickStoreInitialized = false;
+// Bumped when a BLE bind replaces the device token/owner; pairing and
+// registration responses started before the bump are dropped.
+std::atomic<uint32_t> bleBindingGeneration{0};
 
 // Firmware identity and capabilities sent with pairing and registration.
 void describeFirmware(JsonDocument& request) {
@@ -202,6 +206,7 @@ bool ProjectStickService::ensurePairing(int& status) {
     deviceId = PROJECT_STICK_STORE.deviceId;
     deviceToken = PROJECT_STICK_STORE.deviceToken;
   }
+  const uint32_t generation = bleBindingGeneration.load();
   JsonDocument request;
   request["device_id"] = deviceId;
   describeFirmware(request);
@@ -209,12 +214,17 @@ bool ProjectStickService::ensurePairing(int& status) {
   serializeJson(request, body);
   std::string response;
   if (!requestPost("/api/v2/device/pairing", body, response, status) || status != 200) return false;
+  if (generation != bleBindingGeneration.load()) {
+    status = 0;
+    return false;
+  }
   JsonDocument doc;
   if (deserializeJson(doc, response)) return false;
   const std::string returnedToken = doc["device_token"] | "";
   const std::string returnedCode = doc["pairing_code"] | "";
   if (returnedCode.size() != 8 || (deviceToken.empty() && returnedToken.empty())) return false;
   ProjectStickStateLock lock(projectStickStateMutex);
+  if (generation != bleBindingGeneration.load() || PROJECT_STICK_STORE.bound) return false;
   if (!returnedToken.empty()) PROJECT_STICK_STORE.deviceToken = returnedToken.substr(0, 96);
   PROJECT_STICK_STORE.pairingCode = returnedCode.substr(0, 8);
   return PROJECT_STICK_STORE.saveToFile();
@@ -222,6 +232,7 @@ bool ProjectStickService::ensurePairing(int& status) {
 
 bool ProjectStickService::registerDevice(int& status) {
   LOG_INF("STICK", "Registering device (firmware=%s)", CROSSPOINT_VERSION);
+  const uint32_t generation = bleBindingGeneration.load();
   bool bound = false;
   {
     ProjectStickStateLock lock(projectStickStateMutex);
@@ -233,6 +244,8 @@ bool ProjectStickService::registerDevice(int& status) {
       // restored or copied, or a token lost mid-pairing). Nothing is bound to
       // it, so start over with a fresh identity instead of failing forever.
       ProjectStickStateLock lock(projectStickStateMutex);
+      // A phone may have bound the device over BLE meanwhile (new token).
+      if (generation != bleBindingGeneration.load() || PROJECT_STICK_STORE.bound) return false;
       LOG_ERR("STICK", "Unbound identity %s was rejected; creating a new one", PROJECT_STICK_STORE.deviceId.c_str());
       PROJECT_STICK_STORE.deviceId = makeUuid();
       PROJECT_STICK_STORE.deviceToken.clear();
@@ -273,6 +286,11 @@ bool ProjectStickService::registerDevice(int& status) {
   uint32_t alertSeconds = 30;
   {
     ProjectStickStateLock lock(projectStickStateMutex);
+    if (generation != bleBindingGeneration.load()) {
+      LOG_INF("STICK", "Registration raced a BLE bind; discarding the response");
+      status = 0;
+      return false;
+    }
     PROJECT_STICK_STORE.pollIntervalSeconds = std::clamp<uint32_t>(doc["poll_interval_seconds"] | 300, 30, 86400);
     PROJECT_STICK_STORE.alertPollIntervalSeconds =
         std::clamp<uint32_t>(doc["alert_poll_interval_seconds"] | 30, 10, 3600);
@@ -629,6 +647,32 @@ bool ProjectStickService::isBound() const {
 std::string ProjectStickService::pairingCode() const {
   ProjectStickStateLock lock(projectStickStateMutex);
   return PROJECT_STICK_STORE.pairingCode;
+}
+
+std::string ProjectStickService::deviceId() const {
+  ProjectStickStateLock lock(projectStickStateMutex);
+  return PROJECT_STICK_STORE.deviceId;
+}
+
+bool ProjectStickService::applyBleBinding(const std::string& deviceToken, const std::string& owner) {
+  ProjectStickStateLock lock(projectStickStateMutex);
+  bleBindingGeneration.fetch_add(1);
+  auto& s = PROJECT_STICK_STORE;
+  if (s.ownerId != owner) {
+    // Same reset as adoptOwner, minus revoke(): the BLE credential for this
+    // owner arrives with the bind and is persisted by studio_ble.
+    StudioFrame::instance().clear();
+    s.alertUntil = {};
+    s.pendingEvents.clear();
+    s.seenAlertIds.clear();
+  }
+  s.ownerId = owner;
+  s.deviceToken = deviceToken.substr(0, 96);
+  s.bound = true;
+  s.pairingCode.clear();
+  const bool saved = s.saveToFile();
+  LOG_INF("STICK", "Bound over BLE (owner=%s saved=%u)", owner.c_str(), saved ? 1u : 0u);
+  return saved;
 }
 
 

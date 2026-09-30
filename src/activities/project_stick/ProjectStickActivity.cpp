@@ -7,9 +7,11 @@
 
 #include <algorithm>
 #include <cstdio>
+#include <cstring>
 
 #include "MappedInputManager.h"
 #include "ProjectStickCore.h"
+#include "WifiCredentialStore.h"
 #include "activities/network/WifiSelectionActivity.h"
 #include "components/UITheme.h"
 #include "fontIds.h"
@@ -24,7 +26,7 @@ constexpr int NETWORK_TAG_HORIZONTAL_PADDING = 8;
 constexpr int NETWORK_TAG_DOT_SIZE = 5;
 constexpr int NETWORK_TAG_DOT_GAP = 5;
 constexpr int COMPACT_HEADER_BATTERY_RESERVE = 90;
-constexpr int QR_SIZE = 180;
+constexpr int QR_SIZE = 185;  // whole 5 px modules for version 5 (37 modules)
 constexpr int QR_GAP = 18;
 constexpr int CODE_GAP = 24;
 constexpr int PROMPT_GAP = 12;
@@ -201,19 +203,32 @@ void ProjectStickActivity::loop() {
   updateButtonHints(millis());
   updateFeedbackBubble();
   studio_ble::tick();
+  tickBleSetup();
   if (service.refreshOwnership()) requestUpdate();
   auto& frame = StudioFrame::instance();
   const auto studio = frame.snapshot();
   const int64_t studioNow = epochSeconds(service.now());
   const int64_t alertUntil = epochSeconds(service.displaySnapshot().alertUntil);
   frame.tick(studioNow, 0, alertUntil);
-  if (!firmware_update::snapshot().busy() && wifiAutoConnect.tick(millis()) && state != State::Inactive) {
-    // Came online on its own (boot, wake, OTA restart or a recovered link).
+  auto startOnlineSync = [this] {
     state = State::Connecting;
     setStatus(tr(STR_PROJECT_STICK_SYNCING));
     requestCloudSync(true);
     lastStudioPollMs = millis() - STUDIO_POLL_MS;  // poll the Studio target right away
     requestUpdate();
+  };
+  if (!firmware_update::snapshot().busy() && wifiAutoConnect.tick(millis()) && state != State::Inactive) {
+    // Came online on its own (boot, wake, OTA restart, a recovered link or a
+    // BLE Wi-Fi push). Cloud requests wait while a phone is connected over
+    // BLE: a setup session may be binding the device right now.
+    if (studio_ble::connected())
+      syncAfterBle = true;
+    else
+      startOnlineSync();
+  }
+  if (syncAfterBle && !studio_ble::connected()) {
+    syncAfterBle = false;
+    if (WiFi.status() == WL_CONNECTED && state != State::Inactive) startOnlineSync();
   }
   const auto firmwareUpdate = firmware_update::snapshot();
   if (firmwareUpdate.generation != firmwareUpdateGeneration) {
@@ -292,6 +307,142 @@ void ProjectStickActivity::loop() {
   }
 }
 
+void ProjectStickActivity::showBleWifiMessage(const char* message, const uint32_t durationMs) {
+  {
+    RenderLock lock;
+    bleWifiMessage = message;
+    bleWifiMessageUntilMs = millis() + durationMs;
+  }
+  requestUpdate();
+}
+
+// Applies work a phone queued over BLE (studio_ble callbacks never touch the
+// SD card or the radio themselves).
+void ProjectStickActivity::tickBleSetup() {
+  if (!service.isBound()) studio_ble::setup(service.deviceId());
+  const std::string payload = studio_ble::setupPayload();
+  if (payload != setupPayload) {
+    {
+      RenderLock lock;
+      setupPayload = payload;
+    }
+    requestUpdate();
+  }
+
+  studio_ble::Binding binding;
+  if (studio_ble::takeBinding(binding)) {
+    RenderLock lock;
+    const bool ok = service.applyBleBinding(binding.token, binding.owner);
+    studio_ble::finishBinding(ok, binding);
+    if (ok) {
+      state = WiFi.status() == WL_CONNECTED ? State::Online : State::Offline;
+      snprintf(statusLine, sizeof(statusLine), "%s",
+               state == State::Online ? tr(STR_PROJECT_STICK_ONLINE) : tr(STR_PROJECT_STICK_OFFLINE));
+      // Register with the new token once the phone lets go of the link.
+      syncAfterBle = true;
+    }
+    lock.unlock();
+    requestUpdate();
+  }
+
+  studio_ble::WifiRequest wifi;
+  if (studio_ble::takeWifiRequest(wifi)) startBleWifi(wifi.ssid, wifi.password);
+  if (bleWifiActive) pollBleWifi();
+  if (studio_ble::takeScanRequest()) bleScanPending = true;
+  if (bleScanPending && !bleWifiActive && !bleScanActive) startBleScan();
+  if (bleScanActive) pollBleScan();
+
+  if (bleWifiMessage && static_cast<int32_t>(millis() - bleWifiMessageUntilMs) >= 0) {
+    {
+      RenderLock lock;
+      bleWifiMessage = nullptr;
+    }
+    requestUpdate();
+  }
+}
+
+void ProjectStickActivity::startBleWifi(const std::string& ssid, const std::string& password) {
+  {
+    RenderLock lock;
+    // Disk is the source of truth; the auto-connect helper may not have
+    // loaded the list yet and saving an empty in-memory list would drop it.
+    WIFI_STORE.loadFromFile();
+    if (!WIFI_STORE.addCredential(ssid, password)) {
+      // The store is full: forget the oldest network other than the current one.
+      for (const auto& saved : WIFI_STORE.getCredentials()) {
+        if (saved.ssid == WIFI_STORE.getLastConnectedSsid()) continue;
+        const std::string victim = saved.ssid;
+        WIFI_STORE.removeCredential(victim);
+        break;
+      }
+      WIFI_STORE.addCredential(ssid, password);
+    }
+    WIFI_STORE.setLastConnectedSsid(ssid);
+  }
+  wifiAutoConnect.holdOff(millis(), BLE_WIFI_TIMEOUT_MS + 5000);
+  WiFi.persistent(false);
+  WiFi.mode(WIFI_STA);
+  WiFi.disconnect();
+  if (password.empty())
+    WiFi.begin(ssid.c_str());
+  else
+    WiFi.begin(ssid.c_str(), password.c_str());
+  bleWifiSsid = ssid;
+  bleWifiActive = true;
+  bleWifiStartedMs = millis();
+  studio_ble::reportWifi(studio_ble::WifiState::Connecting, ssid);
+  showBleWifiMessage(tr(STR_PROJECT_STICK_WIFI_CONNECTING), BLE_WIFI_TIMEOUT_MS + 5000);
+}
+
+void ProjectStickActivity::pollBleWifi() {
+  const wl_status_t status = WiFi.status();
+  const uint32_t elapsed = millis() - bleWifiStartedMs;
+  const char* error = nullptr;
+  if (status == WL_CONNECTED) {
+    bleWifiActive = false;
+    studio_ble::reportWifi(studio_ble::WifiState::Connected, bleWifiSsid);
+    showBleWifiMessage(tr(STR_PROJECT_STICK_WIFI_CONNECTED), BLE_WIFI_MESSAGE_MS);
+    return;
+  }
+  // The driver reports these once the join has had time to scan and handshake.
+  if (elapsed >= 3000 && status == WL_NO_SSID_AVAIL)
+    error = "no_ap";
+  else if (elapsed >= 3000 && status == WL_CONNECT_FAILED)
+    error = "wrong_password";
+  else if (elapsed >= BLE_WIFI_TIMEOUT_MS)
+    error = "timeout";
+  if (!error) return;
+  bleWifiActive = false;
+  WiFi.disconnect();
+  studio_ble::reportWifi(studio_ble::WifiState::Failed, bleWifiSsid, error);
+  showBleWifiMessage(tr(STR_PROJECT_STICK_WIFI_FAILED), BLE_WIFI_MESSAGE_MS);
+  wifiAutoConnect.retrySoon();
+}
+
+void ProjectStickActivity::startBleScan() {
+  bleScanPending = false;
+  wifiAutoConnect.holdOff(millis(), BLE_SCAN_TIMEOUT_MS + 5000);
+  WiFi.mode(WIFI_STA);
+  // A half-finished join makes the driver refuse to scan.
+  if (WiFi.status() != WL_CONNECTED) WiFi.disconnect();
+  WiFi.scanNetworks(true);
+  bleScanActive = true;
+  bleScanStartedMs = millis();
+  studio_ble::reportScan(true);
+}
+
+void ProjectStickActivity::pollBleScan() {
+  const int result = WiFi.scanComplete();
+  if (result == WIFI_SCAN_RUNNING && millis() - bleScanStartedMs < BLE_SCAN_TIMEOUT_MS) return;
+  std::vector<ble_setup::Network> found;
+  for (int i = 0; i < result; ++i)
+    found.push_back({WiFi.SSID(i).c_str(), static_cast<int>(WiFi.RSSI(i)), WiFi.encryptionType(i) != WIFI_AUTH_OPEN});
+  WiFi.scanDelete();
+  bleScanActive = false;
+  studio_ble::reportScan(false, std::move(found));
+  if (WiFi.status() != WL_CONNECTED) wifiAutoConnect.retrySoon();
+}
+
 void ProjectStickActivity::launchWifiSelection() {
   startActivityForResult(std::make_unique<WifiSelectionActivity>(renderer, mappedInput, false),
                          [this](const ActivityResult&) {
@@ -350,8 +501,39 @@ void ProjectStickActivity::renderStatusScreen() {
   const Rect content{metrics.contentSidePadding, contentTop, width - metrics.contentSidePadding * 2,
                      hintTop - metrics.verticalSpacing - contentTop};
 
-  if (state == State::Inactive || state == State::Error) {
+  // An unbound device always offers BLE setup (it needs no working cloud
+  // link); sync errors only replace the prompts once the device is bound.
+  const bool setupScreen = state != State::Inactive && !service.isBound() && !setupPayload.empty();
+  if (!setupScreen && (state == State::Inactive || state == State::Error)) {
     UITheme::drawCenteredWrappedText(renderer, content, UI_12_FONT_ID, statusLine, 4, true, EpdFontFamily::BOLD);
+  } else if (setupScreen) {
+    // BLE setup (protocol 3): the QR carries the device id and the one-time
+    // key; the phone binds and pushes Wi-Fi over Bluetooth. A cloud binding
+    // code, when the device happens to be online, is offered as a fallback.
+    const std::string code = service.pairingCode();
+    const char* title = tr(STR_PROJECT_STICK_SETUP_TITLE);
+    const char* helper = bleWifiMessage ? bleWifiMessage : tr(STR_PROJECT_STICK_SETUP_HELP);
+    char codeLine[48] = {0};
+    if (!code.empty()) snprintf(codeLine, sizeof(codeLine), "%s  %s", tr(STR_PROJECT_STICK_SETUP_CODE), code.c_str());
+    const int titleHeight = renderer.getTextLineHeight(NOTOSANSSC_13_FONT_ID, title);
+    const int helperLine = renderer.getTextLineHeight(NOTOSANSSC_10_FONT_ID, helper);
+    const bool cjk = std::any_of(helper, helper + strlen(helper), [](char c) { return c & 0x80; });
+    const auto helperLines = cjk ? renderer.wrappedCjkText(NOTOSANSSC_10_FONT_ID, helper, content.width - 40, 3)
+                                 : renderer.wrappedText(NOTOSANSSC_10_FONT_ID, helper, content.width - 40, 3);
+    const int helperHeight = helperLine * static_cast<int>(helperLines.size());
+    const int codeHeight = code.empty() ? 0 : PROMPT_GAP + renderer.getTextLineHeight(NOTOSANSSC_10_FONT_ID, codeLine);
+    const int groupHeight = titleHeight + QR_GAP + QR_SIZE + QR_GAP + helperHeight + codeHeight;
+    const int groupY = content.y + (content.height - groupHeight) / 2;
+    UITheme::drawCenteredText(renderer, content, NOTOSANSSC_13_FONT_ID, groupY, title, true, EpdFontFamily::BOLD);
+    const int qrY = groupY + titleHeight + QR_GAP;
+    QrUtils::drawQrCode(renderer, Rect{(width - QR_SIZE) / 2, qrY, QR_SIZE, QR_SIZE}, setupPayload);
+    int y = qrY + QR_SIZE + QR_GAP;
+    for (const auto& line : helperLines) {
+      UITheme::drawCenteredText(renderer, content, NOTOSANSSC_10_FONT_ID, y, line.c_str(), true);
+      y += helperLine;
+    }
+    if (!code.empty())
+      UITheme::drawCenteredText(renderer, content, NOTOSANSSC_10_FONT_ID, y + PROMPT_GAP, codeLine, true);
   } else if (!service.isBound()) {
     const std::string code = service.pairingCode();
     const char* title = tr(STR_PROJECT_STICK_BIND_TITLE);
@@ -377,13 +559,17 @@ void ProjectStickActivity::renderStatusScreen() {
                               codeLine, true, EpdFontFamily::BOLD);
   } else {
     const char* title = tr(STR_PROJECT_STICK_NO_LOCAL_CONTENT);
-    const char* helper = online ? tr(STR_PROJECT_STICK_AWAIT_CONTENT) : tr(STR_PROJECT_STICK_CONNECT_TO_SYNC);
+    const char* helper = bleWifiMessage ? bleWifiMessage
+                         : online       ? tr(STR_PROJECT_STICK_AWAIT_CONTENT)
+                                        : tr(STR_PROJECT_STICK_BLE_WIFI_HINT);
     const int titleHeight = renderer.getTextLineHeight(NOTOSANSSC_13_FONT_ID, title);
-    const int helperHeight = renderer.getTextLineHeight(NOTOSANSSC_13_FONT_ID, helper);
-    const int groupY = content.y + (content.height - titleHeight - PROMPT_GAP - helperHeight) / 2;
+    const int helperLine = renderer.getTextLineHeight(NOTOSANSSC_13_FONT_ID, helper);
+    const int helperLines = renderer.getTextWidth(NOTOSANSSC_13_FONT_ID, helper) > content.width ? 2 : 1;
+    const int groupY = content.y + (content.height - titleHeight - PROMPT_GAP - helperLine * helperLines) / 2;
     UITheme::drawCenteredText(renderer, content, NOTOSANSSC_13_FONT_ID, groupY, title, true, EpdFontFamily::BOLD);
-    UITheme::drawCenteredText(renderer, content, NOTOSANSSC_13_FONT_ID, groupY + titleHeight + PROMPT_GAP, helper,
-                              true);
+    UITheme::drawCenteredWrappedText(
+        renderer, Rect{content.x, groupY + titleHeight + PROMPT_GAP, content.width, helperLine * helperLines},
+        NOTOSANSSC_13_FONT_ID, helper, helperLines, true, EpdFontFamily::REGULAR, UITheme::TextVerticalAlignment::TOP);
   }
 
 }

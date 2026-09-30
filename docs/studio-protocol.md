@@ -104,6 +104,12 @@ The phone persists the frozen package/source/receipt, then reconciles online.
 Conflict requires explicit keep-device/keep-cloud choice; receipt authentication
 checks current owner/grant and epoch. `accepted_ble_task` releases offline protection.
 
+Since 2.3.0 the same service also runs BLE setup protocol 3 (unbound devices,
+key from the setup QR) and accepts `scan`/`wifi` ops in bound mode; STATUS gains
+`wifi`, `scan` and `networks`, and the advertised name is `StockStick-XXXX`.
+Protocol 3 is defined in Project.StockStick `docs/product/BLE-SETUP.md`; see also
+[project-stick.md](project-stick.md#ble-setup-protocol-3-since-230).
+
 ## OTA
 
 `studio_ota:1` enables the owner-controlled command API and `ota:2` the
