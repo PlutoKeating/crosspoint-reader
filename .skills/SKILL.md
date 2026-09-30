@@ -1,7 +1,7 @@
 # StockStick Firmware Development Guide
 
 Project: StockStick device firmware for the Xteink X3 (ESP32-C3), forked from CrossPoint Reader. X3/X4 runtime detection is kept.
-Mission: Reliable StockStick content display, Wi-Fi/BLE synchronization and safe OTA on constrained hardware.
+Mission: Reliable StockStick content display, BLE delivery and setup, and safe OTA on constrained hardware.
 Scope: see `SCOPE.md`. The ebook reader, web file transfer, OPDS, KOReader and Calibre were removed in 2.0.0; do not reintroduce them.
 Key docs: `docs/firmware-ota.md` (versioning, release, OTA, trial boot), `docs/project-stick.md`, `docs/studio-protocol.md`, `docs/i18n.md`.
 
@@ -549,7 +549,7 @@ clang-format -i src/**/*.cpp src/**/*.h
 4. **Corrupt SD State**:
    - Studio partial transfers under `.crosspoint/studio/` resume or are discarded; `project_stick.json` holds only
      identity, binding, alert and pending-event state
-   - Deleting `.crosspoint/` resets settings, pairing identity and Wi-Fi credentials (device must be re-bound)
+   - Deleting `.crosspoint/` resets settings, device identity, binding and Wi-Fi credentials (device must be re-bound over BLE setup)
 
 5. **Watchdog Timeout**:
    - Loop/task blocked for >5 seconds

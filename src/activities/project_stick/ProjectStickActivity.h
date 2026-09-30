@@ -1,7 +1,5 @@
 #pragma once
 
-#include <ProjectStickPollPolicy.h>
-
 #include <string>
 
 #include "activities/Activity.h"
@@ -26,16 +24,10 @@ class ProjectStickActivity final : public Activity {
   bool skipLoopDelay() override;
 
  private:
-  enum class State { Connecting, Online, Offline, Error, Inactive };
-
   ProjectStickService service;
-  State state = State::Connecting;
+  // Deactivated in the console (register answered 403).
+  bool inactive = false;
   uint32_t backgroundResultSequence = 0;
-  // Studio target polls follow the server's studio_poll_seconds (default
-  // 60 s); see ProjectStickPollPolicy.h.
-  project_stick::StudioPollSchedule studioPolls;
-  bool bleWasConnected = false;
-  bool reportPollRequested = false;
   uint32_t studioGeneration = 0;
   uint32_t firmwareUpdateGeneration = 0;
   // Front button hints appear on a key action and hide after
@@ -62,6 +54,9 @@ class ProjectStickActivity final : public Activity {
   bool bleScanActive = false;
   bool bleScanPending = false;
   bool syncAfterBle = false;
+  // An OTA the phone requested over BLE, held until the worker accepts it.
+  bool otaPending = false;
+  ProjectStickService::FirmwareTarget otaTarget;
   uint32_t bleWifiStartedMs = 0;
   uint32_t bleScanStartedMs = 0;
   // Transient status-screen line for a BLE Wi-Fi push (nullptr when none).
@@ -78,15 +73,12 @@ class ProjectStickActivity final : public Activity {
   uint32_t lastSyncAttemptMs = 0;
   uint32_t lastAlertPollMs = 0;
   uint32_t lastRegisterMs = 0;
-  char statusLine[96] = {0};
 #ifdef SIMULATOR
   bool simulatorAlertPollPending = false;
 #endif
 
   void applyBackgroundResult();
-  bool requestCloudSync(bool registerFirst);
-  void syncNow();
+  bool requestCloudSync();
   void updateState(const project_stick::SyncReport& report);
   void launchWifiSelection();
-  void setStatus(const char* text);
 };

@@ -9,12 +9,13 @@
 
 class GfxRenderer;
 
-// A bounded stream, shared by cloud and BLE. Rendering never reflows the content.
+// A bounded stream of a frame or SSP1 program delivered over BLE (the only
+// content channel). Rendering never reflows the content.
 class StudioFrame {
  public:
   static constexpr size_t WIDTH = 528, HEIGHT = 792, BYTES = WIDTH * HEIGHT / 8, MAX_BYTES = 8000000;
   struct Snapshot {
-    std::string task, hash, origin;
+    std::string task, hash;
     int64_t expires = 0;
     bool displayed = false;
     size_t size = BYTES;
@@ -22,15 +23,12 @@ class StudioFrame {
   };
   static StudioFrame& instance();
   void load();
-  bool start(const std::string& task, const std::string& hash, int64_t expires, const std::string& origin,
-             size_t size = BYTES);
+  bool start(const std::string& task, const std::string& hash, int64_t expires, size_t size = BYTES);
   bool append(size_t offset, const uint8_t* data, size_t length);
   bool commit();
   void abort(bool discard = false);
   bool render(const GfxRenderer& renderer);
   void displayed();
-  void acknowledge(const std::string& task);
-  bool reconciled(const std::string& task);
   void clear();
   void tick(int64_t now, int event = 0, int64_t alertUntil = 0);
   void restore();
@@ -39,7 +37,6 @@ class StudioFrame {
   int64_t nextBoundary(int64_t now) const;
   Snapshot snapshot() const;
   Snapshot displaySnapshot() const;
-  bool needsReport() const;
   bool busy() const;
   size_t received() const;
   uint32_t generation() const { return revision.load(); }
@@ -57,7 +54,7 @@ class StudioFrame {
   HalFile output;
   mbedtls_sha256_context sha{};
   size_t offset = 0;
-  bool receiving = false, reportPending = false, loaded = false;
+  bool receiving = false, loaded = false;
   std::atomic<uint32_t> revision{0};
   bool persist();
   void collectGarbage();

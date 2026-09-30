@@ -20,9 +20,8 @@ namespace ota_trial {
 // attempt counter; may switch back to the previous slot and restart.
 void onBoot();
 
-// Records a trial before restarting into `target`. `commandId` (may be empty)
-// ties the outcome to a server-side update command.
-bool arm(const esp_partition_t* target, const char* commandId, const char* targetVersion);
+// Records a trial before restarting into `target`.
+bool arm(const esp_partition_t* target, const char* targetVersion);
 
 bool active();
 
@@ -44,7 +43,6 @@ void onCleanShutdown();
 struct Outcome {
   bool pending = false;
   bool rolledBack = false;
-  char commandId[40] = {};
   char version[33] = {};
   char reason[48] = {};
 };

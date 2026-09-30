@@ -9,6 +9,11 @@
 #include <string>
 #include <vector>
 
+// The device's remaining cloud link (docs/studio-protocol.md "Cloud
+// requests"). Content arrives over BLE only; the cloud is used by bound
+// devices for the register heartbeat, trading-hours alerts, events and
+// firmware downloads. A device without a device token (unbound, or the
+// website simulator) makes no requests at all.
 class ProjectStickService {
  public:
   using SyncResult = project_stick::SyncResult;
@@ -21,26 +26,28 @@ class ProjectStickService {
   };
 
   void begin();
-  SyncReport sync(bool registerFirst = true);
+  // Register heartbeat, then pending events and an unreported OTA outcome.
+  SyncReport sync();
   bool pollAlerts();
-  void syncStudio();
-  // Drops a kept-alive API connection (called by the worker when idle).
-  void closeIdleConnection();
 
-  // Device-side firmware check / request (Settings > Firmware update).
+  // A firmware image to install: from the catalogue (Settings > Firmware
+  // update) or from the phone over BLE (op `ota`).
+  struct FirmwareTarget {
+    std::string version, url, sha256;
+    size_t bytes = 0;
+  };
   struct FirmwareOffer {
-    enum class Status : uint8_t { UpdateAvailable, UpToDate, Unbound, Failed, Requested, RequestFailed };
+    enum class Status : uint8_t { UpdateAvailable, UpToDate, Unbound, Failed, InstallFailed };
     Status status = Status::Failed;
-    std::string id;
-    std::string version;
+    FirmwareTarget target;
     std::string notes;
   };
   FirmwareOffer checkFirmware();
-  FirmwareOffer requestFirmware(const std::string& firmwareId);
-  bool refreshOwnership();
-  bool syncStudioCommand();
-  void reportFirmwareOutcome();
+  // Downloads (resumable), verifies and flashes `target`, then restarts. Only
+  // returns on failure; progress and errors go to firmware_update.
+  void installFirmware(const FirmwareTarget& target);
   void sendStudioFeedback(const std::string& task, const std::string& card, bool useful);
+  bool refreshOwnership();
 
   const Display& display() const { return currentDisplay; }
   Display displaySnapshot() const;
@@ -49,43 +56,40 @@ class ProjectStickService {
   uint32_t pendingEventCount() const;
   uint32_t pollIntervalSeconds() const;
   uint32_t alertPollIntervalSeconds() const;
-  uint32_t studioPollSeconds() const;
   // Shared cloud backoff (429 / 5xx / unreachable): no request goes out while
-  // blocked. rateLimited() is the server-requested (429) part; a manual sync
-  // may clear an error backoff but never a rate limit.
+  // blocked. A manual firmware check may clear an error backoff but never a
+  // server rate limit (429).
   static bool apiBlocked();
-  static bool apiRateLimited();
   static bool clearBackoffForManualSync();
   bool isTradingDay() const;
   bool hasClock() const { return serverTime.valid; }
   bool isBound() const;
-  std::string pairingCode() const;
+  // True when the device holds a cloud credential (a bound physical device).
+  bool hasCredential() const;
   std::string deviceId() const;
   // Stores the credential a phone delivered over BLE setup (protocol 3):
-  // device token, owner and bound=true. Any registration already in flight
+  // device token, owner and bound=true. A registration already in flight
   // with the previous identity state is discarded instead of applied.
   bool applyBleBinding(const std::string& deviceToken, const std::string& owner);
   project_stick::ShanghaiTime now() const;
 
  private:
-  std::string baseUrl, localOwner, studioAttemptTask;
-  uint8_t studioAttempts = 0;
-  uint32_t studioRetryAt = 0;
+  std::string baseUrl, localOwner;
   void adoptOwner(const std::string& owner);
+  // The server no longer accepts this device's credential (unbound in the
+  // mini program, or claimed again): back to BLE setup mode.
+  void dropBinding();
   Display currentDisplay;
   project_stick::ShanghaiTime serverTime;
   uint32_t serverTimeCapturedMs = 0;
   bool inactive = false;
-  // One client per service keeps the Cloudflare TLS connection alive across
-  // the register, Studio and event requests of one sync burst.
   freeink::SecureHttpClient http;
 
   bool ensureIdentity();
-  bool ensurePairing(int& status);
   bool registerDevice(int& status);
   enum class DownloadResult : uint8_t { Complete, Retry, Fatal };
-  DownloadResult downloadFirmware(const std::string& id, const std::string& hash, size_t size);
-  uint32_t firmwareRetryAtMs = 0;
+  bool validFirmwareTarget(const FirmwareTarget& target) const;
+  DownloadResult downloadFirmware(const FirmwareTarget& target);
   bool requestPost(const std::string& path, const std::string& body, std::string& response, int& status);
   bool fetchJson(const std::string& url, std::string& response, size_t maxBytes);
   bool fetchAuthenticated(const std::string& url, const std::function<bool(const uint8_t*, size_t)>& onData);
@@ -94,5 +98,11 @@ class ProjectStickService {
   bool parseServerTime(const char* value);
   bool hashFile(const std::string& path, std::string& result);
   bool flushEvents();
+  void reportFirmwareOutcome();
+#ifdef SIMULATOR
+  // Installs /.crosspoint/studio/import.ssp (written by the web simulator
+  // loader) through the same StudioFrame path BLE uses.
+  void importSimulatorProgram();
+#endif
   static std::string makeUuid();
 };

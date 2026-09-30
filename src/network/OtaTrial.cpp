@@ -30,7 +30,6 @@ bool everOnline = false;
 uint8_t transportFailures = 0;
 uint32_t firstFailureMs = 0;
 uint32_t lastFailureMs = 0;
-char trialCommand[40] = {};
 char trialVersion[33] = {};
 std::atomic<bool> outcomePending{false};  // read by the sync task, written by the main loop
 
@@ -63,7 +62,6 @@ void saveOutcome(Preferences& prefs, bool rolledBack, const char* reason) {
   outcomePending = true;
   prefs.putBool("out", true);
   prefs.putBool("out_rb", rolledBack);
-  prefs.putString("out_cmd", prefs.getString("cmd", ""));
   prefs.putString("out_ver", prefs.getString("ver", ""));
   prefs.putString("out_why", reason);
 }
@@ -147,7 +145,6 @@ void onBoot() {
       // still protects the window before this point, i.e. images that crash
       // before setup() reaches onBoot().
       markRunningValid();
-      copyString(trialCommand, sizeof(trialCommand), prefs.getString("cmd", "").c_str());
       copyString(trialVersion, sizeof(trialVersion), prefs.getString("ver", "").c_str());
       prefs.end();
       taskENTER_CRITICAL(&healthMux);
@@ -160,22 +157,20 @@ void onBoot() {
   }
 }
 
-bool arm(const esp_partition_t* target, const char* commandId, const char* targetVersion) {
+bool arm(const esp_partition_t* target, const char* targetVersion) {
   const esp_partition_t* running = esp_ota_get_running_partition();
   if (!target || !running) return false;
   Preferences prefs;
   if (!prefs.begin(NS, false)) return false;
-  const char* command = commandId ? commandId : "";
   const char* version = targetVersion ? targetVersion : "";
   prefs.putString("prev", running->label);
   prefs.putString("target", target->label);
-  prefs.putString("cmd", command);
   prefs.putString("ver", version);
   prefs.putUChar("tries", 0);
   prefs.putBool("armed", true);
   // Read back: put*() cannot distinguish an empty value from a failed write.
   const bool ok = prefs.getString("prev", "") == running->label && prefs.getString("target", "") == target->label &&
-                  prefs.getString("cmd", "\x01") == command && prefs.getString("ver", "\x01") == version &&
+                  prefs.getString("ver", "\x01") == version &&
                   prefs.getUChar("tries", 0xFF) == 0 && prefs.getBool("armed", false);
   if (!ok) prefs.putBool("armed", false);
   prefs.end();
@@ -276,7 +271,6 @@ Outcome pendingOutcome() {
   outcome.pending = prefs.getBool("out", false);
   if (outcome.pending) {
     outcome.rolledBack = prefs.getBool("out_rb", false);
-    copyString(outcome.commandId, sizeof(outcome.commandId), prefs.getString("out_cmd", "").c_str());
     copyString(outcome.version, sizeof(outcome.version), prefs.getString("out_ver", "").c_str());
     copyString(outcome.reason, sizeof(outcome.reason), prefs.getString("out_why", "").c_str());
   }

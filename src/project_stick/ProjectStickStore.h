@@ -13,6 +13,8 @@ struct ProjectStickEvent {
   std::string type;
   std::string clientTs;
   std::string studioTask, studioCard;
+  // Free-form detail for non-Studio events (e.g. a firmware rollback).
+  std::string detail;
 };
 
 class ProjectStickStore : public PersistableStore<ProjectStickStore> {
@@ -27,12 +29,9 @@ class ProjectStickStore : public PersistableStore<ProjectStickStore> {
   std::string ownerId;
   std::string deviceId;
   std::string deviceToken;
-  std::string pairingCode;
   bool bound = false;
   uint32_t pollIntervalSeconds = 300;
   uint32_t alertPollIntervalSeconds = 30;
-  // Studio target poll cadence (server `studio_poll_seconds`).
-  uint32_t studioPollSeconds = 60;
   bool tradingDay = false;
   // End of the latest market alert; the Studio program shows its alert scene until then.
   project_stick::ShanghaiTime alertUntil;

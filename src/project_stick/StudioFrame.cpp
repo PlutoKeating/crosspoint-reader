@@ -69,17 +69,15 @@ void StudioFrame::load() {
     const std::string hash = doc["hash"] | "";
     if (!validHash(hash)) continue;
     if (!verifyFile(fileFor(hash), hash)) continue;
-    active = {doc["task"] | "", hash, doc["origin"] | "cloud", doc["expires"] | int64_t(0), false, doc["size"] | BYTES,
-              doc["card"] | ""};
+    active = {doc["task"] | "", hash, doc["expires"] | int64_t(0), false, doc["size"] | BYTES, doc["card"] | ""};
     auto visual = doc["visual"];
-    lastVisual = {visual["task"] | "", visual["hash"] | "", "cloud", 0, false, visual["size"] | BYTES, ""};
+    lastVisual = {visual["task"] | "", visual["hash"] | "", 0, false, visual["size"] | BYTES, ""};
     lastVisualOffset = visual["offset"] | size_t(0);
     if (!validHash(lastVisual.hash) || !verifyFile(fileFor(lastVisual.hash), lastVisual.hash) ||
         lastVisualOffset + BYTES > lastVisual.size)
       lastVisual = {};
     auto saved = doc["program"];
-    savedProgram = {
-        saved["task"] | "", saved["hash"] | "", saved["origin"] | "cloud", 0, false, saved["size"] | BYTES, ""};
+    savedProgram = {saved["task"] | "", saved["hash"] | "", 0, false, saved["size"] | BYTES, ""};
     if (active.size > BYTES) savedProgram = active;
     if (!savedProgram.hash.empty() && validHash(savedProgram.hash) &&
         verifyFile(fileFor(savedProgram.hash), savedProgram.hash) && readProgram(savedProgram, program, headerOffset)) {
@@ -107,12 +105,11 @@ void StudioFrame::load() {
     break;
   }
 }
-bool StudioFrame::start(const std::string& task, const std::string& hash, int64_t expires, const std::string& origin,
-                        size_t size) {
+bool StudioFrame::start(const std::string& task, const std::string& hash, int64_t expires, size_t size) {
   std::lock_guard<std::recursive_mutex> lock(mutex);
   if (receiving || task.size() != 36 || !validHash(hash) || size < BYTES || size > MAX_BYTES) return false;
   Storage.mkdir(ROOT, true);
-  incoming = {task, hash, origin, expires, false, size, ""};
+  incoming = {task, hash, expires, false, size, ""};
   offset = 0;
   bool resume = false;
   HalFile metadata;
@@ -258,7 +255,6 @@ bool StudioFrame::commit() {
     return false;
   }
   collectGarbage();
-  reportPending = false;
   ++revision;
   return true;
 }
@@ -279,7 +275,6 @@ bool StudioFrame::persist() {
   JsonDocument doc;
   doc["task"] = active.task;
   doc["hash"] = active.hash;
-  doc["origin"] = active.origin;
   doc["expires"] = active.expires;
   doc["size"] = active.size;
   doc["card"] = active.card;
@@ -291,7 +286,6 @@ bool StudioFrame::persist() {
   auto saved = doc["program"].to<JsonObject>();
   saved["task"] = savedProgram.task;
   saved["hash"] = savedProgram.hash;
-  saved["origin"] = savedProgram.origin;
   saved["size"] = savedProgram.size;
   auto state = doc["playback"].to<JsonObject>();
   state["time"] = playback.lastTime;
@@ -346,32 +340,10 @@ bool StudioFrame::render(const GfxRenderer& renderer) {
 void StudioFrame::displayed() {
   std::lock_guard<std::recursive_mutex> lock(mutex);
   if (alertFrame >= 0) {
-    if (!alertDisplayed) {
-      alertDisplayed = true;
-      reportPending = true;
-    }
+    alertDisplayed = true;
     return;
   }
-  if (!active.displayed && (active.size == BYTES || selectedFrame >= 0)) {
-    active.displayed = true;
-    reportPending = true;
-  }
-}
-void StudioFrame::acknowledge(const std::string& task) {
-  std::lock_guard<std::recursive_mutex> lock(mutex);
-  if ((alertFrame >= 0 ? savedProgram.task : active.task) == task) reportPending = false;
-}
-bool StudioFrame::reconciled(const std::string& task) {
-  std::lock_guard<std::recursive_mutex> lock(mutex);
-  if (active.task != task || active.origin != "ble") return false;
-  active.origin = "cloud";
-  if (savedProgram.task == task) savedProgram.origin = "cloud";
-  if (!persist()) {
-    active.origin = "ble";
-    return false;
-  }
-  reportPending = active.displayed;
-  return true;
+  if (active.size == BYTES || selectedFrame >= 0) active.displayed = true;
 }
 void StudioFrame::clear() {
   std::lock_guard<std::recursive_mutex> lock(mutex);
@@ -386,7 +358,6 @@ void StudioFrame::clear() {
   playback = {};
   pixelOffset = 0;
   selectedFrame = -1;
-  reportPending = false;
   Storage.remove(STATE);
   Storage.remove(BACKUP);
   for (const auto& file : Storage.listFiles(ROOT, 1000)) {
@@ -409,10 +380,6 @@ StudioFrame::Snapshot StudioFrame::displaySnapshot() const {
   visual.card = program.cardIds[alertFrame];
   visual.displayed = alertDisplayed;
   return visual;
-}
-bool StudioFrame::needsReport() const {
-  std::lock_guard<std::recursive_mutex> lock(mutex);
-  return reportPending;
 }
 bool StudioFrame::busy() const {
   std::lock_guard<std::recursive_mutex> lock(mutex);
@@ -553,7 +520,6 @@ void StudioFrame::tick(int64_t now, int event, int64_t alertUntil) {
       alertFrame = overlay;
       alertDisplayed = false;
       active.displayed = false;
-      reportPending = false;
       ++revision;
     }
     if (!event) return;

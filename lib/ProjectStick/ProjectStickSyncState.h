@@ -44,10 +44,9 @@ inline bool shouldRecordRegisterSuccess(const SyncReport& report) {
   return report.registerAttempted && report.registerSucceeded;
 }
 
-inline bool registrationDue(uint32_t nowMs, uint32_t lastSuccessMs, uint32_t intervalMs = 4UL * 60UL * 60UL * 1000UL) {
+// Register heartbeat of a bound device (binding, owner, trading day, clock).
+inline bool registrationDue(uint32_t nowMs, uint32_t lastSuccessMs, uint32_t intervalMs = 6UL * 60UL * 60UL * 1000UL) {
   return lastSuccessMs == 0 || nowMs - lastSuccessMs >= intervalMs;
 }
-
-inline bool pairingFailureAllowsRegistration(int status) { return status == 409; }
 
 }  // namespace project_stick

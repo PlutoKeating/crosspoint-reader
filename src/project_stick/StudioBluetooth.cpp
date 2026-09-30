@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <mutex>
 
+#include "FirmwareUpdateState.h"
 #include "StudioFrame.h"
 #ifndef SIMULATOR
 #include <optional>
@@ -38,6 +39,7 @@ enum class BindState { None, Pending, Done, Failed };
 BindState bindState = BindState::None;
 std::optional<Binding> pendingBinding;
 std::optional<WifiRequest> pendingWifi;
+std::optional<OtaRequest> pendingOta;
 bool scanRequested = false;
 WifiState wifiState = WifiState::Idle;
 std::string wifiSsid, wifiError, scanState = "idle";
@@ -118,6 +120,31 @@ void addWifi(JsonDocument& doc) {
   if (!wifiError.empty()) wifi["error"] = wifiError;
   doc["scan"] = scanState;
 }
+const char* otaStateName(firmware_update::Phase phase) {
+  switch (phase) {
+    case firmware_update::Phase::Downloading:
+      return "downloading";
+    case firmware_update::Phase::Verifying:
+      return "verifying";
+    case firmware_update::Phase::Installing:
+      return "installing";
+    case firmware_update::Phase::Restarting:
+      return "restarting";
+    case firmware_update::Phase::Failed:
+      return "failed";
+    default:
+      return "idle";
+  }
+}
+// Bound mode only; omitted while no update was requested since boot.
+void addOta(JsonDocument& doc) {
+  const auto update = firmware_update::snapshot();
+  if (update.phase == firmware_update::Phase::Idle && !pendingOta) return;
+  JsonObject ota = doc["ota"].to<JsonObject>();
+  ota["state"] = pendingOta ? "queued" : otaStateName(update.phase);
+  ota["received"] = update.done;
+  if (update.phase == firmware_update::Phase::Failed && update.error[0]) ota["error"] = update.error;
+}
 std::string finishStatus(JsonDocument& doc) {
   std::string result;
   serializeJson(doc, result);
@@ -145,6 +172,7 @@ std::string statusJson() {
   }
   JsonDocument doc;
   doc["device_id"] = identity;
+  doc["fw"] = CROSSPOINT_VERSION;
   doc["nonce"] = nonce;
   doc["epoch"] = epoch;
   doc["boundary"] = planBoundary;
@@ -164,6 +192,7 @@ std::string statusJson() {
     doc["proof"] = mac("hello|" + identity + "|" + nonce + "|" + std::to_string(epoch) + "|" + baseTask + "|" +
                        std::to_string(planBoundary));
   addWifi(doc);
+  addOta(doc);
   return finishStatus(doc);
 }
 // Setup ops (protocol 3) never abort a frame transfer; a bad request only
@@ -214,6 +243,24 @@ bool handleSetupOp(const std::string& op, JsonDocument& doc) {
     error.clear();
     pendingBinding = std::move(binding);
     bindState = BindState::Pending;
+    return true;
+  }
+  if (op == "ota") {
+    OtaRequest request;
+    request.version = doc["version"] | "";
+    request.sha256 = doc["sha256"] | "";
+    request.bytes = doc["bytes"] | size_t(0);
+    request.url = doc["url"] | "";
+    if (sessionSetup) return reject("invalid_control");
+    if (!equalProof(proof, mac(ble_setup::otaMessage(nonce, request.version, request.sha256, request.bytes,
+                                                     request.url))))
+      return reject("authorization_failed");
+    // The worker validates the image source, size and hash before any download.
+    if (request.version.empty() || request.url.empty() || request.sha256.size() != 64 || request.bytes == 0 ||
+        pendingOta || firmware_update::snapshot().busy())
+      return reject("invalid_control");
+    error.clear();
+    pendingOta = std::move(request);
     return true;
   }
   return false;
@@ -305,7 +352,7 @@ class Callbacks final : public NimBLECharacteristicCallbacks {
       }
       const auto active = StudioFrame::instance().snapshot();
       const bool completed = active.task == incomingTask && active.hash == incomingHash;
-      if (!completed && !StudioFrame::instance().start(incomingTask, incomingHash, expires, "ble", size)) {
+      if (!completed && !StudioFrame::instance().start(incomingTask, incomingHash, expires, size)) {
         fail("device_busy_or_invalid_frame");
         return;
       }
@@ -368,22 +415,6 @@ bool validSecret() {
   return unhex(secret, decoded, 32);
 }
 }  // namespace
-void configure(const std::string& deviceId, const std::string& key, uint32_t keyEpoch, const std::string& owner) {
-  std::lock_guard<std::recursive_mutex> lock(mutex);
-  uint8_t decoded[32];
-  if (deviceId.size() != 36 || !unhex(key, decoded, 32)) return;
-  if (identity == deviceId && secret == key && epoch == keyEpoch && authorityOwner == owner) return;
-  if (!secret.empty() && (secret != key || epoch != keyEpoch || authorityOwner != owner))
-    StudioFrame::instance().clear();
-  authorityOwner = owner;
-  if (isConnected) NimBLEDevice::getServer()->disconnect(connectionHandle);
-  identity = deviceId;
-  secret = key;
-  epoch = keyEpoch;
-  setupKey.clear();
-  if (started && !paused) NimBLEDevice::startAdvertising();
-  writeCredentials();
-}
 void pause(bool value) {
   std::lock_guard<std::recursive_mutex> lock(mutex);
   paused = value;
@@ -515,6 +546,13 @@ bool takeScanRequest() {
   scanRequested = false;
   return requested;
 }
+bool takeOtaRequest(OtaRequest& out) {
+  std::lock_guard<std::recursive_mutex> lock(mutex);
+  if (!pendingOta) return false;
+  out = std::move(*pendingOta);
+  pendingOta.reset();
+  return true;
+}
 void reportWifi(WifiState state, const std::string& ssid, const char* reason) {
   std::lock_guard<std::recursive_mutex> lock(mutex);
   wifiState = state;
@@ -531,7 +569,6 @@ void reportScan(bool scanning, std::vector<ble_setup::Network> found) {
 #include <random>
 
 namespace studio_ble {
-void configure(const std::string&, const std::string&, uint32_t, const std::string&) {}
 void revoke() {}
 void pause(bool) {}
 void begin() {}
@@ -555,6 +592,7 @@ bool takeBinding(Binding&) { return false; }
 void finishBinding(bool, const Binding&) {}
 bool takeWifiRequest(WifiRequest&) { return false; }
 bool takeScanRequest() { return false; }
+bool takeOtaRequest(OtaRequest&) { return false; }
 void reportWifi(WifiState, const std::string&, const char*) {}
 void reportScan(bool, std::vector<ble_setup::Network>) {}
 }  // namespace studio_ble

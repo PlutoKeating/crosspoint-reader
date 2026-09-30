@@ -5,15 +5,15 @@
 #include <string>
 #include <vector>
 
-// Studio BLE service. Bound devices use the cloud-issued secret (protocol 2:
-// offline frames/programs, plus Wi-Fi setup). Unbound devices run setup mode
-// (protocol 3, Project.StockStick docs/product/BLE-SETUP.md): the phone scans
-// the setup QR (device id + one-time key K), binds the device to its account
-// and pushes Wi-Fi credentials. The device cloud bearer is never exposed.
+// Studio BLE service, the only content channel (Project.StockStick
+// docs/product/BLE-ONLY-DELIVERY.md). Bound devices use the secret delivered
+// at bind time: protocol 2 frames/programs, Wi-Fi setup and OTA triggers.
+// Unbound devices run setup mode (protocol 3, docs/product/BLE-SETUP.md): the
+// phone scans the setup QR (device id + one-time key K), binds the device to
+// its account and pushes Wi-Fi credentials. The device cloud bearer is never
+// exposed.
 namespace studio_ble {
-void configure(const std::string& deviceId, const std::string& secret, uint32_t epoch, const std::string& owner = "");
-// Drops the bound credential (no-op in setup mode, so an unbound register
-// heartbeat never tears down a setup session).
+// Drops the bound credential (unbound in the cloud); no-op in setup mode.
 void revoke();
 void pause(bool paused);
 void begin();
@@ -40,6 +40,14 @@ struct WifiRequest {
 };
 bool takeWifiRequest(WifiRequest& out);
 bool takeScanRequest();
+
+// Op `ota` (bound mode): the phone names a catalogue image; the activity hands
+// it to the background worker. STATUS reports firmware_update progress.
+struct OtaRequest {
+  std::string version, url, sha256;
+  size_t bytes = 0;
+};
+bool takeOtaRequest(OtaRequest& out);
 
 enum class WifiState { Idle, Connecting, Connected, Failed };
 void reportWifi(WifiState state, const std::string& ssid, const char* error = "");

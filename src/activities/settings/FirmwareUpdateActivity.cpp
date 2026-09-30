@@ -54,7 +54,7 @@ void FirmwareUpdateActivity::startInstall() {
   state = State::Installing;
   firmware_update::reset();
   ProjectStickService::clearBackoffForManualSync();
-  awaitingWork = PROJECT_STICK_BACKGROUND_SYNC.requestFirmwareInstall(offer.id);
+  awaitingWork = PROJECT_STICK_BACKGROUND_SYNC.requestFirmwareInstall(offer.target);
   requestUpdate();
 }
 
@@ -62,8 +62,8 @@ void FirmwareUpdateActivity::pollBackground() {
   // The worker handles one job at a time; retry queuing until it is free.
   if (!awaitingWork) {
     if (state == State::Checking) awaitingWork = PROJECT_STICK_BACKGROUND_SYNC.requestFirmwareCheck();
-    if (state == State::Installing && !firmware_update::snapshot().busy() && !offer.id.empty()) {
-      awaitingWork = PROJECT_STICK_BACKGROUND_SYNC.requestFirmwareInstall(offer.id);
+    if (state == State::Installing && !firmware_update::snapshot().busy() && !offer.target.url.empty()) {
+      awaitingWork = PROJECT_STICK_BACKGROUND_SYNC.requestFirmwareInstall(offer.target);
     }
   }
   ProjectStickBackgroundSync::Result result;
@@ -74,9 +74,9 @@ void FirmwareUpdateActivity::pollBackground() {
       state = State::Result;
       awaitingWork = false;
       requestUpdate();
-    } else if (result.kind == Kind::FirmwareRequest && state == State::Installing) {
+    } else if (result.kind == Kind::FirmwareInstall && state == State::Installing) {
       // A successful install restarts the device, so reaching here means the
-      // request failed, the device was busy, or the install stopped early.
+      // install stopped early (see firmware_update for the reason).
       offer.status = result.firmware.status;
       state = State::Result;
       awaitingWork = false;
@@ -109,7 +109,7 @@ void FirmwareUpdateActivity::loop() {
   } else if (state == State::Result) {
     state = State::Confirming;
     char heading[64];
-    snprintf(heading, sizeof(heading), "%s %s", tr(STR_OTA_AVAILABLE), offer.version.c_str());
+    snprintf(heading, sizeof(heading), "%s %s", tr(STR_OTA_AVAILABLE), offer.target.version.c_str());
     startActivityForResult(std::make_unique<ConfirmationActivity>(renderer, mappedInput, heading, offer.notes),
                            [this](const ActivityResult& result) {
                              if (result.isCancelled) {
@@ -160,7 +160,7 @@ void FirmwareUpdateActivity::render(RenderLock&&) {
       break;
     case State::Result:
       if (offer.status == Status::UpdateAvailable) {
-        snprintf(line, sizeof(line), "%s  %s", tr(STR_OTA_LATEST), offer.version.c_str());
+        snprintf(line, sizeof(line), "%s  %s", tr(STR_OTA_LATEST), offer.target.version.c_str());
         renderer.drawText(UI_10_FONT_ID, side, y, line, true, EpdFontFamily::BOLD);
         y += lineHeight * 2;
         if (!offer.notes.empty()) {
@@ -173,8 +173,8 @@ void FirmwareUpdateActivity::render(RenderLock&&) {
         message = tr(STR_OTA_UP_TO_DATE);
       } else if (offer.status == Status::Unbound) {
         message = tr(STR_OTA_NEED_BINDING);
-      } else if (offer.status == Status::Requested) {
-        message = progress.phase == firmware_update::Phase::Failed ? tr(STR_OTA_FAILED) : tr(STR_OTA_REQUESTED);
+      } else if (offer.status == Status::InstallFailed) {
+        message = strcmp(progress.error, "low_battery") == 0 ? tr(STR_OTA_LOW_BATTERY) : tr(STR_OTA_FAILED);
       } else {
         message = tr(STR_OTA_CHECK_FAILED);
       }

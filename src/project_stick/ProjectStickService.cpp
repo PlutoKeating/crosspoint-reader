@@ -23,7 +23,7 @@
 #include <HalStorage.h>
 #include <Logging.h>
 #include <Memory.h>
-#include <ProjectStickPollPolicy.h>
+#include <ProjectStickApiBackoff.h>
 #include <SecureHttpClient.h>
 #include <esp_system.h>
 #include <mbedtls/sha256.h>
@@ -51,8 +51,8 @@ namespace {
 std::recursive_mutex projectStickStateMutex;
 using ProjectStickStateLock = std::lock_guard<std::recursive_mutex>;
 bool projectStickStoreInitialized = false;
-// Bumped when a BLE bind replaces the device token/owner; pairing and
-// registration responses started before the bump are dropped.
+// Bumped when a BLE bind replaces the device token/owner; registration
+// responses started before the bump are dropped.
 std::atomic<uint32_t> bleBindingGeneration{0};
 
 // One backoff gate for every cloud request, shared by the UI-side and the
@@ -89,18 +89,16 @@ bool apiBlockedNow() {
   return apiBackoff.blocked(millis());
 }
 
-// Firmware identity and capabilities sent with pairing and registration.
+// Firmware identity and capabilities sent with registration.
 void describeFirmware(JsonDocument& request) {
   request["firmware_version"] = CROSSPOINT_VERSION;
   request["firmware_build"] = firmware_install::runningBuild();
   JsonObject capabilities = request["capabilities"].to<JsonObject>();
-  capabilities["protocol"] = 2;
-  capabilities["studio"] = 1;
-  capabilities["studio_program"] = 1;
-  capabilities["studio_ota"] = 1;
-  // OTA protocol 2: resumable firmware download (offset), image identity
-  // checks, trial boot with automatic rollback and outcome reports.
-  capabilities["ota"] = 2;
+  // Content over BLE only: protocol 2 frames/programs, protocol 3 setup
+  // (bind, Wi-Fi) and BLE-triggered OTA (resumable download of the catalogue
+  // image, identity checks, trial boot with automatic rollback).
+  capabilities["ble"] = 3;
+  capabilities["ota"] = 3;
   capabilities["panel"] = gpio.deviceIsX3() ? "xteink_x3" : "xteink_x4";
 }
 
@@ -136,27 +134,6 @@ class HttpBurst {
   freeink::SecureHttpClient& client;
 };
 
-// Studio polls run every few seconds; re-doing the TLS handshake each time
-// costs about a second of CPU and radio time on the C3. Keep the connection
-// between polls while the heap can afford the TLS session; the sync worker
-// closes it after it has been idle for a while.
-constexpr uint32_t KEEP_ALIVE_MIN_FREE_HEAP = 80 * 1024;
-constexpr uint32_t KEEP_ALIVE_MIN_MAX_ALLOC = 32 * 1024;
-
-class HttpKeepWarm {
- public:
-  explicit HttpKeepWarm(freeink::SecureHttpClient& client) : client(client) {}
-  ~HttpKeepWarm() {
-#ifndef SIMULATOR
-    if (ESP.getFreeHeap() >= KEEP_ALIVE_MIN_FREE_HEAP && ESP.getMaxAllocHeap() >= KEEP_ALIVE_MIN_MAX_ALLOC) return;
-#endif
-    client.end();
-  }
-
- private:
-  freeink::SecureHttpClient& client;
-};
-
 bool validSha256(const std::string& value) {
   if (value.size() != 64) return false;
   return std::all_of(value.begin(), value.end(), [](unsigned char c) { return std::isxdigit(c) != 0; });
@@ -185,6 +162,9 @@ void ProjectStickService::begin() {
   }
   localOwner = PROJECT_STICK_STORE.ownerId;
   StudioFrame::instance().load();
+#ifdef SIMULATOR
+  importSimulatorProgram();
+#endif
   currentDisplay.alertUntil = PROJECT_STICK_STORE.alertUntil;
 }
 
@@ -195,108 +175,39 @@ bool ProjectStickService::ensureIdentity() {
   return true;
 }
 
-ProjectStickService::SyncReport ProjectStickService::sync(bool registerFirst) {
+ProjectStickService::SyncReport ProjectStickService::sync() {
   HttpBurst burst(http);
   const uint32_t syncStartedMs = millis();
   SyncReport report;
   inactive = false;
-  {
-    ProjectStickStateLock lock(projectStickStateMutex);
-    registerFirst = registerFirst || !PROJECT_STICK_STORE.bound;
+  if (!hasCredential()) {
+    report.result = SyncResult::Unbound;
+    return report;
   }
-  if (registerFirst) {
-    report.registerAttempted = true;
-    int status = 0;
-    if (!registerDevice(status)) {
-      inactive = status == 403;
-      report.result = inactive ? SyncResult::Inactive : SyncResult::Failed;
-      return report;
-    }
-    report.registerSucceeded = true;
-    // Registration returns the server clock; hand it to the foreground.
-    report.synchronizedAt = now();
-    if (ota_trial::hasPendingOutcome()) reportFirmwareOutcome();
+  report.registerAttempted = true;
+  int status = 0;
+  if (!registerDevice(status)) {
+    inactive = status == 403;
+    report.result = inactive ? SyncResult::Inactive : SyncResult::Failed;
+    return report;
   }
-
-  {
-    ProjectStickStateLock lock(projectStickStateMutex);
-    if (!PROJECT_STICK_STORE.bound) {
-      report.result = SyncResult::Unbound;
-      return report;
-    }
+  report.registerSucceeded = true;
+  // Registration returns the server clock; hand it to the foreground.
+  report.synchronizedAt = now();
+  if (!isBound()) {
+    report.result = SyncResult::Unbound;
+    return report;
   }
-
-  syncStudio();
+  if (ota_trial::hasPendingOutcome()) reportFirmwareOutcome();
   flushEvents();
   report.result = SyncResult::Synced;
   LOG_INF("STICK", "Sync finished (total=%ums)", (unsigned)(millis() - syncStartedMs));
   return report;
 }
 
-bool ProjectStickService::ensurePairing(int& status) {
-  std::string deviceId;
-  std::string deviceToken;
-  {
-    ProjectStickStateLock lock(projectStickStateMutex);
-    deviceId = PROJECT_STICK_STORE.deviceId;
-    deviceToken = PROJECT_STICK_STORE.deviceToken;
-  }
-  const uint32_t generation = bleBindingGeneration.load();
-  JsonDocument request;
-  request["device_id"] = deviceId;
-  describeFirmware(request);
-  std::string body;
-  serializeJson(request, body);
-  std::string response;
-  if (!requestPost("/api/v2/device/pairing", body, response, status) || status != 200) return false;
-  if (generation != bleBindingGeneration.load()) {
-    status = 0;
-    return false;
-  }
-  JsonDocument doc;
-  if (deserializeJson(doc, response)) return false;
-  const std::string returnedToken = doc["device_token"] | "";
-  const std::string returnedCode = doc["pairing_code"] | "";
-  if (returnedCode.size() != 8 || (deviceToken.empty() && returnedToken.empty())) return false;
-  ProjectStickStateLock lock(projectStickStateMutex);
-  if (generation != bleBindingGeneration.load() || PROJECT_STICK_STORE.bound) return false;
-  if (!returnedToken.empty()) PROJECT_STICK_STORE.deviceToken = returnedToken.substr(0, 96);
-  PROJECT_STICK_STORE.pairingCode = returnedCode.substr(0, 8);
-  return PROJECT_STICK_STORE.saveToFile();
-}
-
 bool ProjectStickService::registerDevice(int& status) {
   LOG_INF("STICK", "Registering device (firmware=%s)", CROSSPOINT_VERSION);
   const uint32_t generation = bleBindingGeneration.load();
-  bool bound = false;
-  {
-    ProjectStickStateLock lock(projectStickStateMutex);
-    bound = PROJECT_STICK_STORE.bound;
-  }
-  if (!bound && !ensurePairing(status)) {
-    if (status == 401) {
-      // The server holds a different token for this unbound identity (SD state
-      // restored or copied, or a token lost mid-pairing). Nothing is bound to
-      // it, so start over with a fresh identity instead of failing forever.
-      ProjectStickStateLock lock(projectStickStateMutex);
-      // A phone may have bound the device over BLE meanwhile (new token).
-      if (generation != bleBindingGeneration.load() || PROJECT_STICK_STORE.bound) return false;
-      LOG_ERR("STICK", "Unbound identity %s was rejected; creating a new one", PROJECT_STICK_STORE.deviceId.c_str());
-      PROJECT_STICK_STORE.deviceId = makeUuid();
-      PROJECT_STICK_STORE.deviceToken.clear();
-      PROJECT_STICK_STORE.pairingCode.clear();
-      PROJECT_STICK_STORE.saveToFile();
-      return false;
-    }
-    if (!project_stick::pairingFailureAllowsRegistration(status)) {
-      LOG_ERR("STICK", "Device pairing refresh failed (status=%d)", status);
-      return false;
-    }
-    // The claim may already be committed on the server while this device
-    // still has bound=false on SD. Continue with the authenticated register
-    // request so the server can return the authoritative bound state.
-    LOG_INF("STICK", "Pairing already claimed; continuing registration");
-  }
   JsonDocument request;
   {
     ProjectStickStateLock lock(projectStickStateMutex);
@@ -309,6 +220,8 @@ bool ProjectStickService::registerDevice(int& status) {
   std::string response;
   if (!requestPost("/api/v2/device/register", body, response, status) || status != 200) {
     LOG_ERR("STICK", "Device registration failed (status=%d)", status);
+    // The credential is gone server-side: re-bind over BLE setup.
+    if (status == 401 && generation == bleBindingGeneration.load()) dropBinding();
     return false;
   }
   JsonDocument doc;
@@ -329,18 +242,14 @@ bool ProjectStickService::registerDevice(int& status) {
     PROJECT_STICK_STORE.pollIntervalSeconds = std::clamp<uint32_t>(doc["poll_interval_seconds"] | 300, 30, 86400);
     PROJECT_STICK_STORE.alertPollIntervalSeconds =
         std::clamp<uint32_t>(doc["alert_poll_interval_seconds"] | 30, 10, 3600);
-    if (!doc["studio_poll_seconds"].isNull())
-      PROJECT_STICK_STORE.studioPollSeconds = project_stick::clampStudioPollSeconds(doc["studio_poll_seconds"] | int64_t(0));
     PROJECT_STICK_STORE.tradingDay = doc["is_trading_day"] | false;
-    adoptOwner(doc["owner_id"] | "");
-    PROJECT_STICK_STORE.bound = doc["bound"] | false;
-    if (PROJECT_STICK_STORE.bound)
-      PROJECT_STICK_STORE.pairingCode.clear();
-    else {
-      StudioFrame::instance().clear();
-      studio_ble::revoke();
-    }
     parseServerTime(doc["server_time"] | "");
+    if (!(doc["bound"] | false)) {
+      LOG_INF("STICK", "Device was unbound in the cloud; back to BLE setup");
+      dropBinding();
+      return true;
+    }
+    adoptOwner(doc["owner_id"] | "");
     pollSeconds = PROJECT_STICK_STORE.pollIntervalSeconds;
     alertSeconds = PROJECT_STICK_STORE.alertPollIntervalSeconds;
     if (!PROJECT_STICK_STORE.saveToFile()) {
@@ -425,6 +334,7 @@ bool ProjectStickService::flushEvents() {
       obj["payload"]["task_id"] = event.studioTask;
       obj["payload"]["card_id"] = event.studioCard;
     }
+    if (!event.detail.empty()) obj["payload"]["detail"] = event.detail;
   }
   std::string body;
   serializeJson(request, body);
@@ -444,6 +354,12 @@ bool ProjectStickService::flushEvents() {
 bool ProjectStickService::requestPost(const std::string& path, const std::string& body, std::string& response,
                                       int& status) {
   status = 0;
+  std::string deviceToken;
+  {
+    ProjectStickStateLock lock(projectStickStateMutex);
+    deviceToken = PROJECT_STICK_STORE.deviceToken;
+  }
+  if (deviceToken.empty()) return false;  // no credential, no cloud requests
   if (!trustedClockReady()) return false;
 #ifdef SIMULATOR
   static bool injectedRegisterFailure = false;
@@ -474,14 +390,7 @@ bool ProjectStickService::requestPost(const std::string& path, const std::string
       return false;
     }
     http.addHeader("Content-Type", "application/json");
-    std::string deviceToken;
-    {
-      ProjectStickStateLock lock(projectStickStateMutex);
-      deviceToken = PROJECT_STICK_STORE.deviceToken;
-    }
-    if (!deviceToken.empty() && path.rfind("/api/v2/device/", 0) == 0) {
-      http.addHeader("Authorization", "Bearer " + deviceToken);
-    }
+    http.addHeader("Authorization", "Bearer " + deviceToken);
     status = http.sendRequest("POST", body);
     ota_trial::noteApiResult(status, WiFi.status() == WL_CONNECTED);
     response = http.getString();
@@ -532,15 +441,16 @@ bool ProjectStickService::fetchAuthenticated(const std::string& url,
     deviceToken = PROJECT_STICK_STORE.deviceToken;
   }
   lastFetchStatus = 0;
+  if (deviceToken.empty()) return false;  // no credential, no cloud requests
   if (!trustedClockReady()) return false;
   if (apiBlockedNow()) {
     lastFetchStatus = 429;  // not a transport failure: do not retry
     return false;
   }
   if (!http.begin(url)) return false;
-  // Same pinned-root client with or without a credential; the ESP-IDF HTTP
-  // client (and the mbedTLS TLS stack it pulls in) is not linked.
-  if (!deviceToken.empty()) http.addHeader("Authorization", "Bearer " + deviceToken);
+  // Pinned-root client; the ESP-IDF HTTP client (and the mbedTLS TLS stack it
+  // pulls in) is not linked.
+  http.addHeader("Authorization", "Bearer " + deviceToken);
   const int status = http.GET([this, &onData](const uint8_t* data, size_t length) {
     if (http.getStatus() != 200) return true;
     return onData(data, length);
@@ -688,15 +598,7 @@ uint32_t ProjectStickService::pollIntervalSeconds() const {
   ProjectStickStateLock lock(projectStickStateMutex);
   return PROJECT_STICK_STORE.pollIntervalSeconds;
 }
-uint32_t ProjectStickService::studioPollSeconds() const {
-  ProjectStickStateLock lock(projectStickStateMutex);
-  return PROJECT_STICK_STORE.studioPollSeconds;
-}
 bool ProjectStickService::apiBlocked() { return apiBlockedNow(); }
-bool ProjectStickService::apiRateLimited() {
-  std::lock_guard<std::mutex> lock(apiBackoffMutex);
-  return apiBackoff.rateLimited(millis());
-}
 bool ProjectStickService::clearBackoffForManualSync() {
   std::lock_guard<std::mutex> lock(apiBackoffMutex);
   return apiBackoff.clearForManual(millis());
@@ -715,9 +617,9 @@ bool ProjectStickService::isBound() const {
   return PROJECT_STICK_STORE.bound;
 }
 
-std::string ProjectStickService::pairingCode() const {
+bool ProjectStickService::hasCredential() const {
   ProjectStickStateLock lock(projectStickStateMutex);
-  return PROJECT_STICK_STORE.pairingCode;
+  return PROJECT_STICK_STORE.bound && !PROJECT_STICK_STORE.deviceToken.empty();
 }
 
 std::string ProjectStickService::deviceId() const {
@@ -740,114 +642,11 @@ bool ProjectStickService::applyBleBinding(const std::string& deviceToken, const 
   s.ownerId = owner;
   s.deviceToken = deviceToken.substr(0, 96);
   s.bound = true;
-  s.pairingCode.clear();
   const bool saved = s.saveToFile();
   LOG_INF("STICK", "Bound over BLE (owner=%s saved=%u)", owner.c_str(), saved ? 1u : 0u);
   return saved;
 }
 
-
-void ProjectStickService::closeIdleConnection() { http.end(); }
-
-void ProjectStickService::syncStudio() {
-  HttpKeepWarm connection(http);
-  if (!isBound() || studio_ble::connected()) return;
-
-  auto& frame = StudioFrame::instance();
-  auto active = frame.snapshot();
-  auto report = [&](const std::string& task, const char* state, const std::string& hash, const char* error = "") {
-    JsonDocument doc;
-    doc["device_id"] = PROJECT_STICK_STORE.deviceId;
-    doc["task_id"] = task;
-    doc["state"] = state;
-    doc["card_id"] = frame.displaySnapshot().card;
-    if (frame.snapshot().task != task) doc["override_task_id"] = frame.snapshot().task;
-    doc["sha256"] = hash;
-    doc["received_bytes"] = std::string(state) == "failed"         ? 0
-                            : frame.displaySnapshot().task == task ? frame.displaySnapshot().size
-                                                                   : frame.received();
-    doc["error"] = error;
-    std::string body, response;
-    serializeJson(doc, body);
-    int status = 0;
-    return requestPost("/api/v2/device/studio", body, response, status) && status == 200;
-  };
-  const auto visual = frame.displaySnapshot();
-  if (frame.needsReport() && visual.origin == "cloud" && report(visual.task, "displayed", visual.hash))
-    frame.acknowledge(visual.task);
-  std::string response;
-  std::string url = baseUrl + "/api/v2/device/studio?device_id=" + PROJECT_STICK_STORE.deviceId;
-#ifndef SIMULATOR
-  url += "&heap_free=" + std::to_string(ESP.getFreeHeap()) + "&heap_min=" + std::to_string(ESP.getMinFreeHeap()) +
-         "&sd_total=" + std::to_string(Storage.totalBytes()) + "&sd_used=" + std::to_string(Storage.usedBytes()) +
-         "&battery_percent=" + std::to_string(powerManager.getBatteryPercentage()) +
-         "&uptime_ms=" + std::to_string(millis()) + "&wifi_rssi=" + std::to_string(WiFi.RSSI());
-#endif
-  if (!fetchJson(url, response, 4096)) return;
-  JsonDocument doc;
-  if (deserializeJson(doc, response)) return;
-  adoptOwner(doc["owner_id"] | "");
-  if (!doc["studio_poll_seconds"].isNull()) {
-    ProjectStickStateLock lock(projectStickStateMutex);
-    const uint32_t seconds = project_stick::clampStudioPollSeconds(doc["studio_poll_seconds"] | int64_t(0));
-    if (PROJECT_STICK_STORE.studioPollSeconds != seconds) {
-      PROJECT_STICK_STORE.studioPollSeconds = seconds;
-      PROJECT_STICK_STORE.saveToFile();
-    }
-  }
-  flushEvents();
-  if (ota_trial::hasPendingOutcome()) reportFirmwareOutcome();
-  // Servers with OTA protocol 2 say whether a command is queued; older ones
-  // omit the flag and the device keeps polling /commands.
-  const bool commandPending = doc["command_pending"].isNull() || doc["command_pending"].as<bool>();
-  if (commandPending && syncStudioCommand()) return;
-  if (!doc["bluetooth"].isNull())
-    studio_ble::configure(PROJECT_STICK_STORE.deviceId, doc["bluetooth"]["secret"] | "", doc["bluetooth"]["epoch"] | 0,
-                          doc["bluetooth"]["owner_id"] | "");
-  frame.reconciled(doc["accepted_ble_task"] | "");
-  active = frame.snapshot();
-  if (doc["target"].isNull()) {
-    if (active.origin == "cloud") frame.restore();
-    return;
-  }
-  const std::string task = doc["target"]["task_id"] | "";
-  const std::string hash = doc["target"]["sha256"] | "";
-  const int64_t expires = doc["target"]["expires_epoch"] | int64_t(0);
-  if (active.origin == "ble" || active.task == task || frame.busy()) return;
-  if (studioAttemptTask != task) {
-    studioAttemptTask = task;
-    studioAttempts = 0;
-  }
-  if (studioAttempts >= 3 || (studioAttempts && static_cast<int32_t>(millis() - studioRetryAt) < 0)) return;
-  ++studioAttempts;
-  studioRetryAt = millis() + 15000;
-  const size_t size = doc["target"]["size"] | size_t(0);
-  if (!frame.start(task, hash, expires, "cloud", size)) {
-    report(task, "failed", hash, "设备存储不足、忙碌或画面大小无效");
-    return;
-  }
-  report(task, "transferring", hash);
-  const std::string path = "/api/v2/device/studio/frame?device_id=" + PROJECT_STICK_STORE.deviceId +
-                           "&task_id=" + task + "&offset=" + std::to_string(frame.received());
-  const bool fetched =
-      frame.received() == size || fetchAuthenticated(baseUrl + path, [&](const uint8_t* data, size_t length) {
-        return frame.append(frame.received(), data, length);
-      });
-  if (!fetched) {
-    frame.abort();
-    report(task, "failed", hash, "画面下载失败");
-    return;
-  }
-  report(task, "verifying", hash);
-  if (!frame.commit()) {
-    frame.abort();
-    report(task, "failed", hash, "画面校验失败");
-    return;
-  }
-  const auto clock = now();
-  if (clock.valid) frame.tick(clock.day * 86400LL + clock.secondOfDay - 8 * 3600);
-  report(task, size > StudioFrame::BYTES && frame.snapshot().card.empty() ? "scheduled" : "refreshing", hash);
-}
 
 namespace {
 constexpr char FIRMWARE_TEMP[] = "/.crosspoint/studio/firmware.tmp";
@@ -856,126 +655,7 @@ constexpr char FIRMWARE_META[] = "/.crosspoint/studio/firmware.meta";
 constexpr size_t MAX_FIRMWARE_BYTES = 0x640000;
 constexpr size_t MIN_FIRMWARE_BYTES = 100000;
 constexpr uint8_t MIN_OTA_BATTERY_PERCENT = 30;
-constexpr uint32_t FIRMWARE_RETRY_MS = 60000;
 
-struct InstallContext {
-  const char* commandId;
-  const char* version;
-};
-}  // namespace
-
-bool ProjectStickService::syncStudioCommand() {
-#ifndef SIMULATOR
-  // A new image is still proving itself; installing now would overwrite the
-  // slot it rolls back to. The command stays queued until the trial ends.
-  if (ota_trial::active()) return false;
-  if (firmwareRetryAtMs != 0 && static_cast<int32_t>(millis() - firmwareRetryAtMs) < 0) return false;
-  firmwareRetryAtMs = 0;
-  std::string response;
-  if (!fetchJson(baseUrl + "/api/v2/device/commands?device_id=" + PROJECT_STICK_STORE.deviceId, response, 2048))
-    return false;
-  JsonDocument doc;
-  if (deserializeJson(doc, response) || doc["command"].isNull()) return false;
-  const std::string id = doc["command"]["id"] | "", hash = doc["command"]["sha256"] | "";
-  const std::string version = doc["command"]["version"] | "";
-  const size_t size = doc["command"]["bytes"] | size_t(0);
-  auto report = [&](const char* state, const char* error = "", int progress = -1) {
-    JsonDocument body;
-    body["device_id"] = PROJECT_STICK_STORE.deviceId;
-    body["id"] = id;
-    body["state"] = state;
-    body["error"] = error;
-    if (progress >= 0) body["progress"] = progress;
-    std::string json, result;
-    serializeJson(body, json);
-    int status = 0;
-    return requestPost("/api/v2/device/commands", json, result, status) && status == 200;
-  };
-  auto fail = [&](const char* error) {
-    firmware_update::fail(error);
-    report("failed", error);
-    studio_ble::pause(false);
-    return true;
-  };
-  if (id.size() != 36 || !validSha256(hash) || version.empty() || version.size() > 32 || size < MIN_FIRMWARE_BYTES ||
-      size > MAX_FIRMWARE_BYTES) {
-    report("failed", "Invalid firmware metadata");
-    return true;
-  }
-  if (powerManager.getBatteryPercentage() < MIN_OTA_BATTERY_PERCENT) {
-    firmware_update::fail("low_battery");
-    report("failed", "Battery below 30%; charge before retrying");
-    return true;
-  }
-  if (StudioFrame::instance().busy() || studio_ble::connected()) return true;
-  studio_ble::pause(true);
-  HalPowerManager::Lock powerLock;
-  firmware_update::begin(version.c_str(), size);
-  if (!report("downloading", "", 0)) {
-    firmware_update::reset();
-    studio_ble::pause(false);
-    return true;
-  }
-  const auto download = downloadFirmware(id, hash, size);
-  if (download == DownloadResult::Fatal) return fail("Firmware download failed");
-  if (download == DownloadResult::Retry) {
-    // Transport trouble: keep the command in `downloading` and the partial
-    // file, and resume on a later poll instead of failing the whole update.
-    LOG_INF("OTA", "Firmware download interrupted; retrying in %us", (unsigned)(FIRMWARE_RETRY_MS / 1000));
-    firmwareRetryAtMs = millis() + FIRMWARE_RETRY_MS;
-    firmware_update::reset();
-    studio_ble::pause(false);
-    return true;
-  }
-
-  firmware_update::setPhase(firmware_update::Phase::Verifying);
-  report("verifying");
-  std::string downloadedHash;
-  HalFile file;
-  const bool sized = Storage.openFileForRead("STUDIO", FIRMWARE_TEMP, file) && file.size() == size;
-  file.close();
-  if (!sized || !hashFile(FIRMWARE_TEMP, downloadedHash) || downloadedHash != hash) {
-    Storage.remove(FIRMWARE_TEMP);
-    Storage.remove(FIRMWARE_META);
-    return fail("Firmware checksum mismatch");
-  }
-  const auto candidate = firmware_install::inspect(FIRMWARE_TEMP, version.c_str());
-  if (!candidate.ok()) {
-    Storage.remove(FIRMWARE_TEMP);
-    Storage.remove(FIRMWARE_META);
-    return fail(stick_fw::installVerdictName(candidate.verdict));
-  }
-  // The server re-checks here that the catalogue entry was not withdrawn.
-  if (!report("installing")) {
-    firmware_update::fail("Install not confirmed by server");
-    studio_ble::pause(false);
-    return true;
-  }
-  firmware_update::setPhase(firmware_update::Phase::Installing);
-  InstallContext context{id.c_str(), version.c_str()};
-  auto onProgress = +[](size_t written, size_t, void*) { firmware_update::setProgress(written); };
-  auto armTrial = +[](const esp_partition_t* dest, void* ctx) {
-    const auto* install = static_cast<const InstallContext*>(ctx);
-    return ota_trial::arm(dest, install->commandId, install->version);
-  };
-  const auto result = firmware_flash::flashFromSdPath(FIRMWARE_TEMP, onProgress, &context, false, armTrial);
-  if (result != firmware_flash::Result::OK) {
-    ota_trial::disarm();  // the new image will not boot, so there is no trial
-    return fail(firmware_flash::resultName(result));
-  }
-  Storage.remove(FIRMWARE_TEMP);
-  Storage.remove(FIRMWARE_META);
-  firmware_update::setPhase(firmware_update::Phase::Restarting);
-  report("restarting");
-  delay(1500);  // lets the UI paint the restarting state
-  ESP.restart();
-  return true;
-#else
-  return false;
-#endif
-}
-
-namespace {
 size_t fileSize(const char* path) {
   HalFile file;
   if (!Storage.openFileForRead("STUDIO", path, file)) return 0;
@@ -985,12 +665,85 @@ size_t fileSize(const char* path) {
 }
 }  // namespace
 
-ProjectStickService::DownloadResult ProjectStickService::downloadFirmware(const std::string& id,
-                                                                          const std::string& hash, size_t size) {
-  // A partial download survives errors, power loss, reboots and re-issued
-  // commands: it is keyed on the image (hash + size), which every command for
-  // the same catalogue entry serves byte-identically.
-  const std::string meta = hash + " " + std::to_string(size);
+// Only catalogue images hosted by the StockStick website are downloaded, over
+// the same pinned-root TLS client as the API.
+bool ProjectStickService::validFirmwareTarget(const FirmwareTarget& target) const {
+  const std::string prefix = baseUrl + "/firmware/";
+  return !target.version.empty() && target.version.size() <= 32 && validSha256(target.sha256) &&
+         target.bytes >= MIN_FIRMWARE_BYTES && target.bytes <= MAX_FIRMWARE_BYTES && target.url.size() < 256 &&
+         target.url.compare(0, prefix.size(), prefix) == 0 && target.url.find_first_of(" #?\r\n") == std::string::npos;
+}
+
+void ProjectStickService::installFirmware(const FirmwareTarget& target) {
+#ifndef SIMULATOR
+  // A new image is still proving itself; installing now would overwrite the
+  // slot it rolls back to.
+  if (ota_trial::active()) {
+    firmware_update::fail("trial_active");
+    return;
+  }
+  if (!hasCredential() || !validFirmwareTarget(target)) {
+    firmware_update::fail("invalid_target");
+    return;
+  }
+  if (powerManager.getBatteryPercentage() < MIN_OTA_BATTERY_PERCENT) {
+    firmware_update::fail("low_battery");
+    return;
+  }
+  if (StudioFrame::instance().busy()) {
+    firmware_update::fail("device_busy");
+    return;
+  }
+  // TLS and the flash writer need the heap NimBLE holds.
+  studio_ble::pause(true);
+  HalPowerManager::Lock powerLock;
+  firmware_update::begin(target.version.c_str(), target.bytes);
+  auto fail = [](const char* error) {
+    firmware_update::fail(error);
+    studio_ble::pause(false);
+  };
+  if (downloadFirmware(target) != DownloadResult::Complete) return fail("download_failed");
+
+  firmware_update::setPhase(firmware_update::Phase::Verifying);
+  std::string downloadedHash;
+  if (fileSize(FIRMWARE_TEMP) != target.bytes || !hashFile(FIRMWARE_TEMP, downloadedHash) ||
+      downloadedHash != target.sha256) {
+    Storage.remove(FIRMWARE_TEMP);
+    Storage.remove(FIRMWARE_META);
+    return fail("checksum_mismatch");
+  }
+  const auto candidate = firmware_install::inspect(FIRMWARE_TEMP, target.version.c_str());
+  if (!candidate.ok()) {
+    Storage.remove(FIRMWARE_TEMP);
+    Storage.remove(FIRMWARE_META);
+    return fail(stick_fw::installVerdictName(candidate.verdict));
+  }
+  firmware_update::setPhase(firmware_update::Phase::Installing);
+  auto onProgress = +[](size_t written, size_t, void*) { firmware_update::setProgress(written); };
+  auto armTrial = +[](const esp_partition_t* dest, void* version) {
+    return ota_trial::arm(dest, static_cast<const char*>(version));
+  };
+  const auto result = firmware_flash::flashFromSdPath(FIRMWARE_TEMP, onProgress,
+                                                      const_cast<char*>(target.version.c_str()), false, armTrial);
+  if (result != firmware_flash::Result::OK) {
+    ota_trial::disarm();  // the new image will not boot, so there is no trial
+    return fail(firmware_flash::resultName(result));
+  }
+  Storage.remove(FIRMWARE_TEMP);
+  Storage.remove(FIRMWARE_META);
+  firmware_update::setPhase(firmware_update::Phase::Restarting);
+  delay(1500);  // lets the UI and the phone see the restarting state
+  ESP.restart();
+#else
+  (void)target;
+  firmware_update::fail("unsupported");
+#endif
+}
+
+ProjectStickService::DownloadResult ProjectStickService::downloadFirmware(const FirmwareTarget& target) {
+  // A partial download survives errors, power loss and reboots: it is keyed on
+  // the image (hash + size), and a later install of the same image resumes it.
+  const std::string meta = target.sha256 + " " + std::to_string(target.bytes);
   {
     HalFile metaFile;
     char stored[128] = {};
@@ -999,7 +752,7 @@ ProjectStickService::DownloadResult ProjectStickService::downloadFirmware(const 
       stored[read > 0 ? read : 0] = '\0';
     }
     metaFile.close();
-    if (meta != stored || fileSize(FIRMWARE_TEMP) > size) {
+    if (meta != stored || fileSize(FIRMWARE_TEMP) > target.bytes) {
       Storage.remove(FIRMWARE_TEMP);
       Storage.mkdir("/.crosspoint/studio");
       if (!Storage.openFileForWrite("STUDIO", FIRMWARE_META, metaFile) ||
@@ -1010,37 +763,27 @@ ProjectStickService::DownloadResult ProjectStickService::downloadFirmware(const 
     }
   }
 
-  std::string deviceToken;
-  {
-    ProjectStickStateLock lock(projectStickStateMutex);
-    deviceToken = PROJECT_STICK_STORE.deviceToken;
-  }
+  HttpBurst burst(http);
+  const size_t size = target.bytes;
   constexpr size_t FLUSH_INTERVAL = 256 * 1024;  // bounds what power loss can discard
   for (uint8_t attempt = 0; attempt < 4; ++attempt) {
     // The file on SD is the source of truth: a short write or an aborted pass
     // may have stored more (or fewer) bytes than the last callback counted.
     size_t offset = fileSize(FIRMWARE_TEMP);
     if (offset == size) return DownloadResult::Complete;
-    if (offset > size) {
-      Storage.remove(FIRMWARE_TEMP);
-      offset = 0;
-    }
     firmware_update::setProgress(offset);
     if (offset > 0) LOG_INF("OTA", "Resuming firmware download at %u/%u", (unsigned)offset, (unsigned)size);
     if (!trustedClockReady()) return DownloadResult::Retry;
-    std::string url =
-        baseUrl + "/api/v2/device/firmware?device_id=" + PROJECT_STICK_STORE.deviceId + "&command_id=" + id;
-    if (offset > 0) url += "&offset=" + std::to_string(offset);
     HalFile output = Storage.open(FIRMWARE_TEMP, O_WRONLY | O_CREAT | O_APPEND);
     if (!output) return DownloadResult::Retry;
-    if (!http.begin(url)) return DownloadResult::Fatal;
-    http.addHeader("Authorization", "Bearer " + deviceToken);
+    if (!http.begin(target.url)) return DownloadResult::Fatal;
+    if (offset > 0) http.addHeader("Range", "bytes=" + std::to_string(offset) + "-");
     bool restartFromZero = false;
     const size_t requested = offset;
     size_t unflushed = 0;
     const int status = http.GET([&](const uint8_t* data, size_t length) {
       const int code = http.getStatus();
-      // A server that ignores `offset` answers 200 with the whole image.
+      // A server that ignores Range answers 200 with the whole image.
       if (requested > 0 && code == 200) {
         restartFromZero = true;
         return false;
@@ -1060,14 +803,12 @@ ProjectStickService::DownloadResult ProjectStickService::downloadFirmware(const 
     output.close();
     ota_trial::noteApiResult(status, WiFi.status() == WL_CONNECTED);
     if (restartFromZero) {
-      LOG_INF("OTA", "Server does not support resume; restarting download");
+      LOG_INF("OTA", "Server ignored Range; restarting download");
       Storage.remove(FIRMWARE_TEMP);
       continue;
     }
-    // Withdrawn, cancelled or not this device's command: resuming cannot help.
-    if (status == 401 || status == 403 || status == 404 || status == 409 || status == 416) {
-      return DownloadResult::Fatal;
-    }
+    // Withdrawn image or unsatisfiable range: resuming cannot help.
+    if (status == 403 || status == 404 || status == 410 || status == 416) return DownloadResult::Fatal;
     LOG_INF("OTA", "Firmware download pass: status=%d stored %u/%u", status, (unsigned)fileSize(FIRMWARE_TEMP),
             (unsigned)size);
     if (attempt < 3) delay(1000UL << attempt);
@@ -1076,73 +817,83 @@ ProjectStickService::DownloadResult ProjectStickService::downloadFirmware(const 
 }
 
 ProjectStickService::FirmwareOffer ProjectStickService::checkFirmware() {
-  HttpBurst burst(http);
   FirmwareOffer offer;
+  if (!hasCredential()) {
+    offer.status = FirmwareOffer::Status::Unbound;
+    return offer;
+  }
+  HttpBurst burst(http);
   std::string response;
-  if (!fetchJson(
-          baseUrl + "/api/v2/device/firmware/latest?device_id=" + PROJECT_STICK_STORE.deviceId + "&channel=stable",
-          response, 4096)) {
+  if (!fetchJson(baseUrl + "/api/v2/device/firmware/latest?device_id=" + deviceId() + "&channel=stable", response,
+                 4096)) {
     return offer;
   }
   JsonDocument doc;
   if (deserializeJson(doc, response)) return offer;
-  if (!(doc["bound"] | false)) {
-    offer.status = FirmwareOffer::Status::Unbound;
-  } else if (doc["latest"].isNull()) {
+  if (doc["latest"].isNull()) {
     offer.status = FirmwareOffer::Status::UpToDate;
-  } else {
-    offer.status = FirmwareOffer::Status::UpdateAvailable;
-    offer.id = doc["latest"]["id"] | "";
-    offer.version = doc["latest"]["version"] | "";
-    offer.notes = doc["latest"]["notes"] | "";
-    if (offer.id.size() != 36 || offer.version.empty()) offer.status = FirmwareOffer::Status::Failed;
+    return offer;
   }
+  offer.target.version = doc["latest"]["version"] | "";
+  offer.target.url = doc["latest"]["url"] | "";
+  offer.target.sha256 = doc["latest"]["sha256"] | "";
+  offer.target.bytes = doc["latest"]["bytes"] | size_t(0);
+  offer.notes = doc["latest"]["notes"] | "";
+  offer.status = validFirmwareTarget(offer.target) ? FirmwareOffer::Status::UpdateAvailable
+                                                   : FirmwareOffer::Status::Failed;
   return offer;
 }
 
-ProjectStickService::FirmwareOffer ProjectStickService::requestFirmware(const std::string& firmwareId) {
-  HttpBurst burst(http);
-  FirmwareOffer offer;
-  offer.id = firmwareId;
-  offer.status = FirmwareOffer::Status::RequestFailed;
-  JsonDocument body;
-  body["device_id"] = PROJECT_STICK_STORE.deviceId;
-  body["action"] = "request";
-  body["firmware_id"] = firmwareId;
-  std::string json, response;
-  serializeJson(body, json);
-  int status = 0;
-  if (!requestPost("/api/v2/device/commands", json, response, status) || status != 200) return offer;
-  offer.status = FirmwareOffer::Status::Requested;
-  // Install right away on this worker; progress is published for the UI.
-  syncStudioCommand();
-  return offer;
-}
-
+// Confirmed installs show up as the new firmware_version at the next
+// register; a rollback is reported as an event.
 void ProjectStickService::reportFirmwareOutcome() {
   const auto outcome = ota_trial::pendingOutcome();
-  if (!outcome.pending) return;
-  // Confirmed installs complete on the server when the device reports the new
-  // version; only rollbacks need an explicit failure report.
-  if (!outcome.rolledBack || outcome.commandId[0] == '\0') {
-    ota_trial::clearOutcome();
+  if (outcome.pending && outcome.rolledBack) {
+    ProjectStickStateLock lock(projectStickStateMutex);
+    ProjectStickEvent event;
+    event.id = makeUuid();
+    event.type = "firmware_rolled_back";
+    event.detail = std::string(outcome.version) + " " + outcome.reason;
+    event.clientTs = project_stick::formatIso8601Shanghai(now());
+    PROJECT_STICK_STORE.enqueue(std::move(event));
+    PROJECT_STICK_STORE.saveToFile();
+  }
+  ota_trial::clearOutcome();
+}
+
+#ifdef SIMULATOR
+void ProjectStickService::importSimulatorProgram() {
+  constexpr char IMPORT[] = "/.crosspoint/studio/import.ssp";
+  HalFile file;
+  if (!Storage.openFileForRead("STUDIO", IMPORT, file)) return;
+  const size_t size = file.size();
+  auto& frame = StudioFrame::instance();
+  std::string hash;
+  file.close();
+  if (!hashFile(IMPORT, hash)) {
+    Storage.remove(IMPORT);
     return;
   }
-  JsonDocument body;
-  body["device_id"] = PROJECT_STICK_STORE.deviceId;
-  body["id"] = outcome.commandId;
-  body["state"] = "failed";
-  char error[96];
-  snprintf(error, sizeof(error), "Rolled back from %s (%s)", outcome.version, outcome.reason);
-  body["error"] = error;
-  std::string json, result;
-  serializeJson(body, json);
-  int status = 0;
-  // 409 means the server already closed the command; either way it is settled.
-  if (requestPost("/api/v2/device/commands", json, result, status) && (status == 200 || status == 409)) {
-    ota_trial::clearOutcome();
+  // The task id only has to be a stable UUID-shaped handle for this content.
+  const std::string task = hash.substr(0, 8) + "-" + hash.substr(8, 4) + "-4" + hash.substr(13, 3) + "-8" +
+                           hash.substr(17, 3) + "-" + hash.substr(20, 12);
+  bool installed = frame.snapshot().hash == hash;
+  if (!installed && frame.start(task, hash, 0, size) && Storage.openFileForRead("STUDIO", IMPORT, file)) {
+    auto buffer = makeUniqueNoThrow<uint8_t[]>(IO_CHUNK);
+    size_t offset = 0;
+    while (buffer && file.available()) {
+      const int count = file.read(buffer.get(), IO_CHUNK);
+      if (count <= 0 || !frame.append(offset, buffer.get(), static_cast<size_t>(count))) break;
+      offset += static_cast<size_t>(count);
+    }
+    file.close();
+    installed = offset == size && frame.commit();
+    if (!installed) frame.abort(true);
   }
+  Storage.remove(IMPORT);
+  LOG_INF("STICK", "Simulator program import %s (%u bytes)", installed ? "installed" : "failed", (unsigned)size);
 }
+#endif
 
 void ProjectStickService::sendStudioFeedback(const std::string& task, const std::string& card, bool useful) {
   ProjectStickStateLock lock(projectStickStateMutex);
@@ -1163,6 +914,20 @@ void ProjectStickService::adoptOwner(const std::string& owner) {
   studio_ble::revoke();
   auto& s = PROJECT_STICK_STORE;
   s.ownerId = owner;
+  s.alertUntil = {};
+  s.pendingEvents.clear();
+  s.seenAlertIds.clear();
+  s.saveToFile();
+  refreshOwnership();
+}
+void ProjectStickService::dropBinding() {
+  ProjectStickStateLock lock(projectStickStateMutex);
+  auto& s = PROJECT_STICK_STORE;
+  StudioFrame::instance().clear();
+  studio_ble::revoke();
+  s.bound = false;
+  s.deviceToken.clear();
+  s.ownerId.clear();
   s.alertUntil = {};
   s.pendingEvents.clear();
   s.seenAlertIds.clear();

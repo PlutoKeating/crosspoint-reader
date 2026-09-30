@@ -116,13 +116,8 @@ TEST(ProjectStickSyncState, BackgroundWorkGateRejectsRefreshWhileCloudIsQueuedOr
 TEST(ProjectStickSyncState, FailedRegistrationRemainsDueAtTheNextPoll) {
   EXPECT_TRUE(registrationDue(5UL * 60UL * 1000UL, 0));
   EXPECT_FALSE(registrationDue(5UL * 60UL * 1000UL, 60UL * 1000UL));
-  EXPECT_TRUE(registrationDue(4UL * 60UL * 60UL * 1000UL + 1, 1));
-}
-
-TEST(ProjectStickSyncState, AlreadyBoundPairingResponseStillProceedsToRegistration) {
-  EXPECT_TRUE(pairingFailureAllowsRegistration(409));
-  EXPECT_FALSE(pairingFailureAllowsRegistration(401));
-  EXPECT_FALSE(pairingFailureAllowsRegistration(500));
+  EXPECT_FALSE(registrationDue(4UL * 60UL * 60UL * 1000UL + 1, 1));
+  EXPECT_TRUE(registrationDue(6UL * 60UL * 60UL * 1000UL + 1, 1));
 }
 
 TEST(ProjectStickCore, ParsesProtocolTimesIntoShanghai) {

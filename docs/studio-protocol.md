@@ -14,8 +14,12 @@ physical panel coordinates. Firmware does not reflow text or replace fonts.
 A complete program begins with `SSP1`, a uint32LE JSON-header length, an ASCII
 escaped JSON header, then contiguous rasters. The header includes version 1,
 plan, scene-to-frame indices and frame IDs/digests. Maximum header 32,768 bytes,
-complete file 8,000,000 bytes, 64 windows. Cloud/phone check per-frame hashes and
+complete file 8,000,000 bytes, 64 windows. The phone checks per-frame hashes and
 source mappings; firmware checks total SHA256, size and safe indices.
+
+Since 2.4.0 content reaches the device over BLE only (Project.StockStick
+`docs/product/BLE-ONLY-DELIVERY.md`): when a user publishes, the phone and the
+device are both at hand, so the device never pulls content from the cloud.
 
 `StudioFrame` streams to SD. `incoming.json` and `incoming.bin` retain a valid
 partial transfer; restart rehashes its plaintext prefix and continues at its
@@ -35,10 +39,9 @@ persisted. A backward clock cannot replay elapsed rotation.
 
 A temporary raw card preserves the installed program. Expiration or manual resume
 restores that program. A permitted alert may overlay the raw card without destroying
-it; on alert expiry the raw card resumes while still valid. Reports include the
-actual program card and current override context. With no current scheduled frame,
-a newly installed program is `scheduled`, not `displayed`, and retains the last
-valid visual.
+it; on alert expiry the raw card resumes while still valid. BLE STATUS receipts
+carry the actual program card. With no current scheduled frame, a newly installed
+program is `scheduled`, not `displayed`, and retains the last valid visual.
 
 Since 2.2.0 every key that reaches Studio acts: the device-wide Nokia keyguard
 (20 s idle, left-then-right unlock) owns locking on the Studio page as on every
@@ -55,50 +58,42 @@ sensor.
 Portable idle CPU policy keeps scheduling and BLE running. Battery lifetime and
 BLE/TLS memory coexistence require X3 measurements, not simulator estimates.
 
-## Cloud and ownership
+## Cloud requests
 
-Device-bearer `GET /api/v2/device/studio` returns desired task, payload size/hash,
-expiry, owner identity, BLE authority and accepted offline task. `frame?offset=`
-streams the remaining payload. POST reports receiving/verification/refresh states,
-`scheduled`, `displayed` with actual card ID, or failure. Late receipts cannot
-complete a newer target.
+Only a bound device holding a device token talks to the cloud; an unbound device
+(and the website simulator, which is provisioned without a token) makes no
+requests at all. All requests use `Authorization: Bearer <device_token>`:
 
-### Poll cadence and backoff
+- `POST /api/v2/device/register`: heartbeat every 6 h and on coming online
+  (retried no faster than `poll_interval_seconds`). Returns `bound`, `owner_id`,
+  `server_time`, `is_trading_day` and `alert_poll_interval_seconds`. `bound:
+  false` or a 401 drops the credential, the Studio data and the BLE authority:
+  the device is back in BLE setup mode.
+- `GET /api/v2/device/alerts`: every `alert_poll_interval_seconds`, only inside
+  trading windows (see project-stick.md "Market alerts").
+- `POST /api/v2/device/events`: batched Studio feedback (`studio_next`,
+  `studio_useful`) and `firmware_rolled_back` (`payload.detail` = "<version>
+  <reason>"), sent after a heartbeat; queue capped at 32.
+- `GET /api/v2/device/firmware/latest` on a manual 「检查更新」, then a direct
+  download of the catalogue `url` (see OTA below).
 
-Every device request costs database queries on the server, whose daily budget
-is shared by all devices and the website simulator, so the cadence is set by
-the server and the device never retries hot:
+One backoff gate covers every request. Transport failures, 429 and 5xx block all
+cloud requests for 30 s, 60 s, 120 s … up to 10 min (reset by any other answer);
+a 429 honours `Retry-After` in seconds (capped at 10 min; the simulator's HTTP
+shim exposes no headers). A manual firmware check may skip an error backoff,
+never a 429. Requests retry once, only on a transport failure. A failed
+heartbeat changes nothing on screen: content keeps playing locally.
 
-- The Studio target is polled every `studio_poll_seconds` (from `/register` and
-  from every `/studio` response; clamped to 15–3600 s, default 60 s, persisted)
-  while Wi-Fi is connected, the device is bound and BLE is idle.
-- Extra polls, each once: right after coming online (the sync includes the
-  poll), after a BLE session ends (reconciles a BLE-delivered task), and when a
-  cloud card first shows (sends the `displayed` receipt promptly). A manual
-  「同步」 runs a full sync and then three follow-up polls 10 s apart, so a
-  publish made moments earlier is picked up. The front-right 「换一张」 is local
-  only.
-- The `/register` heartbeat runs every `poll_interval_seconds` only while it is
-  due (every 4 h) or the device is unbound (pairing); `/alerts` runs every
-  `alert_poll_interval_seconds`, and only inside trading windows.
-- One backoff gate covers every request. Transport failures, 429 and 5xx block
-  all cloud requests for 30 s, 60 s, 120 s … up to 10 min (reset by any other
-  answer). A 429 honours `Retry-After` in seconds (capped at 10 min; the
-  simulator's HTTP shim exposes no headers and uses the exponential backoff)
-  and shows 「云端繁忙，稍后自动同步」 instead of a sync failure. A manual sync or
-  firmware check may skip an error backoff, never a 429. Requests retry once,
-  only on a transport failure; server answers are never retried in place.
-
-Ownership changes clear Studio data, pending events and alert state and rotate BLE
-credentials; device settings and saved Wi-Fi networks are kept. A revoked fully offline device cannot learn
-about revocation until it reconnects; the mini-program makes that limitation visible.
+Ownership changes clear Studio data, pending events and alert state; device
+settings and saved Wi-Fi networks are kept. A new owner binds over BLE setup,
+which delivers the new BLE authority.
 
 The production API is `https://stockstick.plutokeating.beer`. TLS pins ISRG Root X2,
 ISRG Root X1 and GTS Root R4 (`src/project_stick/StudioTrust.h`) with peer and hostname
-verification in SecureNet, and requires a usable system clock. The domain currently
-chains Let's Encrypt YE1 -> Root YE -> ISRG Root X2; the Google root stays pinned because
-Cloudflare may reissue from Google Trust Services. Another deployment must maintain its
-actual trust chain; never disable verification to transmit authorization material.
+verification in SecureNet, and requires a usable system clock. The Google root stays
+pinned because Cloudflare may issue from Google Trust Services. Another deployment must
+maintain its actual trust chain; never disable verification to transmit authorization
+material.
 
 ## BLE protocol 2
 
@@ -107,7 +102,7 @@ CONTROL is newline-terminated ASCII JSON, max512 bytes; DATA is uint32LE offset 
 up to240 cipher bytes; STATUS is readable JSON max512 bytes. Control is sent in20-byte
 chunks and data respects negotiated ATT MTU. One authenticated transfer at a time.
 
-K is an independent 32-byte authority key, N a fresh16-byte random connection nonce.
+K is the independent 32-byte authority key delivered by the BLE setup `bind`, N a fresh16-byte random connection nonce.
 HMAC-SHA256 input strings are ASCII with literal separators; output is lowercase hex:
 
 ```
@@ -125,24 +120,24 @@ phoneTime; valid clocks are not blindly reset by a phone.
 
 Commit ticks the installed plan. STATUS signs `scheduled2` with empty card ID
 if no current frame, or `displayed2` with the actual frame after display completion.
-The phone persists the frozen package/source/receipt, then reconciles online.
-Conflict requires explicit keep-device/keep-cloud choice; receipt authentication
-checks current owner/grant and epoch. `accepted_ble_task` releases offline protection.
+The phone persists the frozen package/source/receipt and uploads the signed receipt
+to the cloud history; receipt authentication checks current owner/grant and epoch.
 
-Since 2.3.0 the same service also runs BLE setup protocol 3 (unbound devices,
-key from the setup QR) and accepts `scan`/`wifi` ops in bound mode; STATUS gains
-`wifi`, `scan` and `networks`, and the advertised name is `StockStick-XXXX`.
-Protocol 3 is defined in Project.StockStick `docs/product/BLE-SETUP.md`; see also
+The same service runs BLE setup protocol 3 (since 2.3.0; unbound devices, key from
+the setup QR) and accepts `scan`/`wifi` and (since 2.4.0) `ota` ops in bound mode;
+bound STATUS also carries `fw`, `wifi`, `scan`, `networks` and `ota`, and the
+advertised name is `StockStick-XXXX`. Protocol 3 is defined in Project.StockStick
+`docs/product/BLE-SETUP.md` and `BLE-ONLY-DELIVERY.md`; see also
 [project-stick.md](project-stick.md#ble-setup-protocol-3-since-230).
 
 ## OTA
 
-`studio_ota:1` enables the owner-controlled command API and `ota:2` the
-current protocol: resumable downloads, image identity checks, trial boot with
-automatic rollback and outcome reports. The studio poll's `command_pending`
-flag gates `/commands` polling. The complete lifecycle, release tooling and
-server contract are in [firmware-ota.md](firmware-ota.md). Simulator OTA and
-BLE adapters do not perform hardware work.
+Triggered over BLE (op `ota`, bound mode, MAC `ota3|N|version|sha256|bytes|url`)
+or from Settings 「检查更新」; either way the device downloads the catalogue image
+itself over Wi-Fi (resumable, `Range`), verifies SHA-256 and the image
+descriptor, flashes, and boots it on trial with automatic rollback. The complete
+lifecycle is in [firmware-ota.md](firmware-ota.md). Simulator OTA and BLE adapters
+do not perform hardware work.
 
 ## Build and verification
 

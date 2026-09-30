@@ -195,7 +195,7 @@ void SdFirmwareUpdateActivity::performUpdate() {
   auto armTrial = +[](const esp_partition_t* dest, void* ctx) {
     auto* self = static_cast<SdFirmwareUpdateActivity*>(ctx);
     if (!self->stockStickImage) return true;
-    return ota_trial::arm(dest, "", self->imageVersion.c_str());
+    return ota_trial::arm(dest, self->imageVersion.c_str());
   };
   const auto result =
       firmware_flash::flashFromSdPath(firmwarePath.c_str(), progressCb, this, /*alreadyValidated=*/false, armTrial);

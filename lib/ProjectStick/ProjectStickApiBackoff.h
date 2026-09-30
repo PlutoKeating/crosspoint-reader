@@ -4,24 +4,12 @@
 #include <cstdint>
 #include <cstdlib>
 
-// Request cadence for the cloud API (docs/studio-protocol.md "Poll cadence").
-// Every device request costs database queries on the server, whose daily
-// budget is shared by all devices and the website simulator, so the device
-// polls on a server-provided interval and backs off on overload instead of
-// retrying hot.
+// Shared backoff for the few cloud requests a device still makes (register
+// heartbeat, trading-hours alerts, events, firmware check/download; see
+// docs/studio-protocol.md "Cloud requests"). Every request costs database
+// queries on the server, so an overloaded or rate-limiting server is left
+// alone instead of being retried hot.
 namespace project_stick {
-
-constexpr uint32_t DEFAULT_STUDIO_POLL_SECONDS = 60;
-constexpr uint32_t MIN_STUDIO_POLL_SECONDS = 15;
-constexpr uint32_t MAX_STUDIO_POLL_SECONDS = 3600;
-
-// `studio_poll_seconds` from /register or /studio; absent or invalid values
-// fall back to the default.
-inline uint32_t clampStudioPollSeconds(int64_t raw) {
-  if (raw <= 0) return DEFAULT_STUDIO_POLL_SECONDS;
-  return static_cast<uint32_t>(
-      std::clamp<int64_t>(raw, MIN_STUDIO_POLL_SECONDS, MAX_STUDIO_POLL_SECONDS));
-}
 
 // Retry-After in delta-seconds form; HTTP-date and malformed values yield 0
 // (the caller then uses its own backoff).
@@ -92,40 +80,6 @@ class ApiBackoff {
   bool active_ = false;
   bool rateLimited_ = false;
   uint32_t untilMs_ = 0;
-};
-
-// When the Studio target is polled: every `interval` seconds, right away after
-// pollNow() (coming online, a finished BLE session, a card to report), and a
-// short 10 s burst after a manual sync so a publish made moments ago is picked
-// up without polling hot all the time.
-class StudioPollSchedule {
- public:
-  static constexpr uint32_t BURST_INTERVAL_MS = 10000;
-  static constexpr uint8_t BURST_POLLS = 3;
-
-  void setIntervalSeconds(uint32_t seconds) { intervalMs_ = clampStudioPollSeconds(seconds) * 1000UL; }
-  uint32_t intervalMs() const { return intervalMs_; }
-  void pollNow() { immediate_ = true; }
-  void startBurst() { burstLeft_ = BURST_POLLS; }
-  bool due(uint32_t nowMs) const {
-    if (immediate_ || !polledOnce_) return true;
-    const uint32_t interval = burstLeft_ > 0 ? BURST_INTERVAL_MS : intervalMs_;
-    return nowMs - lastMs_ >= interval;
-  }
-  // A Studio GET ran (either a poll or a full sync, which includes one).
-  void polled(uint32_t nowMs) {
-    if (!immediate_ && polledOnce_ && burstLeft_ > 0) --burstLeft_;
-    immediate_ = false;
-    polledOnce_ = true;
-    lastMs_ = nowMs;
-  }
-
- private:
-  uint32_t intervalMs_ = DEFAULT_STUDIO_POLL_SECONDS * 1000UL;
-  uint32_t lastMs_ = 0;
-  uint8_t burstLeft_ = 0;
-  bool immediate_ = false;
-  bool polledOnce_ = false;
 };
 
 }  // namespace project_stick

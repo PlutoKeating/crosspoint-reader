@@ -27,27 +27,24 @@ void ProjectStickBackgroundSync::begin() {
   }
 }
 
-bool ProjectStickBackgroundSync::requestSync(bool registerFirst) { return queue(WorkKind::Sync, registerFirst); }
+bool ProjectStickBackgroundSync::requestSync() { return queue(WorkKind::Sync); }
 
-bool ProjectStickBackgroundSync::requestStudioPoll() { return queue(WorkKind::StudioPoll, false); }
+bool ProjectStickBackgroundSync::requestAlertPoll() { return queue(WorkKind::AlertPoll); }
 
-bool ProjectStickBackgroundSync::requestAlertPoll() { return queue(WorkKind::AlertPoll, false); }
+bool ProjectStickBackgroundSync::requestFirmwareCheck() { return queue(WorkKind::FirmwareCheck); }
 
-bool ProjectStickBackgroundSync::requestFirmwareCheck() { return queue(WorkKind::FirmwareCheck, false); }
-
-bool ProjectStickBackgroundSync::requestFirmwareInstall(const std::string& firmwareId) {
-  return queue(WorkKind::FirmwareRequest, false, firmwareId);
+bool ProjectStickBackgroundSync::requestFirmwareInstall(const ProjectStickService::FirmwareTarget& target) {
+  return queue(WorkKind::FirmwareInstall, target);
 }
 
-bool ProjectStickBackgroundSync::queue(WorkKind kind, bool registerFirst, const std::string& firmwareId) {
+bool ProjectStickBackgroundSync::queue(WorkKind kind, const ProjectStickService::FirmwareTarget& target) {
   // Copied outside the spinlock: std::string may allocate.
-  std::string id = firmwareId;
+  ProjectStickService::FirmwareTarget copy = target;
   taskENTER_CRITICAL(&stateMux);
   const bool accepted = started && taskHandle != nullptr && gate.tryQueue();
   if (accepted) {
     pendingKind = kind;
-    pendingRegisterFirst = registerFirst;
-    pendingFirmwareId.swap(id);
+    std::swap(pendingTarget, copy);
   }
   taskEXIT_CRITICAL(&stateMux);
   if (accepted) xTaskNotify(taskHandle, 1, eIncrement);
@@ -79,25 +76,16 @@ void ProjectStickBackgroundSync::taskTrampoline(void* context) {
 }
 
 void ProjectStickBackgroundSync::taskLoop() {
-  // Studio polls keep their TLS connection warm; drop it once polling pauses
-  // (activity left, Wi-Fi gone, BLE session) so the heap is not held.
-  constexpr TickType_t IDLE_CLOSE_TICKS = pdMS_TO_TICKS(45000);
   while (true) {
-    if (ulTaskNotifyTake(pdTRUE, IDLE_CLOSE_TICKS) == 0) {
-      service.closeIdleConnection();
-      continue;
-    }
+    ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
 
     WorkKind kind = WorkKind::None;
-    bool registerFirst = false;
-    std::string firmwareId;
+    ProjectStickService::FirmwareTarget target;
     taskENTER_CRITICAL(&stateMux);
     if (gate.begin()) {
       kind = pendingKind;
-      registerFirst = pendingRegisterFirst;
-      firmwareId.swap(pendingFirmwareId);
+      std::swap(target, pendingTarget);
       pendingKind = WorkKind::None;
-      pendingRegisterFirst = false;
     }
     taskEXIT_CRITICAL(&stateMux);
     if (kind == WorkKind::None) continue;
@@ -105,13 +93,14 @@ void ProjectStickBackgroundSync::taskLoop() {
     Result completed;
     completed.kind = kind;
     if (kind == WorkKind::Sync) {
-      completed.syncReport = service.sync(registerFirst);
-    } else if (kind == WorkKind::StudioPoll) {
-      service.syncStudio();
+      completed.syncReport = service.sync();
     } else if (kind == WorkKind::FirmwareCheck) {
       completed.firmware = service.checkFirmware();
-    } else if (kind == WorkKind::FirmwareRequest) {
-      completed.firmware = service.requestFirmware(firmwareId);
+    } else if (kind == WorkKind::FirmwareInstall) {
+      // Returns only when the install stopped (a success restarts).
+      service.installFirmware(target);
+      completed.firmware.status = ProjectStickService::FirmwareOffer::Status::InstallFailed;
+      completed.firmware.target = std::move(target);
     } else {
       completed.alertReceived = service.pollAlerts();
       if (completed.alertReceived) completed.alertDisplay = service.displaySnapshot();

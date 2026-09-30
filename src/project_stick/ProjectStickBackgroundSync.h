@@ -12,7 +12,7 @@
 
 class ProjectStickBackgroundSync {
  public:
-  enum class WorkKind : uint8_t { None, Sync, AlertPoll, StudioPoll, FirmwareCheck, FirmwareRequest };
+  enum class WorkKind : uint8_t { None, Sync, AlertPoll, FirmwareCheck, FirmwareInstall };
 
   struct Result {
     uint32_t sequence = 0;
@@ -26,12 +26,11 @@ class ProjectStickBackgroundSync {
   static ProjectStickBackgroundSync& getInstance();
 
   void begin();
-  bool requestSync(bool registerFirst);
+  bool requestSync();
   bool requestAlertPoll();
-  bool requestStudioPoll();
   bool requestFirmwareCheck();
-  // Asks the server for an install command and runs it on the worker.
-  bool requestFirmwareInstall(const std::string& firmwareId);
+  // Downloads, verifies and flashes `target` on the worker (restarts on success).
+  bool requestFirmwareInstall(const ProjectStickService::FirmwareTarget& target);
   bool busy() const;
   uint32_t latestSequence() const;
   bool takeResult(uint32_t& lastSequence, Result& result) const;
@@ -43,13 +42,12 @@ class ProjectStickBackgroundSync {
 
   static void taskTrampoline(void* context);
   [[noreturn]] void taskLoop();
-  bool queue(WorkKind kind, bool registerFirst, const std::string& firmwareId = {});
+  bool queue(WorkKind kind, const ProjectStickService::FirmwareTarget& target = {});
 
   mutable portMUX_TYPE stateMux = portMUX_INITIALIZER_UNLOCKED;
   project_stick::BackgroundWorkGate gate;
   WorkKind pendingKind = WorkKind::None;
-  bool pendingRegisterFirst = false;
-  std::string pendingFirmwareId;
+  ProjectStickService::FirmwareTarget pendingTarget;
   bool started = false;
   TaskHandle_t taskHandle = nullptr;
 

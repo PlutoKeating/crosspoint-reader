@@ -1,5 +1,6 @@
 #pragma once
-// BLE setup protocol 3 (Project.StockStick docs/product/BLE-SETUP.md): the
+// BLE protocol 3 (Project.StockStick docs/product/BLE-SETUP.md and
+// BLE-ONLY-DELIVERY.md): the
 // pure parts shared by the firmware and host tests. MAC message strings, the
 // AES-256-CTR "seal", the setup QR payload and the size-capped STATUS network
 // list. Crypto primitives come from BleCrypto.cpp (mbedtls on the device,
@@ -34,6 +35,9 @@ std::string setupProofMessage(const std::string& nonce, const std::string& devic
 std::string scanMessage(const std::string& nonce);
 std::string wifiMessage(const std::string& nonce, const std::string& ssid, const std::string& pw);
 std::string bindMessage(const std::string& nonce, const std::string& owner, uint32_t epoch, const std::string& ct);
+// BLE-triggered OTA (Project.StockStick docs/product/BLE-ONLY-DELIVERY.md).
+std::string otaMessage(const std::string& nonce, const std::string& version, const std::string& sha256, size_t bytes,
+                       const std::string& url);
 
 // stockstick://setup?d=<device_id>&k=<K>; 94 characters (QR version 5-L, byte mode).
 std::string setupQrPayload(const std::string& deviceId, const std::string& keyHex);

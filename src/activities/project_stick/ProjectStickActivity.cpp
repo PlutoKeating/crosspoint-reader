@@ -28,7 +28,6 @@ constexpr int NETWORK_TAG_DOT_GAP = 5;
 constexpr int COMPACT_HEADER_BATTERY_RESERVE = 90;
 constexpr int QR_SIZE = 185;  // whole 5 px modules for version 5 (37 modules)
 constexpr int QR_GAP = 18;
-constexpr int CODE_GAP = 24;
 constexpr int PROMPT_GAP = 12;
 
 void drawNetworkStatusTag(const GfxRenderer& renderer, const Rect& headerBounds, int rightInset, bool connected) {
@@ -69,47 +68,17 @@ void ProjectStickActivity::onEnter() {
   service.begin();
   PROJECT_STICK_BACKGROUND_SYNC.begin();
   backgroundResultSequence = PROJECT_STICK_BACKGROUND_SYNC.latestSequence();
-  if (WiFi.status() == WL_CONNECTED) {
-    state = State::Connecting;
-    setStatus(tr(STR_PROJECT_STICK_SYNCING));
-    requestCloudSync(true);
-  } else {
-    state = State::Offline;
-    setStatus(tr(STR_PROJECT_STICK_OFFLINE));
-  }
+  requestCloudSync();
   requestUpdate();
 }
 
-bool ProjectStickActivity::requestCloudSync(bool registerFirst) {
-  if (WiFi.status() != WL_CONNECTED || ProjectStickService::apiBlocked()) return false;
-  const bool queued = PROJECT_STICK_BACKGROUND_SYNC.requestSync(registerFirst);
-  if (queued) {
-    lastSyncAttemptMs = millis();
-    // A full sync includes the Studio poll.
-    studioPolls.polled(lastSyncAttemptMs);
-  }
+// Register heartbeat (plus events and an OTA outcome) of a bound device.
+// Content never comes from the cloud; unbound devices make no requests.
+bool ProjectStickActivity::requestCloudSync() {
+  if (WiFi.status() != WL_CONNECTED || ProjectStickService::apiBlocked() || !service.hasCredential()) return false;
+  const bool queued = PROJECT_STICK_BACKGROUND_SYNC.requestSync();
+  if (queued) lastSyncAttemptMs = millis();
   return queued;
-}
-
-// Front-right "同步": register (refreshes binding, owner and clock), then poll
-// the Studio target in the same burst.
-void ProjectStickActivity::syncNow() {
-  if (WiFi.status() != WL_CONNECTED) {
-    state = State::Offline;
-    setStatus(tr(STR_PROJECT_STICK_OFFLINE));
-    requestUpdate();
-    return;
-  }
-  if (!ProjectStickService::clearBackoffForManualSync()) {
-    // The server asked devices to slow down; the next attempt is automatic.
-    setStatus(tr(STR_PROJECT_STICK_BUSY));
-    requestUpdate();
-    return;
-  }
-  state = State::Connecting;
-  setStatus(tr(STR_PROJECT_STICK_SYNCING));
-  if (requestCloudSync(true)) studioPolls.startBurst();
-  requestUpdate();
 }
 
 void ProjectStickActivity::applyBackgroundResult() {
@@ -136,28 +105,12 @@ void ProjectStickActivity::applyBackgroundResult() {
 #endif
 }
 
+// A failed heartbeat changes nothing on screen: content plays locally and the
+// shared backoff schedules the next attempt. Only a deactivated device says so.
 void ProjectStickActivity::updateState(const project_stick::SyncReport& report) {
-  switch (report.result) {
-    case ProjectStickService::SyncResult::Synced:
-    case ProjectStickService::SyncResult::Unbound:
-      state = State::Online;
-      setStatus(tr(STR_PROJECT_STICK_ONLINE));
-      break;
-    case ProjectStickService::SyncResult::Inactive:
-      state = State::Inactive;
-      setStatus(tr(STR_PROJECT_STICK_INACTIVE));
-      break;
-    case ProjectStickService::SyncResult::Failed:
-      if (WiFi.status() == WL_CONNECTED && ProjectStickService::apiRateLimited()) {
-        // Rate limited (429): keep showing the content; retry is automatic.
-        if (state != State::Inactive) state = State::Online;
-        setStatus(tr(STR_PROJECT_STICK_BUSY));
-        break;
-      }
-      state = WiFi.status() == WL_CONNECTED ? State::Error : State::Offline;
-      setStatus(state == State::Error ? tr(STR_PROJECT_STICK_FAILED) : tr(STR_PROJECT_STICK_OFFLINE));
-      break;
-  }
+  const bool deactivated = report.result == ProjectStickService::SyncResult::Inactive;
+  if (report.result == ProjectStickService::SyncResult::Failed || deactivated == inactive) return;
+  inactive = deactivated;
   requestUpdate();
 }
 
@@ -226,13 +179,10 @@ void ProjectStickActivity::loop() {
   const int64_t alertUntil = epochSeconds(service.displaySnapshot().alertUntil);
   frame.tick(studioNow, 0, alertUntil);
   auto startOnlineSync = [this] {
-    state = State::Connecting;
-    setStatus(tr(STR_PROJECT_STICK_SYNCING));
-    // The sync includes a Studio poll; if backoff holds it, poll once allowed.
-    if (!requestCloudSync(true)) studioPolls.pollNow();
+    requestCloudSync();
     requestUpdate();
   };
-  if (!firmware_update::snapshot().busy() && wifiAutoConnect.tick(millis()) && state != State::Inactive) {
+  if (!firmware_update::snapshot().busy() && wifiAutoConnect.tick(millis()) && !inactive) {
     // Came online on its own (boot, wake, OTA restart, a recovered link or a
     // BLE Wi-Fi push). Cloud requests wait while a phone is connected over
     // BLE: a setup session may be binding the device right now.
@@ -243,7 +193,7 @@ void ProjectStickActivity::loop() {
   }
   if (syncAfterBle && !studio_ble::connected()) {
     syncAfterBle = false;
-    if (WiFi.status() == WL_CONNECTED && state != State::Inactive) startOnlineSync();
+    if (WiFi.status() == WL_CONNECTED && !inactive) startOnlineSync();
   }
   const auto firmwareUpdate = firmware_update::snapshot();
   if (firmwareUpdate.generation != firmwareUpdateGeneration) {
@@ -254,24 +204,7 @@ void ProjectStickActivity::loop() {
     studioGeneration = frame.generation();
     requestUpdate();
   }
-  // One follow-up poll after a BLE session (reconciles a BLE-delivered task)
-  // and once when a cloud card first shows (sends the "displayed" receipt).
-  const bool bleConnected = studio_ble::connected();
-  if (bleWasConnected && !bleConnected && service.isBound()) studioPolls.pollNow();
-  bleWasConnected = bleConnected;
-  if (frame.needsReport() && frame.displaySnapshot().origin == "cloud") {
-    if (!reportPollRequested) {
-      reportPollRequested = true;
-      studioPolls.pollNow();
-    }
-  } else {
-    reportPollRequested = false;
-  }
-  studioPolls.setIntervalSeconds(service.studioPollSeconds());
-  if (!bleConnected && service.isBound() && WiFi.status() == WL_CONNECTED && !ProjectStickService::apiBlocked() &&
-      studioPolls.due(millis())) {
-    if (PROJECT_STICK_BACKGROUND_SYNC.requestStudioPoll()) studioPolls.polled(millis());
-  }
+  if (otaPending && PROJECT_STICK_BACKGROUND_SYNC.requestFirmwareInstall(otaTarget)) otaPending = false;
   applyBackgroundResult();
 #ifdef SIMULATOR
   if (simulatorAlertPollPending) {
@@ -301,8 +234,8 @@ void ProjectStickActivity::loop() {
     return;
   }
 
-  // Fixed physical front-button positions: Back / Wi-Fi / unassigned / Sync
-  // (or "换一张" while a Studio card is shown).
+  // Fixed physical front-button positions: Back / Wi-Fi / unassigned /
+  // "换一张" (only while a Studio card is shown).
   const int frontButton = mappedInput.getPressedFrontButton();
   if (frontButton == HalGPIO::BTN_BACK) {
     onGoHome(HomeMenuItem::PROJECT_STICK);
@@ -312,31 +245,22 @@ void ProjectStickActivity::loop() {
     launchWifiSelection();
     return;
   }
-  if (frontButton == HalGPIO::BTN_RIGHT) {
-    if (!studio.hash.empty()) {
-      // With a Studio program installed the right key is the manual "next card".
-      // Local only: the program plays on the device, the scheduled Studio
-      // poll picks up anything new.
-      frame.tick(studioNow, 1, alertUntil);
-      requestUpdate();
-      return;
-    }
-    syncNow();
+  if (frontButton == HalGPIO::BTN_RIGHT && !studio.hash.empty()) {
+    // The program plays on the device: the right key is the manual "next card".
+    frame.tick(studioNow, 1, alertUntil);
+    requestUpdate();
     return;
   }
 
-  // Periodic sync every poll_interval_seconds, only when there is something
-  // the Studio poll does not cover: the register heartbeat (binding, owner,
-  // clock; every 4 h) or pairing while unbound. The Studio target itself is
-  // polled on its own schedule above. Nothing goes out while the shared API
-  // backoff holds (429 / 5xx / unreachable).
+  // Register heartbeat every 6 h (binding, owner, trading day, clock), retried
+  // no faster than poll_interval_seconds. Nothing goes out while the shared
+  // API backoff holds (429 / 5xx / unreachable) or without a credential.
   const uint32_t nowMs = millis();
-  const bool cloudAllowed = !studio_ble::connected() && state != State::Inactive && WiFi.status() == WL_CONNECTED &&
-                            !ProjectStickService::apiBlocked();
-  const bool registerDue = project_stick::registrationDue(nowMs, lastRegisterMs);
-  if (cloudAllowed && (registerDue || !service.isBound()) &&
+  const bool cloudAllowed = !studio_ble::connected() && !inactive && WiFi.status() == WL_CONNECTED &&
+                            !ProjectStickService::apiBlocked() && service.hasCredential();
+  if (cloudAllowed && project_stick::registrationDue(nowMs, lastRegisterMs) &&
       nowMs - lastSyncAttemptMs >= service.pollIntervalSeconds() * 1000UL) {
-    requestCloudSync(true);
+    requestCloudSync();
   }
   if (cloudAllowed && nowMs - lastAlertPollMs >= service.alertPollIntervalSeconds() * 1000UL) {
     if (PROJECT_STICK_BACKGROUND_SYNC.requestAlertPoll()) lastAlertPollMs = nowMs;
@@ -371,9 +295,7 @@ void ProjectStickActivity::tickBleSetup() {
     const bool ok = service.applyBleBinding(binding.token, binding.owner);
     studio_ble::finishBinding(ok, binding);
     if (ok) {
-      state = WiFi.status() == WL_CONNECTED ? State::Online : State::Offline;
-      snprintf(statusLine, sizeof(statusLine), "%s",
-               state == State::Online ? tr(STR_PROJECT_STICK_ONLINE) : tr(STR_PROJECT_STICK_OFFLINE));
+      inactive = false;
       // Register with the new token once the phone lets go of the link.
       syncAfterBle = true;
     }
@@ -385,6 +307,11 @@ void ProjectStickActivity::tickBleSetup() {
   if (studio_ble::takeWifiRequest(wifi)) startBleWifi(wifi.ssid, wifi.password);
   if (bleWifiActive) pollBleWifi();
   if (studio_ble::takeScanRequest()) bleScanPending = true;
+  studio_ble::OtaRequest ota;
+  if (studio_ble::takeOtaRequest(ota)) {
+    otaTarget = {ota.version, ota.url, ota.sha256, ota.bytes};
+    otaPending = true;
+  }
   if (bleScanPending && !bleWifiActive && !bleScanActive) startBleScan();
   if (bleScanActive) pollBleScan();
 
@@ -483,14 +410,8 @@ void ProjectStickActivity::launchWifiSelection() {
   startActivityForResult(std::make_unique<WifiSelectionActivity>(renderer, mappedInput, false),
                          [this](const ActivityResult&) {
                            wifiAutoConnect.retrySoon();
-                           if (WiFi.status() == WL_CONNECTED) {
-                             state = State::Connecting;
-                             setStatus(tr(STR_PROJECT_STICK_SYNCING));
-                             requestCloudSync(true);
-                           } else {
-                             state = State::Offline;
-                             setStatus(tr(STR_PROJECT_STICK_OFFLINE));
-                           }
+                           requestCloudSync();
+                           requestUpdate();
                          });
 }
 
@@ -520,8 +441,8 @@ void ProjectStickActivity::renderFirmwareUpdate() {
   renderer.displayBuffer();
 }
 
-// Shown until a Studio frame is installed: the binding code while unbound,
-// otherwise a prompt to publish the official plan or a card.
+// Shown until a Studio frame is installed: the BLE setup QR while unbound,
+// otherwise a prompt to deliver content from the mini program over BLE.
 void ProjectStickActivity::renderStatusScreen() {
   const auto& metrics = UITheme::getInstance().getMetrics();
   const int width = renderer.getScreenWidth();
@@ -537,77 +458,48 @@ void ProjectStickActivity::renderStatusScreen() {
   const Rect content{metrics.contentSidePadding, contentTop, width - metrics.contentSidePadding * 2,
                      hintTop - metrics.verticalSpacing - contentTop};
 
-  // An unbound device always offers BLE setup (it needs no working cloud
-  // link); sync errors only replace the prompts once the device is bound.
-  const bool setupScreen = state != State::Inactive && !service.isBound() && !setupPayload.empty();
-  if (!setupScreen && (state == State::Inactive || state == State::Error)) {
-    UITheme::drawCenteredWrappedText(renderer, content, UI_12_FONT_ID, statusLine, 4, true, EpdFontFamily::BOLD);
-  } else if (setupScreen) {
+  if (inactive) {
+    UITheme::drawCenteredWrappedText(renderer, content, UI_12_FONT_ID, tr(STR_PROJECT_STICK_INACTIVE), 4, true,
+                                     EpdFontFamily::BOLD);
+  } else if (!service.isBound()) {
     // BLE setup (protocol 3): the QR carries the device id and the one-time
-    // key; the phone binds and pushes Wi-Fi over Bluetooth. A cloud binding
-    // code, when the device happens to be online, is offered as a fallback.
-    const std::string code = service.pairingCode();
+    // key; the phone binds and pushes Wi-Fi over Bluetooth.
     const char* title = tr(STR_PROJECT_STICK_SETUP_TITLE);
     const char* helper = bleWifiMessage ? bleWifiMessage : tr(STR_PROJECT_STICK_SETUP_HELP);
-    char codeLine[48] = {0};
-    if (!code.empty()) snprintf(codeLine, sizeof(codeLine), "%s  %s", tr(STR_PROJECT_STICK_SETUP_CODE), code.c_str());
     const int titleHeight = renderer.getTextLineHeight(NOTOSANSSC_13_FONT_ID, title);
     const int helperLine = renderer.getTextLineHeight(NOTOSANSSC_10_FONT_ID, helper);
     const bool cjk = std::any_of(helper, helper + strlen(helper), [](char c) { return c & 0x80; });
     const auto helperLines = cjk ? renderer.wrappedCjkText(NOTOSANSSC_10_FONT_ID, helper, content.width - 40, 3)
                                  : renderer.wrappedText(NOTOSANSSC_10_FONT_ID, helper, content.width - 40, 3);
     const int helperHeight = helperLine * static_cast<int>(helperLines.size());
-    const int codeHeight = code.empty() ? 0 : PROMPT_GAP + renderer.getTextLineHeight(NOTOSANSSC_10_FONT_ID, codeLine);
-    const int groupHeight = titleHeight + QR_GAP + QR_SIZE + QR_GAP + helperHeight + codeHeight;
+    const int qrSize = setupPayload.empty() ? 0 : QR_SIZE;
+    const int groupHeight = titleHeight + QR_GAP + qrSize + QR_GAP + helperHeight;
     const int groupY = content.y + (content.height - groupHeight) / 2;
     UITheme::drawCenteredText(renderer, content, NOTOSANSSC_13_FONT_ID, groupY, title, true, EpdFontFamily::BOLD);
     const int qrY = groupY + titleHeight + QR_GAP;
-    QrUtils::drawQrCode(renderer, Rect{(width - QR_SIZE) / 2, qrY, QR_SIZE, QR_SIZE}, setupPayload);
-    int y = qrY + QR_SIZE + QR_GAP;
+    if (qrSize > 0) QrUtils::drawQrCode(renderer, Rect{(width - QR_SIZE) / 2, qrY, QR_SIZE, QR_SIZE}, setupPayload);
+    int y = qrY + qrSize + QR_GAP;
     for (const auto& line : helperLines) {
       UITheme::drawCenteredText(renderer, content, NOTOSANSSC_10_FONT_ID, y, line.c_str(), true);
       y += helperLine;
     }
-    if (!code.empty())
-      UITheme::drawCenteredText(renderer, content, NOTOSANSSC_10_FONT_ID, y + PROMPT_GAP, codeLine, true);
-  } else if (!service.isBound()) {
-    const std::string code = service.pairingCode();
-    const char* title = tr(STR_PROJECT_STICK_BIND_TITLE);
-    char codeLine[48];
-    if (code.empty()) {
-      snprintf(codeLine, sizeof(codeLine), "%s",
-               online ? tr(STR_PROJECT_STICK_BIND_LOADING) : tr(STR_PROJECT_STICK_CONNECT_TO_SYNC));
-    } else {
-      snprintf(codeLine, sizeof(codeLine), "%s  %s", tr(STR_PROJECT_STICK_BIND_CODE), code.c_str());
-    }
-    const int titleHeight = renderer.getTextLineHeight(NOTOSANSSC_13_FONT_ID, title);
-    const int codeHeight = renderer.getTextLineHeight(NOTOSANSSC_13_FONT_ID, codeLine);
-    const int qrSize = code.empty() ? 0 : QR_SIZE;
-    const int qrGap = qrSize > 0 ? QR_GAP : 0;
-    const int groupHeight = titleHeight + qrGap + qrSize + CODE_GAP + codeHeight;
-    const int groupY = content.y + (content.height - groupHeight) / 2;
-    UITheme::drawCenteredText(renderer, content, NOTOSANSSC_13_FONT_ID, groupY, title, true, EpdFontFamily::BOLD);
-    if (qrSize > 0) {
-      const Rect qrBounds{(width - qrSize) / 2, groupY + titleHeight + qrGap, qrSize, qrSize};
-      QrUtils::drawQrCode(renderer, qrBounds, "stockstick://bind?code=" + code);
-    }
-    UITheme::drawCenteredText(renderer, content, NOTOSANSSC_13_FONT_ID, groupY + titleHeight + qrGap + qrSize + CODE_GAP,
-                              codeLine, true, EpdFontFamily::BOLD);
   } else {
     const char* title = tr(STR_PROJECT_STICK_NO_LOCAL_CONTENT);
-    const char* helper = bleWifiMessage ? bleWifiMessage
-                         : online       ? tr(STR_PROJECT_STICK_AWAIT_CONTENT)
-                                        : tr(STR_PROJECT_STICK_BLE_WIFI_HINT);
+    const char* helper = bleWifiMessage ? bleWifiMessage : tr(STR_PROJECT_STICK_AWAIT_CONTENT);
     const int titleHeight = renderer.getTextLineHeight(NOTOSANSSC_13_FONT_ID, title);
     const int helperLine = renderer.getTextLineHeight(NOTOSANSSC_13_FONT_ID, helper);
-    const int helperLines = renderer.getTextWidth(NOTOSANSSC_13_FONT_ID, helper) > content.width ? 2 : 1;
-    const int groupY = content.y + (content.height - titleHeight - PROMPT_GAP - helperLine * helperLines) / 2;
+    const bool cjk = std::any_of(helper, helper + strlen(helper), [](char c) { return c & 0x80; });
+    const auto helperLines = cjk ? renderer.wrappedCjkText(NOTOSANSSC_13_FONT_ID, helper, content.width - 40, 3)
+                                 : renderer.wrappedText(NOTOSANSSC_13_FONT_ID, helper, content.width - 40, 3);
+    const int helperHeight = helperLine * static_cast<int>(helperLines.size());
+    const int groupY = content.y + (content.height - titleHeight - PROMPT_GAP - helperHeight) / 2;
     UITheme::drawCenteredText(renderer, content, NOTOSANSSC_13_FONT_ID, groupY, title, true, EpdFontFamily::BOLD);
-    UITheme::drawCenteredWrappedText(
-        renderer, Rect{content.x, groupY + titleHeight + PROMPT_GAP, content.width, helperLine * helperLines},
-        NOTOSANSSC_13_FONT_ID, helper, helperLines, true, EpdFontFamily::REGULAR, UITheme::TextVerticalAlignment::TOP);
+    int y = groupY + titleHeight + PROMPT_GAP;
+    for (const auto& line : helperLines) {
+      UITheme::drawCenteredText(renderer, content, NOTOSANSSC_13_FONT_ID, y, line.c_str(), true);
+      y += helperLine;
+    }
   }
-
 }
 
 // Transient layers over the frame or status screen: the unlock prompt while
@@ -621,7 +513,7 @@ void ProjectStickActivity::drawOverlays(const bool studio) {
   if (buttonHintsVisible) {
     if (studio) stick_overlay::drawCardSideKeyHints(renderer, feedbackBubble == stick_overlay::Bubble::None);
     stick_overlay::drawFrontKeyHints(renderer, tr(STR_PROJECT_STICK_BACK), tr(STR_PROJECT_STICK_CONNECT_WIFI), "",
-                                     studio ? tr(STR_PROJECT_STICK_NEXT_CARD) : tr(STR_PROJECT_STICK_SYNC));
+                                     studio ? tr(STR_PROJECT_STICK_NEXT_CARD) : "");
   }
   if (studio) stick_overlay::drawFeedbackBubble(renderer, feedbackBubble, feedbackBubbleFrame);
 }
@@ -653,10 +545,6 @@ void ProjectStickActivity::render(RenderLock&&) {
   renderer.displayBuffer();
 }
 
-void ProjectStickActivity::setStatus(const char* text) {
-  RenderLock lock;
-  snprintf(statusLine, sizeof(statusLine), "%s", text ? text : "");
-}
 
 bool ProjectStickActivity::allowIdlePowerSaving() {
   return StudioFrame::instance().portable() && !studio_ble::connected() && !StudioFrame::instance().busy();

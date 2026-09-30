@@ -80,6 +80,11 @@ std::string bindMessage(const std::string& nonce, const std::string& owner, uint
   return "bind3|" + nonce + "|" + owner + "|" + std::to_string(epoch) + "|" + ct;
 }
 
+std::string otaMessage(const std::string& nonce, const std::string& version, const std::string& sha256, size_t bytes,
+                       const std::string& url) {
+  return "ota3|" + nonce + "|" + version + "|" + sha256 + "|" + std::to_string(bytes) + "|" + url;
+}
+
 std::string setupQrPayload(const std::string& deviceId, const std::string& keyHex) {
   return "stockstick://setup?d=" + deviceId + "&k=" + keyHex;
 }
