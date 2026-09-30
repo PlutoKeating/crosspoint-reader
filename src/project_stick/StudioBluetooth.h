@@ -15,6 +15,12 @@
 namespace studio_ble {
 // Drops the bound credential (unbound in the cloud); no-op in setup mode.
 void revoke();
+// Adopts a rotated authority from the register response (ownership transfer,
+// collaborator revoke, account deletion). Persisted like a bind; clears Studio
+// content when the owner changes and drops a live session so the phone
+// reconnects with the new key. Returns true when anything changed.
+bool adoptAuthority(const std::string& deviceId, const std::string& secret, uint32_t epoch,
+                    const std::string& owner);
 void pause(bool paused);
 void begin();
 void tick();

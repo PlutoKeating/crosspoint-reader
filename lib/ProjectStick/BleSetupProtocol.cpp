@@ -147,6 +147,11 @@ std::string withNetworks(const std::string& base, const std::vector<Network>& ne
   return base;
 }
 
+bool validAuthority(const std::string& secretHex, int64_t epoch) {
+  std::vector<uint8_t> decoded;
+  return secretHex.size() == 64 && unhex(secretHex, decoded) && epoch > 0 && epoch <= int64_t(UINT32_MAX);
+}
+
 bool splitBindPlaintext(const std::string& plaintext, std::string& token, std::string& secret) {
   const size_t bar = plaintext.rfind('|');
   if (bar == std::string::npos) return false;

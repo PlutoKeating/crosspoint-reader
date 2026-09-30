@@ -437,6 +437,25 @@ void revoke() {
   Storage.remove(CREDENTIALS);
   if (started) NimBLEDevice::getAdvertising()->stop();
 }
+bool adoptAuthority(const std::string& deviceId, const std::string& key, uint32_t keyEpoch,
+                    const std::string& owner) {
+  std::lock_guard<std::recursive_mutex> lock(mutex);
+  if (deviceId.size() != 36 || !ble_setup::validAuthority(key, keyEpoch)) return false;
+  if (identity == deviceId && secret == key && epoch == keyEpoch && authorityOwner == owner) return false;
+  if (!authorityOwner.empty() && authorityOwner != owner) StudioFrame::instance().clear();
+  if (isConnected) NimBLEDevice::getServer()->disconnect(connectionHandle);
+  authorityOwner = owner;
+  identity = deviceId;
+  secret = key;
+  epoch = keyEpoch;
+  setupKey.clear();
+  writeCredentials();
+  if (!started)
+    begin();
+  else if (!paused && !isConnected)
+    NimBLEDevice::startAdvertising();
+  return true;
+}
 void begin() {
   std::lock_guard<std::recursive_mutex> lock(mutex);
   if (started || paused) return;
@@ -570,6 +589,7 @@ void reportScan(bool scanning, std::vector<ble_setup::Network> found) {
 
 namespace studio_ble {
 void revoke() {}
+bool adoptAuthority(const std::string&, const std::string&, uint32_t, const std::string&) { return false; }
 void pause(bool) {}
 void begin() {}
 void tick() {}

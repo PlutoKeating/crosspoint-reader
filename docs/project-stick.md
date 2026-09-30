@@ -39,7 +39,8 @@ built in Simplified Chinese; other languages load from SD-card packs.
    written to logs or rendered.
 4. A bound device sends the `/api/v2/device/register` heartbeat every 6 hours
    and on coming online; it returns `bound`, `owner_id`, `server_time`,
-   `is_trading_day` and the alert interval. A successful registration corrects
+   `is_trading_day`, the alert interval and the current BLE authority (a
+   rotated key is adopted, see "Cloud requests" in studio-protocol.md). A successful registration corrects
    the working clock. `bound: false` (unbound in the mini program) or a 401
    drops the token, the Studio data and the BLE authority, and the device is
    back in setup mode. Apart from trading-hours alerts nothing is polled:

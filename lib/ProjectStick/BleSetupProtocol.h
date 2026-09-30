@@ -57,6 +57,10 @@ std::vector<Network> normalizeNetworks(std::vector<Network> raw);
 // Returns `base` unchanged when even an empty list would not fit.
 std::string withNetworks(const std::string& base, const std::vector<Network>& networks, size_t limit = STATUS_LIMIT);
 
+// A BLE authority as delivered by `bind` or the register response: a 32-byte
+// secret as 64 lowercase hex characters and an epoch in 1..UINT32_MAX.
+bool validAuthority(const std::string& secretHex, int64_t epoch);
+
 // Splits the bind plaintext "<device_token>|<secret>"; validates both parts.
 bool splitBindPlaintext(const std::string& plaintext, std::string& token, std::string& secret);
 

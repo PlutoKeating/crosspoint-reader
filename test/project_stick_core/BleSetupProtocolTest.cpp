@@ -70,6 +70,17 @@ TEST(BleSetupProtocol, OtaProof) {
   EXPECT_EQ(ble_setup::mac(SECRET, message), "a379b3f844093dddde5017052e1e0108f899fbda3a36d91c0427dc0c6985e75b");
 }
 
+TEST(BleSetupProtocol, AuthorityValidation) {
+  EXPECT_TRUE(ble_setup::validAuthority(SECRET, 1));
+  EXPECT_TRUE(ble_setup::validAuthority(SECRET, 4294967295LL));
+  EXPECT_FALSE(ble_setup::validAuthority(SECRET, 0));
+  EXPECT_FALSE(ble_setup::validAuthority(SECRET, -1));
+  EXPECT_FALSE(ble_setup::validAuthority(SECRET, 4294967296LL));
+  EXPECT_FALSE(ble_setup::validAuthority(std::string(62, '1'), 1));
+  EXPECT_FALSE(ble_setup::validAuthority(std::string(64, 'A'), 1));  // lowercase only
+  EXPECT_FALSE(ble_setup::validAuthority("", 1));
+}
+
 TEST(BleSetupProtocol, QrPayloadAndName) {
   const auto payload = ble_setup::setupQrPayload(DEVICE, K);
   EXPECT_EQ(payload, "stockstick://setup?d=6fbf4024-92c6-405d-85a0-a859649e2a5d&k=000102030405060708090a0b0c0d0e0f");

@@ -66,9 +66,15 @@ requests at all. All requests use `Authorization: Bearer <device_token>`:
 
 - `POST /api/v2/device/register`: heartbeat every 6 h and on coming online
   (retried no faster than `poll_interval_seconds`). Returns `bound`, `owner_id`,
-  `server_time`, `is_trading_day` and `alert_poll_interval_seconds`. `bound:
-  false` or a 401 drops the credential, the Studio data and the BLE authority:
-  the device is back in BLE setup mode.
+  `server_time`, `is_trading_day`, `alert_poll_interval_seconds` and
+  `bluetooth: {secret, epoch}`. `bound: false` or a 401 drops the credential,
+  the Studio data and the BLE authority: the device is back in BLE setup mode.
+  Since 2.4.1 register is how a bound device learns a rotated BLE authority
+  (the server rotates it on ownership transfer, collaborator revoke and account
+  deletion): when the secret (64 lowercase hex) or epoch (> 0) differs from the
+  stored one, the device persists it like a bind, clears Studio content if the
+  owner changed and drops a live BLE session so the phone reconnects with the
+  new key.
 - `GET /api/v2/device/alerts`: every `alert_poll_interval_seconds`, only inside
   trading windows (see project-stick.md "Market alerts").
 - `POST /api/v2/device/events`: batched Studio feedback (`studio_next`,

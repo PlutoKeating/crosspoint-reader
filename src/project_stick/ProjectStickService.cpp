@@ -249,7 +249,14 @@ bool ProjectStickService::registerDevice(int& status) {
       dropBinding();
       return true;
     }
-    adoptOwner(doc["owner_id"] | "");
+    const std::string owner = doc["owner_id"] | "";
+    adoptOwner(owner);
+    // Register is how a bound device learns a rotated BLE authority.
+    const std::string key = doc["bluetooth"]["secret"] | "";
+    const int64_t keyEpoch = doc["bluetooth"]["epoch"] | int64_t(0);
+    if (ble_setup::validAuthority(key, keyEpoch) &&
+        studio_ble::adoptAuthority(PROJECT_STICK_STORE.deviceId, key, static_cast<uint32_t>(keyEpoch), owner))
+      LOG_INF("STICK", "Adopted BLE authority epoch %u", static_cast<unsigned>(keyEpoch));
     pollSeconds = PROJECT_STICK_STORE.pollIntervalSeconds;
     alertSeconds = PROJECT_STICK_STORE.alertPollIntervalSeconds;
     if (!PROJECT_STICK_STORE.saveToFile()) {
