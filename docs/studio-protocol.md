@@ -94,15 +94,17 @@ shim exposes no headers). A manual firmware check may skip an error backoff,
 never a 429. Requests retry once, only on a transport failure. A failed
 heartbeat changes nothing on screen: content keeps playing locally.
 
-Worker, heap and time limits (2.4.2):
+Worker, heap and time limits (2.4.2, tightened in 2.4.3; see docs/memory-budget.md):
 
 - All cloud I/O runs on one worker task created once at boot in `setup()`
   (before Wi-Fi and NimBLE allocate) with a static 8 KB stack, so it always
   exists; activities only queue work and read results.
 - Every request is bounded: no trusted clock after 10 s of NTP fails it (no
-  request is sent), TCP connect and response reads use the 20 s HTTP timeout,
+  request is sent), TCP connect and response reads use the 15 s HTTP timeout,
   and the wolfSSL handshake has its own 15 s deadline per attempt
-  (SecureNet). A firmware check that has not answered within 60 s ends on the
+  (SecureNet). Since 2.4.3 the StockStick API client does not retry a failed
+  handshake as TLS 1.2 (Cloudflare speaks TLS 1.3), so one failed attempt
+  costs at most 30 s instead of ~40 s. A firmware check that has not answered within 60 s ends on the
   screen as 「检查失败：网络请求超时」; other failures are shown specifically
   (no clock, unreachable server, low memory, server busy, HTTP error code).
   A BLE `ota` request the worker has not accepted within 60 s fails with
@@ -114,6 +116,17 @@ Worker, heap and time limits (2.4.2):
   with the same identity and key when the operation ends; a firmware install
   keeps it released until the restart. Requests never release NimBLE while a
   phone is connected (cloud requests wait for the phone to disconnect).
+- Hard floor (2.4.3): if, after releasing NimBLE, free heap is still below
+  32 KB or the largest block below 16 KB, the request is skipped and reported
+  as a memory failure instead of attempting a handshake that cannot finish
+  and only fragments the heap further.
+- Time (2.4.3): an RTC reading before 2025 (a backup-power loss reads
+  2000-01-01) is not a time. The device prefers server time, then the system
+  clock (NTP, the phone's `time` in BLE `begin`, register `server_time`, which
+  now also sets the system clock), then a valid RTC. The UI task copies trusted
+  time into the RTC and, at boot, seeds the system clock from a valid RTC so
+  TLS does not wait for NTP. Without any trusted time the Studio schedule
+  holds the current frame.
 
 Ownership changes clear Studio data, pending events and alert state; device
 settings and saved Wi-Fi networks are kept. A new owner binds over BLE setup,

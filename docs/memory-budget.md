@@ -1,0 +1,85 @@
+# X3 memory budget (ESP32-C3)
+
+The C3 has one SRAM pool shared by IRAM and DRAM; there is no PSRAM. Anything
+not placed statically comes out of one heap that Wi-Fi, NimBLE, the
+framebuffer, TLS and the app share. This page records where that memory goes,
+the 2.2.2 out-of-memory crash, and what 2.4.3 changed.
+
+## 2.2.2 crash (`crash_report.txt`)
+
+```
+Panic reason: abort() was called at PC 0x4212920b on core 0
+POST /api/v2/device/register attempt 1/3 (heap=26444 max=23540)  -> failed after ~37 s
+POST /api/v2/device/register attempt 2/3 (heap=23664 max=17396)  -> failed after ~37 s
+POST /api/v2/device/register attempt 3/3 (heap=23364 max=17396)  -> failed after ~46 s
+```
+
+Symbolised with `stockstick-2.2.2.elf`:
+
+```
+ProjectStickActivity::loop
+  -> ProjectStickService::now()        snprintf of the RTC value "2000-01-01T00:00:00Z"
+  -> parseIso8601ToShanghai()          const std::string input(value)
+  -> operator new -> std::bad_alloc -> __cxxabiv1::__terminate -> abort()
+```
+
+| Bug | In 2.4.2? | Fix in 2.4.3 |
+|---|---|---|
+| The UI loop allocated a `std::string` on every call to `now()` (`lib/ProjectStick/ProjectStickCore.cpp` parser built `std::string input`). On a fragmented heap that throwing `new` aborted the firmware. | Yes, unchanged (`ProjectStickService::now()` still formatted and re-parsed a string). | Parser works on `const char*`; `now()` converts calendar fields with `shanghaiFromUtc()` directly. Host test counts allocations: zero. |
+| Other per-loop heap churn: `StudioFrame::snapshot()` copied three heap strings every loop; `studio::step()` copied the scene id, built a 47-byte string for the shuffle seed and returned a fresh `std::vector<int>`, many times per second. | Yes. | `StudioFrame::hasContent()`; `tick()` re-evaluates only when the second, the alert or a key changes; `step()` uses a pointer to the scene id, mixes the seed without concatenating and reuses a scratch vector in `Playback`. Host test: 600 steps after warm-up, zero allocations. |
+| An RTC that lost backup power reads 2000-01-01 and was treated as a real time. | Yes (RTC path had no year check). | Readings before 2025 are invalid; prefer server time, then the system clock, then a valid RTC; the UI task writes trusted time back to the RTC (`HalClock::setUtc`) and seeds the system clock from a valid RTC. With no trusted time, `StudioFrame::tick()` holds the current frame. |
+| Every TLS handshake to the production API needed more heap than the device had: the chain is leaf → WE1 (P-256) → GTS Root R4 (P-384). P-384 was not in wolfSSL's SP code, so verifying WE1 used fast-math bignums sized by `FP_MAX_BITS=8192` (1,056-byte `fp_int`, 3.2 KB `ecc_point`) and `ecc_mul2add` heap-allocates 16 precomputed points (`SHAMIR_PRECOMP_SZ`, ~51 KB) under `WOLFSSL_SMALL_STACK`. | Yes (no `sp_384` symbols in the 2.4.2 ELF). | `-DWOLFSSL_SP_384`: P-384 runs on fixed-size SP arrays (a few KB). This is the most likely reason the X3 never reached the API. |
+| A failed handshake was retried as TLS 1.2, doubling each failure (~40 s per attempt, matching the log) and the heap churn. | Yes. | `SecureClient::setTls12Fallback(false)` for the StockStick client; the fallback is also skipped after a transport failure, a stalled handshake or an out-of-memory error (`MEMORY_E`/`MP_MEM`). HTTP timeout 20 s → 15 s: one failed attempt costs at most 30 s. |
+| Requests kept being attempted at heaps where a handshake cannot finish, fragmenting further (largest block 23.5 KB → 17.4 KB across the three attempts). | Partly (2.4.2 released NimBLE but still attempted). | Hard floor after releasing NimBLE: below 32 KB free or a 16 KB largest block the request is skipped and reported as a memory failure. Response bodies check the largest free block before a `std::string` grows. |
+| A failed `new` left no heap information in the crash report. | Yes. | `std::new_handler` records free/min/largest heap and an out-of-memory marker in RTC memory before aborting; the main loop samples the heap every 5 s; the crash report prints the last sample. |
+
+The "~3 KB lost per failed attempt" in the log is not a leak in SecureClient:
+`stop()` frees the `WOLFSSL`/`WOLFSSL_CTX` on every failure path. Free heap
+recovered partially between attempts (26.4 → 23.7 → 23.4 KB) while the largest
+block fell (23.5 → 17.4 KB), which is fragmentation from the large bignum
+allocations plus lwIP holding closed sockets in TIME_WAIT (`LWIP_TCP_MSL=60 s`).
+Removing the fast-math P-384 path and the TLS 1.2 retry removes most of that
+churn.
+
+## Where the RAM goes
+
+Static, from `riscv32-esp-elf-size -A` on the release ELF (2.4.2 → 2.4.3):
+
+| Section | 2.4.2 | 2.4.3 | Notes |
+|---|---|---|---|
+| `.iram0.text` (occupies SRAM) | 86,354 | 86,354 | Wi-Fi IRAM opts already moved to flash |
+| `.dram0.data` | 17,425 | 17,449 | |
+| `.dram0.bss` | 46,304 | 46,456 | includes the 8 KB static sync-worker stack; +152 B heap sample / tick state |
+| Heap start | `0x3FCA2000` | `0x3FCA2000` | heap region runs to the ROM-reserved top of DRAM (~240 KB at boot) |
+
+Large dynamic consumers (sizes from the code and sdkconfig; not measured on
+hardware yet, see "Verify on the device"):
+
+| Consumer | Size | When | 2.4.3 |
+|---|---|---|---|
+| E-paper framebuffer (`FreeInkDisplay`, single-buffer mode) | 52,272 B (528 × 792 / 8) | always | unchanged (no async shadow on X3) |
+| Wi-Fi static RX buffers | 8 × ~1.6 KB ≈ 13 KB | while Wi-Fi is up | 4 buffers ≈ 6.5 KB (−6.5 KB) |
+| Wi-Fi dynamic RX / TX buffers | up to 32 + 32 × ~1.6 KB | bursts | capped at 16 + 16 (peak −~50 KB worst case) |
+| Wi-Fi TX A-MPDU buffers | per BA session | while associated | disabled |
+| Wi-Fi driver, supplicant, lwIP | ~40–55 KB | while Wi-Fi is up | unchanged |
+| NimBLE host + controller | tens of KB | bound/setup modes | released for low-heap requests (2.4.2) |
+| TLS session (wolfSSL CTX + SSL + record buffers) | ~20–30 KB | during a request | unchanged |
+| TLS handshake P-384 verify | ~51 KB fast-math → a few KB SP | during a handshake | `WOLFSSL_SP_384` |
+| Task stacks (Arduino loop 8 KB, lwIP 4 KB, timers, sync worker 8 KB static) | ~25 KB | always | unchanged |
+
+## Verify on the device
+
+Use a `default` or `gh_release_rc` build (the release build has `LOG_LEVEL=0`)
+and watch the serial log:
+
+- `[MEM] Free: … MaxAlloc: …` every 10 s: free heap with Wi-Fi up should now
+  be well above the 2.2.2 crash's 26 KB.
+- `[STICK] POST /api/v2/device/register: heap=… max=… min=…` before each
+  request, and `[SecureClient] handshake ok (auto): TLSv1.3 / … in N ms`.
+  A failure now prints `wolfSSL_connect failed (auto): <err>, free heap … max …`.
+- `[STICK] … skipped: low memory (heap=… max=…)` means the hard floor was hit:
+  report the numbers.
+- `[CLK] RTC set to …` after the first trusted time (NTP, phone or server).
+- After any crash, `crash_report.txt` now contains `Heap at … ms: free=…
+  min=… largest=…` (and `Out of memory (operator new failed).` when that was
+  the cause).

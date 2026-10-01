@@ -18,6 +18,17 @@ inline bool tlsHeapSufficient(uint32_t freeHeap, uint32_t maxAlloc) {
   return freeHeap >= TLS_MIN_FREE_HEAP && maxAlloc >= TLS_MIN_MAX_ALLOC;
 }
 
+// Hard floor, checked after NimBLE has been released: below it a handshake
+// cannot complete (the 2.2.2 crash log shows three 40 s attempts failing at
+// 23-26 KB free / 17-23 KB largest block) and each attempt only fragments the
+// heap further. Such a request is skipped and reported as a memory failure.
+constexpr uint32_t TLS_HARD_MIN_FREE_HEAP = 32 * 1024;
+constexpr uint32_t TLS_HARD_MIN_MAX_ALLOC = 16 * 1024;
+
+inline bool tlsHeapAffordable(uint32_t freeHeap, uint32_t maxAlloc) {
+  return freeHeap >= TLS_HARD_MIN_FREE_HEAP && maxAlloc >= TLS_HARD_MIN_MAX_ALLOC;
+}
+
 enum class NetFailure : uint8_t {
   None,
   Clock,        // no trusted time (NTP unreachable): certificates cannot be checked

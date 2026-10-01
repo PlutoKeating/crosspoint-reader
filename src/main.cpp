@@ -216,6 +216,7 @@ void setup() {
 #endif
 
   HalSystem::begin();
+  HalSystem::installOutOfMemoryHandler();
   // Before anything heavy: a trial image that keeps crashing must get back to
   // the previous slot even if later init is what fails.
   ota_trial::onBoot();
@@ -396,6 +397,11 @@ void loop() {
   static unsigned long maxLoopDuration = 0;
   const unsigned long loopStartTime = millis();
   static unsigned long lastMemPrint = 0;
+  static unsigned long lastHeapSample = 0;
+  if (millis() - lastHeapSample >= 5000) {
+    lastHeapSample = millis();
+    HalSystem::sampleHeap();  // kept in RTC memory for the next crash report
+  }
 
   gpio.setSharedConfirmPowerShortPressEmitsPower(SETTINGS.shortPwrBtn == CrossPointSettings::SHORT_PWRBTN::SLEEP);
   gpio.update();

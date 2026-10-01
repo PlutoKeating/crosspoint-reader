@@ -215,3 +215,11 @@ register failure (these need a provisioned device token).
   to start on a fragmented heap.
 - NimBLE APIs are never called while holding the BLE state mutex, which the
   NimBLE host callbacks take (`radioMutex` serialises init/deinit/advertising).
+- The UI loop does not allocate (2.4.3): `now()` and the ISO-8601 parser work
+  on fixed buffers, `StudioFrame::tick()` re-evaluates the schedule only when
+  the second, the alert or a key changes, `studio::step()` reuses scratch
+  buffers, and the loop checks `StudioFrame::hasContent()` instead of copying a
+  snapshot. A throwing `new` that fails records the heap in RTC memory before
+  aborting, and crash reports include the last heap sample
+  (`HalSystem::sampleHeap()`, every 5 s). The full budget and the 2.2.2 crash
+  analysis are in `docs/memory-budget.md`.

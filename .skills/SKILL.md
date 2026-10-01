@@ -3,7 +3,7 @@
 Project: StockStick device firmware for the Xteink X3 (ESP32-C3), forked from CrossPoint Reader. X3/X4 runtime detection is kept.
 Mission: Reliable StockStick content display, BLE delivery and setup, and safe OTA on constrained hardware.
 Scope: see `SCOPE.md`. The ebook reader, web file transfer, OPDS, KOReader and Calibre were removed in 2.0.0; do not reintroduce them.
-Key docs: `docs/firmware-ota.md` (versioning, release, OTA, trial boot), `docs/project-stick.md`, `docs/studio-protocol.md`, `docs/i18n.md`.
+Key docs: `docs/firmware-ota.md` (versioning, release, OTA, trial boot), `docs/project-stick.md`, `docs/studio-protocol.md`, `docs/memory-budget.md` (heap budget, OOM crash analysis), `docs/i18n.md`.
 
 ## Internal Testing Workflow (2026-09-29, overrides the push guidance below)
 

@@ -119,11 +119,23 @@ bool trustedClockReady() {
 }
 
 constexpr size_t MAX_ALERT_BYTES = 32 * 1024;
+
+// True when a block of `bytes` (plus headroom for the TLS session that is
+// running) can be allocated; used before growing heap strings in the worker.
+bool heapFits(size_t bytes) {
+#ifndef SIMULATOR
+  return ESP.getMaxAllocHeap() >= bytes + 4096;
+#else
+  (void)bytes;
+  return true;
+#endif
+}
 constexpr size_t IO_CHUNK = 1024;
-// Vercel cold starts can take longer than five seconds before response headers.
-// Keep POSTs below the user's 60-second UI patience budget while leaving enough
-// room for the real X3 wolfSSL handshake and a cold API invocation.
-constexpr uint32_t HTTP_TIMEOUT_MS = 20000;
+// Bounds each stage of a request: TCP connect, TLS handshake (SecureClient
+// keeps a 15 s floor) and every response read. With the TLS 1.2 retry off, a
+// failed attempt costs at most connect + handshake = 30 s, and the 60 s UI
+// deadlines in FirmwareUpdateActivity always see an outcome first.
+constexpr uint32_t HTTP_TIMEOUT_MS = 15000;
 
 class HttpBurst {
  public:
@@ -153,6 +165,9 @@ void ProjectStickService::begin() {
 #ifndef SIMULATOR
   http.setUserAgent("Project.Stick-CrossPoint-" CROSSPOINT_VERSION);
   http.setFollowRedirects(3);
+  // The StockStick API (Cloudflare) speaks TLS 1.3; a TLS 1.2 retry after a
+  // failed handshake only doubled each failure (~40 s) and its heap churn.
+  http.setTls12Fallback(false);
 #endif
   ProjectStickStateLock lock(projectStickStateMutex);
   if (!projectStickStoreInitialized) {
@@ -190,19 +205,28 @@ ProjectStickService::RadioLease::~RadioLease() {
 }
 
 // Before a TLS connection: if the heap cannot afford the handshake, lend
-// NimBLE's heap for the rest of the cloud operation.
-void ProjectStickService::lendRadioIfLow(const char* what) {
+// NimBLE's heap for the rest of the cloud operation. Returns false when even
+// then the heap is below the hard floor: the caller skips the request.
+bool ProjectStickService::lendRadioIfLow(const char* what) {
 #ifndef SIMULATOR
-  const uint32_t freeHeap = ESP.getFreeHeap(), maxAlloc = ESP.getMaxAllocHeap();
-  LOG_INF("STICK", "%s: heap=%u max=%u%s", what, (unsigned)freeHeap, (unsigned)maxAlloc,
-          radioLent ? " (BLE released)" : "");
-  if (radioLent || project_stick::tlsHeapSufficient(freeHeap, maxAlloc)) return;
-  if (studio_ble::releaseRadio()) {
+  uint32_t freeHeap = ESP.getFreeHeap(), maxAlloc = ESP.getMaxAllocHeap();
+  LOG_INF("STICK", "%s: heap=%u max=%u min=%u%s", what, (unsigned)freeHeap, (unsigned)maxAlloc,
+          (unsigned)ESP.getMinFreeHeap(), radioLent ? " (BLE released)" : "");
+  if (!radioLent && !project_stick::tlsHeapSufficient(freeHeap, maxAlloc) && studio_ble::releaseRadio()) {
     radioLent = true;
-    LOG_INF("STICK", "%s: heap below TLS needs; BLE released for this request", what);
+    freeHeap = ESP.getFreeHeap();
+    maxAlloc = ESP.getMaxAllocHeap();
+    LOG_INF("STICK", "%s: heap below TLS needs; BLE released (heap=%u max=%u)", what, (unsigned)freeHeap,
+            (unsigned)maxAlloc);
   }
+  if (project_stick::tlsHeapAffordable(freeHeap, maxAlloc)) return true;
+  LOG_ERR("STICK", "%s skipped: low memory (heap=%u max=%u)", what, (unsigned)freeHeap, (unsigned)maxAlloc);
+  lastFailure = project_stick::NetFailure::Memory;
+  lastFailureStatus = 0;
+  return false;
 #else
   (void)what;
+  return true;
 #endif
 }
 
@@ -447,7 +471,10 @@ bool ProjectStickService::requestPost(const std::string& path, const std::string
     recordOutcome(true, 429);
     return false;
   }
-  lendRadioIfLow(path.c_str());
+  if (!lendRadioIfLow(path.c_str())) {
+    status = 0;
+    return false;
+  }
   // One extra attempt, and only for a transport failure (dropped keep-alive,
   // Wi-Fi hiccup). A server answer, including 429/5xx, is never retried here:
   // the shared backoff decides when the next request may go out.
@@ -484,6 +511,7 @@ bool ProjectStickService::requestPost(const std::string& path, const std::string
     LOG_ERR("STICK", "POST %s failed (status=%d complete=%u bytes=%u)", path.c_str(), status, complete ? 1u : 0u,
             (unsigned)response.size());
     if (attempt == 0 && !lendRadioAfterFailure(path.c_str())) delay(500);
+    if (attempt == 0 && !lendRadioIfLow(path.c_str())) break;  // below the hard floor: retrying only fragments
   }
   noteApiResult(status > 0 ? status : -1, "");
   return false;
@@ -493,14 +521,23 @@ bool ProjectStickService::fetchJson(const std::string& url, std::string& respons
   // Same policy as requestPost: one retry, for transport failures only.
   for (uint8_t attempt = 0; attempt < 2; ++attempt) {
     response.clear();
+    if (!heapFits(std::min<size_t>(maxBytes, 4096))) {
+      LOG_ERR("STICK", "GET skipped: no room for the response buffer");
+      lastFailure = project_stick::NetFailure::Memory;
+      break;
+    }
     response.reserve(std::min<size_t>(maxBytes, 4096));
     const bool ok = fetchAuthenticated(url, [&response, maxBytes](const uint8_t* data, size_t length) {
       if (length > maxBytes - response.size()) return false;
+      // std::string growth throws (abort under -fno-exceptions): stop the
+      // transfer instead when the doubled buffer would not fit.
+      const size_t needed = response.size() + length;
+      if (needed > response.capacity() && !heapFits(std::max(needed, response.capacity() * 2))) return false;
       response.append(reinterpret_cast<const char*>(data), length);
       return true;
     });
     if (ok) return true;
-    if (lastFetchStatus > 0 || lastFailure == project_stick::NetFailure::Clock) break;
+    if (lastFetchStatus > 0 || lastFailure == project_stick::NetFailure::Clock || memorySkipped) break;
     if (attempt == 0 && !lendRadioAfterFailure("GET")) delay(500);
   }
   response.clear();
@@ -527,7 +564,11 @@ bool ProjectStickService::fetchAuthenticated(const std::string& url,
     recordOutcome(true, 429);
     return false;
   }
-  lendRadioIfLow("GET");
+  memorySkipped = false;
+  if (!lendRadioIfLow("GET")) {
+    memorySkipped = true;
+    return false;
+  }
   if (!http.begin(url)) return false;
   // Pinned-root client; the ESP-IDF HTTP client (and the mbedTLS TLS stack it
   // pulls in) is not linked.
@@ -555,52 +596,81 @@ bool ProjectStickService::fetchAuthenticated(const std::string& url,
 
 
 
+namespace {
+constexpr std::time_t MIN_TRUSTED_UTC = 1735689600;  // 2025-01-01T00:00:00Z
+
+int64_t utcFromShanghai(const project_stick::ShanghaiTime& time) {
+  return time.valid ? time.day * 86400LL + time.secondOfDay - 8 * 3600 : 0;
+}
+
+// The system clock is the single trusted wall clock: set from NTP, the
+// phone (BLE begin) or the server, and copied to the RTC by syncClock().
+void adoptSystemTime(int64_t utc) {
+#ifdef SIMULATOR
+  (void)utc;  // the host clock is authoritative in the simulator
+#else
+  if (utc < MIN_TRUSTED_UTC) return;
+  const std::time_t current = std::time(nullptr);
+  if (current >= MIN_TRUSTED_UTC && std::llabs(static_cast<long long>(current - utc)) < 30) return;
+  timeval tv{static_cast<time_t>(utc), 0};
+  settimeofday(&tv, nullptr);
+#endif
+}
+}  // namespace
+
 bool ProjectStickService::parseServerTime(const char* value) {
   project_stick::ShanghaiTime parsed;
   if (!project_stick::parseIso8601ToShanghai(value, parsed)) return false;
   serverTime = parsed;
   serverTimeCapturedMs = millis();
+  adoptSystemTime(utcFromShanghai(parsed));
   return true;
 }
 
+// Allocation-free (runs from the UI loop). Preference: server time, then the
+// trusted system clock, then the RTC. An RTC that lost power reads
+// 2000-01-01; such readings are rejected, and an invalid time makes
+// StudioFrame::tick() hold the current frame instead of picking a schedule.
 project_stick::ShanghaiTime ProjectStickService::now() const {
   if (serverTime.valid) return project_stick::advanceTime(serverTime, (millis() - serverTimeCapturedMs) / 1000);
-  uint16_t year = 0;
-  uint8_t month = 0;
-  uint8_t day = 0;
-  uint8_t hour = 0;
-  uint8_t minute = 0;
-  uint8_t second = 0;
-#ifdef SIMULATOR
-  const std::time_t wallTime = std::time(nullptr);
-  std::tm utcTime{};
-  if (wallTime <= 0 || !gmtime_r(&wallTime, &utcTime)) return {};
-  year = static_cast<uint16_t>(utcTime.tm_year + 1900);
-  month = static_cast<uint8_t>(utcTime.tm_mon + 1);
-  day = static_cast<uint8_t>(utcTime.tm_mday);
-  hour = static_cast<uint8_t>(utcTime.tm_hour);
-  minute = static_cast<uint8_t>(utcTime.tm_min);
-  second = static_cast<uint8_t>(utcTime.tm_sec);
-#else
-  if (!halClock.getDateTime(year, month, day, hour, minute, second)) {
-    const std::time_t wall = std::time(nullptr);
-    std::tm utc{};
-    if (wall < 1735689600 || !gmtime_r(&wall, &utc)) return {};
-    year = utc.tm_year + 1900;
-    month = utc.tm_mon + 1;
-    day = utc.tm_mday;
-    hour = utc.tm_hour;
-    minute = utc.tm_min;
-    second = utc.tm_sec;
+  project_stick::ShanghaiTime result;
+  const std::time_t wall = std::time(nullptr);
+  std::tm utc{};
+  if (wall >= MIN_TRUSTED_UTC && gmtime_r(&wall, &utc) &&
+      project_stick::shanghaiFromUtc(utc.tm_year + 1900, utc.tm_mon + 1, utc.tm_mday, utc.tm_hour, utc.tm_min,
+                                     utc.tm_sec, result)) {
+    return result;
   }
+#ifndef SIMULATOR
+  uint16_t year = 0;
+  uint8_t month = 0, day = 0, hour = 0, minute = 0, second = 0;
+  if (halClock.getDateTime(year, month, day, hour, minute, second))
+    project_stick::shanghaiFromUtc(year, month, day, hour, minute, second, result);
 #endif
-  char utc[32];
-  snprintf(utc, sizeof(utc), "%04u-%02u-%02uT%02u:%02u:%02uZ", year, month, day, hour, minute, second);
-  project_stick::ShanghaiTime rtcTime;
-  project_stick::parseIso8601ToShanghai(utc, rtcTime);
-  return rtcTime;
+  return result;
 }
 
+// Main-loop only: the RTC shares the I2C bus with the UI task's other
+// peripherals, so it is never touched from the sync worker or BLE callbacks.
+void ProjectStickService::syncClock() {
+#ifndef SIMULATOR
+  if (!halClock.isAvailable()) return;
+  const uint32_t nowMs = millis();
+  if (lastClockSyncMs != 0 && nowMs - lastClockSyncMs < CLOCK_SYNC_MS) return;
+  lastClockSyncMs = nowMs;
+  uint16_t year = 0;
+  uint8_t month = 0, day = 0, hour = 0, minute = 0, second = 0;
+  project_stick::ShanghaiTime rtc;
+  const bool rtcTrusted = halClock.getDateTime(year, month, day, hour, minute, second) &&
+                          project_stick::shanghaiFromUtc(year, month, day, hour, minute, second, rtc);
+  const std::time_t wall = std::time(nullptr);
+  if (wall >= MIN_TRUSTED_UTC) {
+    if (!rtcTrusted || std::llabs(static_cast<long long>(utcFromShanghai(rtc) - wall)) > 120) halClock.setUtc(wall);
+  } else if (rtcTrusted) {
+    adoptSystemTime(utcFromShanghai(rtc));  // lets TLS start without waiting for NTP
+  }
+#endif
+}
 
 bool ProjectStickService::hashFile(const std::string& path, std::string& result) {
   HalFile file;

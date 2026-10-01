@@ -1,6 +1,9 @@
 #include "HalSystem.h"
 
+#include <new>
 #include <string>
+
+#include <esp_heap_caps.h>
 
 #include "Arduino.h"
 #include "HalStorage.h"
@@ -13,6 +16,16 @@
 #define MAX_PANIC_STACK_DEPTH 32
 
 RTC_NOINIT_ATTR char panicMessage[256];
+
+namespace {
+struct HeapSample {
+  uint32_t magic;
+  uint32_t freeBytes, minFree, maxAlloc, uptimeMs;
+  uint32_t outOfMemory;  // 1 when a throwing operator new failed
+};
+constexpr uint32_t HEAP_SAMPLE_MAGIC = 0x48454150;  // "HEAP"
+}  // namespace
+RTC_NOINIT_ATTR HeapSample panicHeap;
 RTC_NOINIT_ATTR HalSystem::StackFrame panicStack[MAX_PANIC_STACK_DEPTH];
 
 extern "C" {
@@ -107,8 +120,30 @@ void checkPanic() {
   }
 }
 
+void sampleHeap() {
+  panicHeap.freeBytes = heap_caps_get_free_size(MALLOC_CAP_8BIT);
+  panicHeap.minFree = heap_caps_get_minimum_free_size(MALLOC_CAP_8BIT);
+  panicHeap.maxAlloc = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
+  panicHeap.uptimeMs = millis();
+  panicHeap.magic = HEAP_SAMPLE_MAGIC;
+}
+
+namespace {
+void outOfMemory() {
+  sampleHeap();
+  panicHeap.outOfMemory = 1;
+  LOG_ERR("SYS", "Out of memory: operator new failed (free=%u min=%u max=%u)", (unsigned)panicHeap.freeBytes,
+          (unsigned)panicHeap.minFree, (unsigned)panicHeap.maxAlloc);
+  abort();
+}
+}  // namespace
+
+void installOutOfMemoryHandler() { std::set_new_handler(outOfMemory); }
+
 void clearPanic() {
   panicMessage[0] = '\0';
+  panicHeap.magic = 0;
+  panicHeap.outOfMemory = 0;
   for (size_t i = 0; i < MAX_PANIC_STACK_DEPTH; i++) {
     panicStack[i].sp = 0;
   }
@@ -123,6 +158,13 @@ std::string getPanicInfo(bool full) {
 
     info += "CrossPoint version: " CROSSPOINT_VERSION;
     info += "\n\nPanic reason: " + std::string(panicMessage);
+    if (panicHeap.magic == HEAP_SAMPLE_MAGIC) {
+      char heap[160];
+      snprintf(heap, sizeof(heap), "\n%sHeap at %u ms: free=%u min=%u largest=%u",
+               panicHeap.outOfMemory ? "Out of memory (operator new failed). " : "", (unsigned)panicHeap.uptimeMs,
+               (unsigned)panicHeap.freeBytes, (unsigned)panicHeap.minFree, (unsigned)panicHeap.maxAlloc);
+      info += heap;
+    }
     info += "\n\nLast logs:\n" + getLastLogs();
     info += "\n\nStack memory:\n";
 

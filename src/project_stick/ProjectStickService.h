@@ -76,6 +76,8 @@ class ProjectStickService {
   // with the previous identity state is discarded instead of applied.
   bool applyBleBinding(const std::string& deviceToken, const std::string& owner);
   project_stick::ShanghaiTime now() const;
+  // Copies trusted time between the system clock and the RTC (UI task only).
+  void syncClock();
 
  private:
   std::string baseUrl, localOwner;
@@ -86,6 +88,8 @@ class ProjectStickService {
   Display currentDisplay;
   project_stick::ShanghaiTime serverTime;
   uint32_t serverTimeCapturedMs = 0;
+  static constexpr uint32_t CLOCK_SYNC_MS = 60000;
+  uint32_t lastClockSyncMs = 0;
   bool inactive = false;
   freeink::SecureHttpClient http;
 
@@ -109,7 +113,8 @@ class ProjectStickService {
   // and the outermost RadioLease brings it back when the operation ends.
   bool radioLent = false;
   bool leaseActive = false;
-  void lendRadioIfLow(const char* what);
+  bool lendRadioIfLow(const char* what);
+  bool memorySkipped = false;
   bool lendRadioAfterFailure(const char* what);
   struct RadioLease {
     explicit RadioLease(ProjectStickService& service);
