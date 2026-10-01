@@ -4,6 +4,7 @@
 #include <cctype>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 
 namespace project_stick {
 namespace {
@@ -43,12 +44,37 @@ bool parseDigits(const char* value, size_t offset, size_t count, int& out) {
 
 }  // namespace
 
+bool shanghaiFromUtc(int year, int month, int day, int hour, int minute, int second, ShanghaiTime& result) {
+  result = {};
+  // An RTC that lost power reads 2000-01-01; nothing before 2025 is a real
+  // time for this device, so it must never drive a schedule.
+  if (year < MIN_TRUSTED_YEAR || year > MAX_TRUSTED_YEAR) return false;
+  if (month < 1 || month > 12 || day < 1 || day > 31 || hour < 0 || hour > 23 || minute < 0 || minute > 59 ||
+      second < 0 || second > 60) {
+    return false;
+  }
+  int64_t epoch = daysFromCivil(year, static_cast<unsigned>(month), static_cast<unsigned>(day)) * 86400 + hour * 3600 +
+                  minute * 60 + std::min(second, 59);
+  epoch += 8 * 3600;  // Protocol scheduling is authoritative in Asia/Shanghai.
+  result.day = epoch / 86400;
+  int64_t seconds = epoch % 86400;
+  if (seconds < 0) {
+    seconds += 86400;
+    --result.day;
+  }
+  result.secondOfDay = static_cast<uint32_t>(seconds);
+  result.valid = true;
+  return true;
+}
+
+// Allocation-free: called from the UI loop, where a failed heap allocation
+// used to abort the firmware (std::bad_alloc is not caught anywhere).
 bool parseIso8601ToShanghai(const char* value, ShanghaiTime& result) {
   result = {};
   if (!value) return false;
-  const std::string input(value);
-  if (input.size() < 20 || input[4] != '-' || input[7] != '-' || (input[10] != 'T' && input[10] != ' ') ||
-      input[13] != ':' || input[16] != ':') {
+  const size_t length = std::strlen(value);
+  if (length < 20 || value[4] != '-' || value[7] != '-' || (value[10] != 'T' && value[10] != ' ') ||
+      value[13] != ':' || value[16] != ':') {
     return false;
   }
 
@@ -62,43 +88,36 @@ bool parseIso8601ToShanghai(const char* value, ShanghaiTime& result) {
       !parseDigits(value, 11, 2, hour) || !parseDigits(value, 14, 2, minute) || !parseDigits(value, 17, 2, second)) {
     return false;
   }
-  if (month < 1 || month > 12 || day < 1 || day > 31 || hour > 23 || minute > 59 || second > 60) return false;
 
   size_t zone = 19;
-  if (zone < input.size() && input[zone] == '.') {
+  if (zone < length && value[zone] == '.') {
     ++zone;
-    while (zone < input.size() && std::isdigit(static_cast<unsigned char>(input[zone]))) ++zone;
+    while (zone < length && std::isdigit(static_cast<unsigned char>(value[zone]))) ++zone;
   }
 
   int offsetSeconds = 0;
-  if (zone < input.size() && (input[zone] == 'Z' || input[zone] == 'z')) {
+  if (zone < length && (value[zone] == 'Z' || value[zone] == 'z')) {
     ++zone;
-  } else if (zone + 5 < input.size() && (input[zone] == '+' || input[zone] == '-')) {
+  } else if (zone + 5 < length && (value[zone] == '+' || value[zone] == '-')) {
     int offsetHour = 0;
     int offsetMinute = 0;
-    if (!parseDigits(value, zone + 1, 2, offsetHour) || input[zone + 3] != ':' ||
+    if (!parseDigits(value, zone + 1, 2, offsetHour) || value[zone + 3] != ':' ||
         !parseDigits(value, zone + 4, 2, offsetMinute) || offsetHour > 23 || offsetMinute > 59) {
       return false;
     }
     offsetSeconds = (offsetHour * 60 + offsetMinute) * 60;
-    if (input[zone] == '-') offsetSeconds = -offsetSeconds;
+    if (value[zone] == '-') offsetSeconds = -offsetSeconds;
     zone += 6;
   } else {
     return false;
   }
-  if (zone != input.size()) return false;
+  if (zone != length) return false;
 
-  int64_t epoch = daysFromCivil(year, static_cast<unsigned>(month), static_cast<unsigned>(day)) * 86400 + hour * 3600 +
-                  minute * 60 + std::min(second, 59) - offsetSeconds;
-  epoch += 8 * 3600;  // Protocol scheduling is authoritative in Asia/Shanghai.
-  result.day = epoch / 86400;
-  int64_t seconds = epoch % 86400;
-  if (seconds < 0) {
-    seconds += 86400;
-    --result.day;
-  }
-  result.secondOfDay = static_cast<uint32_t>(seconds);
-  result.valid = true;
+  if (!shanghaiFromUtc(year, month, day, hour, minute, second, result)) return false;
+  // Apply the zone offset on the already normalised Shanghai time.
+  const int64_t total = result.day * 86400 + static_cast<int64_t>(result.secondOfDay) - offsetSeconds;
+  result.day = total >= 0 ? total / 86400 : (total - 86399) / 86400;
+  result.secondOfDay = static_cast<uint32_t>(total - result.day * 86400);
   return true;
 }
 

@@ -29,3 +29,6 @@ target_sources(ProjectStickCoreTest PRIVATE ApiBackoffTest.cpp)
 
 # Heap/failure/deadline policy for cloud requests (header-only).
 target_sources(ProjectStickCoreTest PRIVATE NetPolicyTest.cpp)
+
+# Hot paths must not allocate (2.2.2 crash: bad_alloc in now()).
+target_sources(ProjectStickCoreTest PRIVATE AllocationFreeTest.cpp)

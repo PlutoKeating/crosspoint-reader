@@ -237,6 +237,7 @@ bool StudioFrame::commit() {
     program = std::move(nextProgram);
     headerOffset = nextHeader;
     playback = {};
+    lastTickNow = 0;
     selectedFrame = -1;
     pixelOffset = headerOffset;
   }
@@ -245,6 +246,7 @@ bool StudioFrame::commit() {
     savedProgram = oldSaved;
     program = oldProgram;
     playback = oldPlayback;
+    lastTickNow = 0;
     pixelOffset = oldOffset;
     headerOffset = oldHeader;
     lastVisual = oldVisual;
@@ -356,6 +358,7 @@ void StudioFrame::clear() {
   lastVisualOffset = 0;
   program = {};
   playback = {};
+  lastTickNow = 0;
   pixelOffset = 0;
   selectedFrame = -1;
   Storage.remove(STATE);
@@ -368,6 +371,10 @@ void StudioFrame::clear() {
     }
   }
   ++revision;
+}
+bool StudioFrame::hasContent() const {
+  std::lock_guard<std::recursive_mutex> lock(mutex);
+  return !active.hash.empty();
 }
 StudioFrame::Snapshot StudioFrame::snapshot() const {
   std::lock_guard<std::recursive_mutex> lock(mutex);
@@ -483,6 +490,7 @@ bool StudioFrame::readProgram(const Snapshot& source, studio::Program& result, s
 void StudioFrame::restore() {
   std::lock_guard<std::recursive_mutex> lock(mutex);
   if (active.hash == savedProgram.hash) return;
+  lastTickNow = 0;  // re-evaluate the restored program on the next tick
   if (savedProgram.hash.empty()) {
     if (!lastVisual.hash.empty() && lastVisual.size == BYTES) active = lastVisual;
     active.expires = 0;
@@ -507,14 +515,19 @@ bool StudioFrame::hasProgram() const {
 }
 void StudioFrame::tick(int64_t now, int event, int64_t alertUntil) {
   std::lock_guard<std::recursive_mutex> lock(mutex);
-  if (now <= 0) return;
+  if (now <= 0) return;  // no trusted time: hold the current frame
+  // The UI loop calls this many times a second; schedules have one-second
+  // resolution, so re-evaluate only when the second, the alert or a key changes.
+  if (!event && now == lastTickNow && alertUntil == lastTickAlert) return;
+  lastTickNow = now;
+  lastTickAlert = alertUntil;
   if (active.expires > 0 && now >= active.expires) restore();
   if (active.hash.empty()) return;
   if (active.size == BYTES) {
     int overlay = -1;
     if (program.alertInterrupts && alertUntil > now && !program.alertScene.empty()) {
-      auto state = playback;
-      overlay = studio::step(program, state, now, 0, alertUntil);
+      alertScratch = playback;  // assignment reuses the scratch buffers
+      overlay = studio::step(program, alertScratch, now, 0, alertUntil);
     }
     if (overlay != alertFrame) {
       alertFrame = overlay;

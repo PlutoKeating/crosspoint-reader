@@ -62,19 +62,28 @@ int64_t boundary(const Program& p, int64_t now) {
         }
   return result;
 }
-std::vector<int> order(const Scene& s, int64_t now, bool random) {
-  auto a = s.cards;
-  if (!random) return a;
+// Fills `out`, reusing its capacity: step() runs from the UI loop and must not
+// churn the heap (fragmentation starved TLS and once aborted on bad_alloc).
+void order(const Scene& s, int64_t now, bool random, std::vector<int>& out) {
+  out.assign(s.cards.begin(), s.cards.end());
+  if (!random) return;
   uint32_t seed = 2166136261u;
-  for (char c : s.id + "|" + date(now)) {
+  auto mix = [&seed](char c) {
     seed ^= static_cast<uint8_t>(c);
     seed *= 16777619u;
-  }
-  for (size_t i = a.size(); i > 1; --i) {
+  };
+  for (char c : s.id) mix(c);
+  mix('|');
+  for (char c : date(now)) mix(c);  // 10 chars: fits the small-string buffer
+  for (size_t i = out.size(); i > 1; --i) {
     seed = seed * 1664525u + 1013904223u;
-    std::swap(a[i - 1], a[seed % i]);
+    std::swap(out[i - 1], out[seed % i]);
   }
-  return a;
+}
+std::vector<int> order(const Scene& s, int64_t now, bool random) {
+  std::vector<int> result;
+  order(s, now, random, result);
+  return result;
 }
 int step(const Program& p, Playback& s, int64_t timestamp, int event, int64_t alertUntil) {
   const int64_t now = std::max(timestamp, s.lastTime);
@@ -92,11 +101,13 @@ int step(const Program& p, Playback& s, int64_t timestamp, int event, int64_t al
   const bool alert = alertUntil > now && !p.alertScene.empty(),
              manual = s.manual && !s.lastCard.empty() && (s.manualUntil < 0 || s.manualUntil > now);
   const Scene* selected = nullptr;
-  std::string id;
+  static const std::string NO_SCENE;
+  const std::string* id = &NO_SCENE;  // points into the program: no copy
+  auto& a = s.order;
   if (alert && (p.alertInterrupts || !manual)) {
     for (const auto& scene : p.scenes)
       if (scene.id == p.alertScene) {
-        auto a = order(scene, now, p.random);
+        order(scene, now, p.random, a);
         return a.empty() ? -1 : a[(now / p.interval) % a.size()];
       }
     return -1;
@@ -106,30 +117,30 @@ int step(const Program& p, Playback& s, int64_t timestamp, int event, int64_t al
     return it == p.cardIds.end() ? -1 : static_cast<int>(it - p.cardIds.begin());
   }
   if (manual)
-    id = s.scene;
+    id = &s.scene;
   else {
     int priority = -1;
     bool conflict = false;
     for (const auto& w : p.windows)
       if (active(w, now, p)) {
         if (w.priority > priority) {
-          id = w.scene;
+          id = &w.scene;
           priority = w.priority;
           conflict = false;
         } else if (w.priority == priority)
           conflict = true;
       }
     if (conflict) return -1;
-    if (id.empty()) id = p.defaultScene;
+    if (id->empty()) id = &p.defaultScene;
   }
   for (const auto& scene : p.scenes)
-    if (scene.id == id) {
+    if (scene.id == *id) {
       selected = &scene;
       break;
     }
   if (!selected || selected->cards.empty()) return -1;
-  const auto a = order(*selected, now, p.random);
-  if (s.scene != id) {
+  order(*selected, now, p.random, a);
+  if (s.scene != *id) {
     s.index = 0;
     s.lastChange = now;
     s.manual = false;
@@ -150,7 +161,7 @@ int step(const Program& p, Playback& s, int64_t timestamp, int event, int64_t al
     }
     s.manual = false;
   }
-  s.scene = id;
+  if (id != &s.scene) s.scene = *id;  // copies only when the scene changes size
   const int frame = a[s.index % a.size()];
   s.lastCard = p.cardIds[frame];
   return frame;

@@ -43,4 +43,8 @@ class HalClock {
   // Debouncing (skip if already synced once) is enforced by the caller, not here,
   // so the HAL stays free of any app-layer settings dependency.
   bool syncFromNTP();
+
+  // Writes a trusted UTC Unix time (NTP, phone over BLE, server) to the RTC.
+  // I2C: call from task context, never from an ISR or a NimBLE callback.
+  bool setUtc(time_t utc);
 };

@@ -36,6 +36,8 @@ class StudioFrame {
   bool portable() const;
   int64_t nextBoundary(int64_t now) const;
   Snapshot snapshot() const;
+  // Allocation-free check for the UI loop (snapshot() copies heap strings).
+  bool hasContent() const;
   Snapshot displaySnapshot() const;
   bool busy() const;
   size_t received() const;
@@ -46,7 +48,8 @@ class StudioFrame {
   Snapshot active, incoming, savedProgram, lastVisual;
   size_t lastVisualOffset = 0;
   studio::Program program;
-  studio::Playback playback;
+  studio::Playback playback, alertScratch;
+  int64_t lastTickNow = 0, lastTickAlert = 0;
   size_t pixelOffset = 0, headerOffset = 0;
   int selectedFrame = -1, alertFrame = -1;
   bool alertDisplayed = false;

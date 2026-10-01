@@ -124,3 +124,25 @@ bool HalClock::syncFromNTP() {
   LOG_ERR("CLK", "NTP sync timed out");
   return false;
 }
+
+bool HalClock::setUtc(time_t utc) {
+  if (!_available) return false;
+  struct tm timeinfo;
+  if (!gmtime_r(&utc, &timeinfo)) return false;
+  Rtc::DateTime dt;
+  dt.year = static_cast<uint16_t>(timeinfo.tm_year + 1900);
+  dt.month = static_cast<uint8_t>(timeinfo.tm_mon + 1);
+  dt.day = static_cast<uint8_t>(timeinfo.tm_mday);
+  dt.hour = static_cast<uint8_t>(timeinfo.tm_hour);
+  dt.minute = static_cast<uint8_t>(timeinfo.tm_min);
+  dt.second = static_cast<uint8_t>(timeinfo.tm_sec);
+  dt.weekday = static_cast<uint8_t>(timeinfo.tm_wday);
+  if (!_sdkRtc.set(dt)) return false;
+  _lastPollMs = 0;
+  _cachedHour = dt.hour;
+  _cachedMinute = dt.minute;
+  _hasCachedTime = true;
+  LOG_INF("CLK", "RTC set to %04u-%02u-%02u %02u:%02u:%02u UTC", dt.year, dt.month, dt.day, dt.hour, dt.minute,
+          dt.second);
+  return true;
+}

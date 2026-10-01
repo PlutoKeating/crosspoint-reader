@@ -171,10 +171,12 @@ void ProjectStickActivity::loop() {
   updateButtonHints(millis());
   updateFeedbackBubble();
   studio_ble::tick();
+  service.syncClock();
   tickBleSetup();
   if (service.refreshOwnership()) requestUpdate();
   auto& frame = StudioFrame::instance();
-  const auto studio = frame.snapshot();
+  // No snapshot() here: it copies heap strings on every loop iteration.
+  const bool hasStudio = frame.hasContent();
   const int64_t studioNow = epochSeconds(service.now());
   const int64_t alertUntil = epochSeconds(service.displaySnapshot().alertUntil);
   frame.tick(studioNow, 0, alertUntil);
@@ -228,7 +230,8 @@ void ProjectStickActivity::loop() {
   // X3 side buttons are fixed physical controls: BTN_UP is on the left edge
   // ("一般": next card) and BTN_DOWN is on the right edge ("有用": keep).
   if (mappedInput.wasReleased(MappedInputManager::Button::Up)) {
-    if (!studio.hash.empty()) {
+    if (hasStudio) {
+      const auto studio = frame.snapshot();
       service.sendStudioFeedback(studio.task, studio.card, false);
       frame.tick(studioNow, 1, alertUntil);
       showFeedbackBubble(stick_overlay::Bubble::Meh);
@@ -236,9 +239,10 @@ void ProjectStickActivity::loop() {
     return;
   }
   if (mappedInput.wasReleased(MappedInputManager::Button::Down)) {
-    if (!studio.hash.empty()) {
+    if (hasStudio) {
       frame.tick(studioNow, 2, alertUntil);
-      service.sendStudioFeedback(frame.displaySnapshot().task, frame.displaySnapshot().card, true);
+      const auto visual = frame.displaySnapshot();
+      service.sendStudioFeedback(visual.task, visual.card, true);
       showFeedbackBubble(stick_overlay::Bubble::Useful);
     }
     return;
@@ -255,7 +259,7 @@ void ProjectStickActivity::loop() {
     launchWifiSelection();
     return;
   }
-  if (frontButton == HalGPIO::BTN_RIGHT && !studio.hash.empty()) {
+  if (frontButton == HalGPIO::BTN_RIGHT && hasStudio) {
     // The program plays on the device: the right key is the manual "next card".
     frame.tick(studioNow, 1, alertUntil);
     requestUpdate();
@@ -544,7 +548,7 @@ void ProjectStickActivity::render(RenderLock&&) {
   }
   // An installed program with no current frame keeps the last visual; only
   // the lock can be layered onto it.
-  if (!StudioFrame::instance().snapshot().hash.empty()) {
+  if (StudioFrame::instance().hasContent()) {
     if (mappedInput.isKeyguardLocked()) {
       drawOverlays(false);
       renderer.displayBuffer();

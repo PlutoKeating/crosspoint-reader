@@ -29,11 +29,13 @@ struct Playback {
   std::string scene, lastCard;
   int index = 0;
   bool manual = false;
+  std::vector<int> order;  // scratch for step(), kept to avoid per-call allocation
 };
 int minute(const std::string& value);
 bool active(const Window&, int64_t, const Program&);
 int64_t boundary(const Program&, int64_t);
 std::vector<int> order(const Scene&, int64_t, bool);
+void order(const Scene&, int64_t, bool, std::vector<int>& out);
 // Epoch seconds; unlike the UI's milliseconds this fits the embedded clock directly.
 int step(const Program&, Playback&, int64_t, int event = 0, int64_t alertUntil = 0);
 }  // namespace studio
