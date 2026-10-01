@@ -5,6 +5,7 @@
 #include <I18n.h>
 
 #include <algorithm>
+#include <cstdio>
 #include <string>
 
 #include "components/UITheme.h"
@@ -44,6 +45,13 @@ constexpr int CARD_RADIUS = 16;
 constexpr int CARD_PAD_X = 22;
 constexpr int CARD_PAD_Y = 14;
 constexpr int HALO = 2;
+// Status notice above the front bar.
+constexpr int NOTICE_MARGIN = 24;
+constexpr int NOTICE_BOTTOM_GAP = 14;
+constexpr int NOTICE_DOT = 10;
+constexpr int NOTICE_DOT_GAP = 6;
+constexpr int NOTICE_BAR_GAP = 10;
+constexpr int NOTICE_BAR_HEIGHT = 12;
 // X4 stacks both side keys on the right edge.
 constexpr int X4_SIDE_KEY_Y = 345;
 
@@ -221,6 +229,116 @@ void drawFeedbackBubble(const GfxRenderer& renderer, Bubble bubble, uint8_t fram
   const int contentX = x + (cardWidth - (STICK_ICON_SIZE + PILL_ICON_GAP + textWidth)) / 2;
   drawIcon(renderer, StickThumbUp20, contentX, y + (cardHeight - STICK_ICON_SIZE) / 2, true, fromLeft);
   renderer.drawText(BUBBLE_FONT, contentX + STICK_ICON_SIZE + PILL_ICON_GAP, y + CARD_PAD_Y, text, true);
+}
+
+bool noticeBusy(const Notice notice) {
+  switch (notice) {
+    case Notice::Receiving:
+    case Notice::Refreshing:
+    case Notice::Syncing:
+    case Notice::WifiConnecting:
+    case Notice::WifiScanning:
+      return true;
+    default:
+      return false;
+  }
+}
+
+void drawNotice(const GfxRenderer& renderer, const Notice notice, const int percent, const uint8_t frame) {
+  if (notice == Notice::None) return;
+  char buffer[64];
+  const char* text = "";
+  switch (notice) {
+    case Notice::PhoneConnected:
+      text = tr(STR_LINK_PHONE_CONNECTED);
+      break;
+    case Notice::Receiving:
+      snprintf(buffer, sizeof(buffer), tr(STR_LINK_RECEIVING), std::clamp(percent, 0, 100));
+      text = buffer;
+      break;
+    case Notice::Refreshing:
+      text = tr(STR_LINK_REFRESHING);
+      break;
+    case Notice::Done:
+      text = tr(STR_LINK_DONE);
+      break;
+    case Notice::Failed:
+      text = tr(STR_LINK_FAILED);
+      break;
+    case Notice::Syncing:
+      text = tr(STR_LINK_SYNCING);
+      break;
+    case Notice::Synced:
+      text = tr(STR_LINK_SYNCED);
+      break;
+    case Notice::SyncFailed:
+      text = tr(STR_LINK_SYNC_FAILED);
+      break;
+    case Notice::WifiConnecting:
+      text = tr(STR_PROJECT_STICK_WIFI_CONNECTING);
+      break;
+    case Notice::WifiConnected:
+      text = tr(STR_PROJECT_STICK_WIFI_CONNECTED);
+      break;
+    case Notice::WifiFailed:
+      text = tr(STR_PROJECT_STICK_WIFI_FAILED);
+      break;
+    case Notice::WifiScanning:
+      text = tr(STR_LINK_WIFI_SCANNING);
+      break;
+    case Notice::None:
+      return;
+  }
+  const bool busy = noticeBusy(notice);
+  const bool done = notice == Notice::Done || notice == Notice::Synced || notice == Notice::WifiConnected ||
+                    notice == Notice::PhoneConnected;
+  const bool bar = notice == Notice::Receiving;
+  const int screenWidth = renderer.getScreenWidth();
+  const int maxWidth = screenWidth - NOTICE_MARGIN * 2;
+  const int leadWidth = busy ? NOTICE_DOT * 3 + NOTICE_DOT_GAP * 2 : done ? STICK_ICON_SIZE : 0;
+  const int leadGap = leadWidth ? PILL_ICON_GAP + 3 : 0;
+  const std::string fitted = renderer.truncatedText(BUBBLE_FONT, text, maxWidth - CARD_PAD_X * 2 - leadWidth - leadGap);
+  const int textWidth = renderer.getTextWidth(BUBBLE_FONT, fitted.c_str());
+  const int textHeight = renderer.getTextLineHeight(BUBBLE_FONT, fitted.c_str());
+  const int contentWidth = leadWidth + leadGap + textWidth;
+  // A transfer keeps one width for its whole run, so the window does not
+  // jitter as the percentage grows.
+  const int cardWidth = bar ? maxWidth : std::min(maxWidth, contentWidth + CARD_PAD_X * 2);
+  const int cardHeight = textHeight + CARD_PAD_Y * 2 + (bar ? NOTICE_BAR_GAP + NOTICE_BAR_HEIGHT : 0);
+  const int x = (screenWidth - cardWidth) / 2;
+  const int y = renderer.getScreenHeight() - FRONT_BAR_HEIGHT - NOTICE_BOTTOM_GAP - cardHeight;
+  renderer.fillRoundedRect(x - HALO, y - HALO, cardWidth + HALO * 2, cardHeight + HALO * 2, CARD_RADIUS + HALO,
+                           Color::White);
+  renderer.drawRoundedRect(x, y, cardWidth, cardHeight, STROKE, CARD_RADIUS, true);
+
+  int cx = x + (cardWidth - contentWidth) / 2;
+  const int textCentre = y + CARD_PAD_Y + textHeight / 2;
+  if (busy) {
+    // Three dots; the filled one walks left to right with each frame.
+    for (int i = 0; i < 3; ++i) {
+      const int dotX = cx + i * (NOTICE_DOT + NOTICE_DOT_GAP);
+      const int dotY = textCentre - NOTICE_DOT / 2;
+      if (i == frame % 3)
+        renderer.fillRoundedRect(dotX, dotY, NOTICE_DOT, NOTICE_DOT, NOTICE_DOT / 2, Color::Black);
+      else
+        renderer.drawRoundedRect(dotX, dotY, NOTICE_DOT, NOTICE_DOT, 1, NOTICE_DOT / 2, true);
+    }
+  } else if (done) {
+    drawIcon(renderer, StickCheck20, cx, textCentre - STICK_ICON_SIZE / 2, true);
+  }
+  cx += leadWidth + leadGap;
+  renderer.drawText(BUBBLE_FONT, cx, y + CARD_PAD_Y, fitted.c_str(), true);
+
+  if (bar) {
+    const int barX = x + CARD_PAD_X;
+    const int barY = y + CARD_PAD_Y + textHeight + NOTICE_BAR_GAP;
+    const int barWidth = cardWidth - CARD_PAD_X * 2;
+    renderer.drawRoundedRect(barX, barY, barWidth, NOTICE_BAR_HEIGHT, 1, NOTICE_BAR_HEIGHT / 2, true);
+    const int fill = (barWidth - 4) * std::clamp(percent, 0, 100) / 100;
+    if (fill > 0)
+      renderer.fillRoundedRect(barX + 2, barY + 2, std::max(fill, NOTICE_BAR_HEIGHT - 4), NOTICE_BAR_HEIGHT - 4,
+                               (NOTICE_BAR_HEIGHT - 4) / 2, Color::Black);
+  }
 }
 
 void drawKeyguard(const GfxRenderer& renderer, project_stick::Keyguard::State state, bool promptVisible,

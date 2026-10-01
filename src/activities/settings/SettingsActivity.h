@@ -16,6 +16,7 @@ enum class SettingAction {
   None,
   RemapFrontButtons,
   Network,
+  Bluetooth,
   FirmwareUpdate,
   SdFirmwareUpdate,
   Language,

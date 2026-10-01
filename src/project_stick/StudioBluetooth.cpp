@@ -5,6 +5,7 @@
 #include <Logging.h>
 
 #include <algorithm>
+#include <atomic>
 #include <mutex>
 
 #include "FirmwareUpdateState.h"
@@ -14,6 +15,7 @@
 
 #include <Arduino.h>
 #include <NimBLEDevice.h>
+#include <esp_bt.h>
 #include <esp_system.h>
 #include <mbedtls/aes.h>
 #include <mbedtls/md.h>
@@ -39,6 +41,28 @@ uint32_t epoch = 0, lastActivity = 0;
 // released: NimBLE deinitialised to lend its heap to TLS or the flash writer.
 bool released = false;
 bool started = false, authenticated = false, isConnected = false;
+// The user's switch (Settings > Bluetooth); off keeps the stack deinitialised.
+bool userEnabled = true;
+// Start diagnostics: the stage and code of the last failed start, shown on the
+// Bluetooth settings screen so a silent radio can be told apart from a phone
+// that is not scanning.
+std::string startError, advertisedAs, address;
+int startErrorCode = 0;
+uint32_t starts = 0, startFailures = 0, connections = 0, advertisingRestarts = 0;
+uint32_t completedTransfers = 0, failedTransfers = 0;
+uint32_t lastConnectMs = 0, lastDisconnectMs = 0;
+bool everConnected = false, everDisconnected = false;
+size_t transferTotal = 0;
+// Bumped on every radio/session change the UI should repaint for.
+std::atomic<uint32_t> linkGeneration{0};
+void changed() { linkGeneration.fetch_add(1); }
+// What NimBLE (host pools, task stacks) and the controller need to come up;
+// below this the start is postponed instead of risking an allocation abort.
+constexpr uint32_t START_MIN_FREE_HEAP = 36 * 1024;
+constexpr uint32_t START_MIN_MAX_ALLOC = 12 * 1024;
+// A phone that holds the link without talking blocks advertising and cloud
+// requests; Wi-Fi setup polls STATUS, so real sessions never sit this long.
+constexpr uint32_t IDLE_LINK_TIMEOUT_MS = 5UL * 60UL * 1000UL;
 // Setup mode (unbound): one-time key K shown in the QR. Each connection pins
 // its key: a setup session keeps K until disconnect even after a bind.
 std::string setupKey, sessionKey;
@@ -84,7 +108,12 @@ bool equalProof(const std::string& a, const std::string& b) {
   return diff == 0;
 }
 void resetSession() {
-  if (authenticated && state == "receiving") StudioFrame::instance().abort();
+  if (authenticated && state == "receiving") {
+    StudioFrame::instance().abort();
+    ++failedTransfers;  // the phone left mid-transfer
+  }
+  transferTotal = 0;
+  changed();
   if (authenticated) mbedtls_aes_free(&aes);
   authenticated = false;
   sessionSetup = secret.empty();
@@ -105,9 +134,11 @@ void resetSession() {
   lastActivity = millis();
 }
 void fail(const char* reason) {
+  if (authenticated && (state == "receiving" || state == "refreshing")) ++failedTransfers;
   error = reason;
   state = "failed";
   if (authenticated) StudioFrame::instance().abort(true);
+  changed();
 }
 const char* wifiStateName() {
   switch (wifiState) {
@@ -283,6 +314,9 @@ class ServerCallbacks final : public NimBLEServerCallbacks {
       if (!reject) {
         isConnected = true;
         connectionHandle = info.getConnHandle();
+        ++connections;
+        lastConnectMs = millis();
+        everConnected = true;
         resetSession();
       }
     }
@@ -296,7 +330,9 @@ class ServerCallbacks final : public NimBLEServerCallbacks {
       resetSession();
       isConnected = false;
       connectionHandle = 0xffff;
-      advertise = started && !released;
+      lastDisconnectMs = millis();
+      everDisconnected = true;
+      advertise = started && !released && (!secret.empty() || !setupKey.empty());
     }
     if (advertise) NimBLEDevice::startAdvertising();
   }
@@ -304,7 +340,9 @@ class ServerCallbacks final : public NimBLEServerCallbacks {
 class Callbacks final : public NimBLECharacteristicCallbacks {
   void onRead(NimBLECharacteristic* characteristic, NimBLEConnInfo& info) override {
     std::lock_guard<std::recursive_mutex> lock(mutex);
-    if (info.getConnHandle() == connectionHandle) characteristic->setValue(statusJson());
+    if (info.getConnHandle() != connectionHandle) return;
+    lastActivity = millis();  // a phone polling STATUS is an active session
+    characteristic->setValue(statusJson());
   }
   void onWrite(NimBLECharacteristic* characteristic, NimBLEConnInfo& info) override {
     std::lock_guard<std::recursive_mutex> lock(mutex);
@@ -385,7 +423,9 @@ class Callbacks final : public NimBLECharacteristicCallbacks {
       task = incomingTask;
       hash = incomingHash;
       taskExpires = expires;
+      transferTotal = size;
       state = completed ? (active.displayed ? "displayed" : "refreshing") : "receiving";
+      changed();
       size_t skip = completed ? 0 : StudioFrame::instance().received();
       uint64_t blocks = skip / 16;
       for (int i = 15; i >= 0 && blocks; --i) {
@@ -404,6 +444,8 @@ class Callbacks final : public NimBLECharacteristicCallbacks {
       }
       StudioFrame::instance().tick(time(nullptr));
       state = "refreshing";
+      ++completedTransfers;
+      changed();
     } else {
       fail("unexpected_control");
     }
@@ -430,12 +472,46 @@ bool validSecret() {
   uint8_t decoded[32];
   return unhex(secret, decoded, 32);
 }
-// Starts NimBLE for the current identity. Caller holds radioMutex.
-void startRadioLocked() {
+// Records a failed start and leaves the stack fully torn down, so the next
+// tick() retry starts from scratch. Caller holds radioMutex.
+void failStartLocked(const char* stage, int code) {
+  NimBLEDevice::deinit(true);
+  // A start that died between controller init and host sync leaves the
+  // controller up; the next attempt needs it idle again.
+  if (esp_bt_controller_get_status() == ESP_BT_CONTROLLER_STATUS_ENABLED) esp_bt_controller_disable();
+  if (esp_bt_controller_get_status() == ESP_BT_CONTROLLER_STATUS_INITED) esp_bt_controller_deinit();
+  std::lock_guard<std::recursive_mutex> lock(mutex);
+  started = false;
+  startError = stage;
+  startErrorCode = code;
+  ++startFailures;
+  changed();
+  LOG_ERR("BLE", "Start failed at %s (code=%d heap=%u max=%u)", stage, code, (unsigned)ESP.getFreeHeap(),
+          (unsigned)ESP.getMaxAllocHeap());
+}
+// Advertising packet (31 bytes): flags, the 128-bit service UUID phones filter
+// on, and the device id prefix as manufacturer data, so a passive scan already
+// identifies the device. The complete name goes in the scan response: it does
+// not fit next to the UUID. Caller holds radioMutex.
+bool configureAdvertisingLocked(const std::string& name) {
+  auto* advertising = NimBLEDevice::getAdvertising();
+  NimBLEAdvertisementData packet, response;
+  // Company id 0xFFFF (unassigned), then the four id characters of the name.
+  std::string manufacturer = "\xff\xff";
+  manufacturer += name.substr(name.size() >= 4 ? name.size() - 4 : 0);
+  if (!packet.setFlags(BLE_HS_ADV_F_DISC_GEN) || !packet.addServiceUUID(NimBLEUUID(SERVICE)) ||
+      !packet.setManufacturerData(manufacturer) || !response.setName(name))
+    return false;
+  advertising->enableScanResponse(true);
+  return advertising->setAdvertisementData(packet) && advertising->setScanResponseData(response);
+}
+// Starts NimBLE for the current identity. Caller holds radioMutex. Returns
+// false when the start failed (recorded for diagnostics; tick() retries).
+bool startRadioLocked() {
   std::string name;
   {
     std::lock_guard<std::recursive_mutex> lock(mutex);
-    if (started || released) return;
+    if (started || released || !userEnabled) return true;
     if (secret.empty()) {
       HalFile file;
       if (Storage.openFileForRead("STUDIO", CREDENTIALS, file)) {
@@ -450,11 +526,20 @@ void startRadioLocked() {
         }
       }
     }
-    if (!validIdentity() || (!validSecret() && setupKey.empty())) return;
+    if (!validIdentity() || (!validSecret() && setupKey.empty())) return true;
     if (validSecret()) setupKey.clear();
     name = ble_setup::advertisedName(identity);
+    ++starts;
   }
-  NimBLEDevice::init(name.c_str());
+  const uint32_t freeHeap = ESP.getFreeHeap(), maxAlloc = ESP.getMaxAllocHeap();
+  if (freeHeap < START_MIN_FREE_HEAP || maxAlloc < START_MIN_MAX_ALLOC) {
+    failStartLocked("low_memory", static_cast<int>(freeHeap / 1024));
+    return false;
+  }
+  if (!NimBLEDevice::init(name)) {
+    failStartLocked("init", static_cast<int>(esp_bt_controller_get_status()));
+    return false;
+  }
   NimBLEDevice::setMTU(247);
   auto* server = NimBLEDevice::createServer();
   server->setCallbacks(&serverCallbacks, false);
@@ -462,16 +547,43 @@ void startRadioLocked() {
   service->createCharacteristic(CONTROL, NIMBLE_PROPERTY::WRITE, 512)->setCallbacks(&callbacks);
   service->createCharacteristic(DATA, NIMBLE_PROPERTY::WRITE, 244)->setCallbacks(&callbacks);
   service->createCharacteristic(STATUS, NIMBLE_PROPERTY::READ, 512)->setCallbacks(&callbacks);
-  service->start();
-  auto* advertising = NimBLEDevice::getAdvertising();
-  advertising->addServiceUUID(SERVICE);
-  advertising->setName(name.c_str());
-  advertising->enableScanResponse(true);
-  advertising->start();
+  if (!server->start()) {
+    failStartLocked("gatt", 0);
+    return false;
+  }
+  if (!configureAdvertisingLocked(name)) {
+    failStartLocked("adv_data", 0);
+    return false;
+  }
+  if (!NimBLEDevice::getAdvertising()->start()) {
+    failStartLocked("adv_start", 0);
+    return false;
+  }
+  const std::string mac = NimBLEDevice::getAddress().toString();
   std::lock_guard<std::recursive_mutex> lock(mutex);
   started = true;
-  LOG_INF("BLE", "NimBLE up as %s (heap=%u max=%u)", name.c_str(), (unsigned)ESP.getFreeHeap(),
+  advertisedAs = name;
+  address = mac;
+  startError.clear();
+  startErrorCode = 0;
+  changed();
+  LOG_INF("BLE", "NimBLE up as %s %s (heap=%u max=%u)", name.c_str(), mac.c_str(), (unsigned)ESP.getFreeHeap(),
           (unsigned)ESP.getMaxAllocHeap());
+  return true;
+}
+// Stops the stack and forgets the live session. Caller holds radioMutex.
+void stopRadioLocked() {
+  {
+    std::lock_guard<std::recursive_mutex> lock(mutex);
+    if (!started) return;
+    started = false;
+  }
+  NimBLEDevice::deinit(true);
+  std::lock_guard<std::recursive_mutex> lock(mutex);
+  if (isConnected) resetSession();
+  isConnected = false;
+  connectionHandle = 0xffff;
+  changed();
 }
 // Caller holds radioMutex.
 void disconnectLocked(uint16_t handle) {
@@ -504,6 +616,7 @@ bool releaseRadio() {
     if (isConnected) resetSession();
     isConnected = false;
     connectionHandle = 0xffff;
+    changed();
   }
   LOG_INF("BLE", "NimBLE released for network/flash (heap %u -> %u, max=%u)", (unsigned)before,
           (unsigned)ESP.getFreeHeap(), (unsigned)ESP.getMaxAllocHeap());
@@ -515,6 +628,7 @@ void restoreRadio() {
     std::lock_guard<std::recursive_mutex> lock(mutex);
     if (!released) return;
     released = false;
+    changed();
   }
   startRadioLocked();
 }
@@ -567,28 +681,138 @@ void begin() {
   std::lock_guard<std::mutex> radio(radioMutex);
   startRadioLocked();
 }
-void tick() {
-  static uint32_t lastStartAttempt = 0;
-  bool start = false;
-  uint16_t timedOut = 0xffff;
+Link link() {
+  std::lock_guard<std::recursive_mutex> lock(mutex);
+  Link result;
+  result.radio = !userEnabled   ? Radio::Off
+                 : released     ? Radio::Paused
+                 : isConnected  ? Radio::Connected
+                 : started      ? Radio::Advertising
+                 : startError.empty() ? Radio::Idle
+                                      : Radio::Failed;
+  result.setupMode = secret.empty();
+  if (isConnected && authenticated && state == "receiving") {
+    result.transfer = Transfer::Receiving;
+    result.received = StudioFrame::instance().received();
+    result.total = transferTotal;
+  } else if (isConnected && authenticated && state == "refreshing") {
+    result.transfer = Transfer::Refreshing;
+  }
+  result.completed = completedTransfers;
+  result.failed = failedTransfers;
+  result.generation = linkGeneration.load();
+  return result;
+}
+Diagnostics diagnostics() {
+  std::lock_guard<std::recursive_mutex> lock(mutex);
+  Diagnostics result;
+  result.link = link();
+  result.name = advertisedAs.empty() && validIdentity() ? ble_setup::advertisedName(identity) : advertisedAs;
+  result.address = address;
+  result.error = startError;
+  result.errorCode = startErrorCode;
+  result.starts = starts;
+  result.startFailures = startFailures;
+  result.connections = connections;
+  result.advertisingRestarts = advertisingRestarts;
+  const uint32_t now = millis();
+  if (everConnected) result.sinceConnect = static_cast<int32_t>((now - lastConnectMs) / 1000);
+  if (everDisconnected) result.sinceDisconnect = static_cast<int32_t>((now - lastDisconnectMs) / 1000);
+  return result;
+}
+bool enabled() {
+  std::lock_guard<std::recursive_mutex> lock(mutex);
+  return userEnabled;
+}
+void setEnabled(const bool enable) {
+  std::lock_guard<std::mutex> radio(radioMutex);
   {
     std::lock_guard<std::recursive_mutex> lock(mutex);
-    start = !started && !released && millis() - lastStartAttempt > 5000;
-    if (isConnected && millis() - lastActivity > 30000 && state == "receiving") {
+    if (userEnabled == enable) return;
+    userEnabled = enable;
+    startError.clear();
+    startErrorCode = 0;
+    changed();
+  }
+  LOG_INF("BLE", "Bluetooth switched %s", enable ? "on" : "off");
+  if (enable)
+    startRadioLocked();
+  else
+    stopRadioLocked();
+}
+void restart() {
+  std::lock_guard<std::mutex> radio(radioMutex);
+  {
+    std::lock_guard<std::recursive_mutex> lock(mutex);
+    if (released || !userEnabled) return;
+  }
+  LOG_INF("BLE", "Restarting NimBLE on request");
+  stopRadioLocked();
+  startRadioLocked();
+}
+// UI loop. Starts the radio (retrying a failed start with backoff), keeps it
+// advertising, and drops stalled sessions. Never blocks on the radio: while
+// the worker is releasing or restoring the stack this tick is skipped.
+void tick() {
+  static uint32_t nextStartMs = 0, lastWatchMs = 0, retryDelayMs = 5000;
+  static uint8_t advertisingFaults = 0;
+  const uint32_t now = millis();
+  bool start = false, watch = false;
+  uint16_t stalled = 0xffff;
+  {
+    std::lock_guard<std::recursive_mutex> lock(mutex);
+    start = userEnabled && !started && !released && static_cast<int32_t>(now - nextStartMs) >= 0;
+    watch = started && !released && !isConnected && (!secret.empty() || !setupKey.empty()) &&
+            now - lastWatchMs >= 3000;
+    if (isConnected && now - lastActivity > 30000 && state == "receiving") {
       StudioFrame::instance().abort();
+      ++failedTransfers;
       error = "transfer_timeout";
       state = "paused";
-      timedOut = connectionHandle;
+      stalled = connectionHandle;
+      changed();
+    } else if (isConnected && state != "receiving" && now - lastActivity > IDLE_LINK_TIMEOUT_MS) {
+      stalled = connectionHandle;
     }
   }
+  if (!start && !watch && stalled == 0xffff) return;
+  std::unique_lock<std::mutex> radio(radioMutex, std::try_to_lock);
+  if (!radio.owns_lock()) return;
   if (start) {
-    lastStartAttempt = millis();
-    begin();
+    if (startRadioLocked()) {
+      retryDelayMs = 5000;
+      nextStartMs = now + retryDelayMs;
+    } else {
+      nextStartMs = now + retryDelayMs;
+      retryDelayMs = std::min<uint32_t>(retryDelayMs * 2, 60000);
+    }
   }
-  if (timedOut != 0xffff) {
-    std::lock_guard<std::mutex> radio(radioMutex);
-    disconnectLocked(timedOut);
+  if (watch) {
+    std::lock_guard<std::recursive_mutex> lock(mutex);
+    watch = started && !released && !isConnected;  // the worker may have released it meanwhile
   }
+  if (watch) {
+    lastWatchMs = now;
+    // The controller can stop advertising on its own (host reset, a failed
+    // restart after a disconnect); without this the device stays invisible
+    // until the next reboot.
+    if (NimBLEDevice::getAdvertising()->isAdvertising()) {
+      advertisingFaults = 0;
+    } else if (NimBLEDevice::startAdvertising()) {
+      advertisingFaults = 0;
+      std::lock_guard<std::recursive_mutex> lock(mutex);
+      ++advertisingRestarts;
+      changed();
+      LOG_INF("BLE", "Advertising restarted");
+    } else if (++advertisingFaults >= 3) {
+      advertisingFaults = 0;
+      LOG_ERR("BLE", "Advertising cannot be restarted; restarting the stack");
+      stopRadioLocked();
+      failStartLocked("adv_restart", 0);
+      nextStartMs = now + 1000;
+    }
+  }
+  if (stalled != 0xffff) disconnectLocked(stalled);
 }
 bool connected() {
   std::lock_guard<std::recursive_mutex> lock(mutex);
@@ -674,6 +898,9 @@ void reportScan(bool scanning, std::vector<ble_setup::Network> found) {
 }
 }  // namespace studio_ble
 #else
+#include <Arduino.h>
+
+#include <cstdlib>
 #include <random>
 
 namespace studio_ble {
@@ -683,7 +910,49 @@ bool releaseRadio() { return false; }
 void restoreRadio() {}
 void begin() {}
 void tick() {}
-bool connected() { return false; }
+namespace {
+bool simEnabled = true;
+}
+// The simulator has no radio. CROSSPOINT_SIM_BLE_DEMO plays a scripted phone
+// session (advertise, connect, transfer, refresh) so the status notices and
+// the Bluetooth screen can be previewed; without it the radio reads as idle.
+Link link() {
+  Link result;
+  result.setupMode = true;
+  if (!simEnabled) {
+    result.radio = Radio::Off;
+    return result;
+  }
+  static const bool demo = std::getenv("CROSSPOINT_SIM_BLE_DEMO") != nullptr;
+  if (!demo) return result;
+  static const uint32_t startedMs = millis();
+  const uint32_t elapsed = millis() - startedMs;
+  constexpr size_t total = 400000;
+  result.radio = elapsed >= 4000 && elapsed < 20000 ? Radio::Connected : Radio::Advertising;
+  result.total = total;
+  if (elapsed >= 7000 && elapsed < 17000) {
+    result.transfer = Transfer::Receiving;
+    result.received = total / 10000 * (elapsed - 7000);
+  } else if (elapsed >= 17000 && elapsed < 20000) {
+    result.transfer = Transfer::Refreshing;
+  }
+  result.completed = elapsed >= 17000 ? 1 : 0;
+  result.generation = elapsed < 4000 ? 1 : elapsed < 7000 ? 2 : elapsed < 17000 ? 3 : elapsed < 20000 ? 4 : 5;
+  return result;
+}
+Diagnostics diagnostics() {
+  Diagnostics result;
+  result.link = link();
+  result.name = "StockStick-SIM0";
+  result.address = "00:00:00:00:00:00";
+  result.starts = 1;
+  result.connections = result.link.generation >= 2 ? 1 : 0;
+  return result;
+}
+void setEnabled(const bool enable) { simEnabled = enable; }
+bool enabled() { return simEnabled; }
+void restart() {}
+bool connected() { return link().radio == Radio::Connected; }
 // The desktop/web simulator has no BLE radio; it still shows the setup QR so
 // the unbound screen can be previewed.
 namespace {

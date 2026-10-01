@@ -64,8 +64,25 @@ The wire protocol is defined in Project.StockStick
 payload, capped STATUS network list; host-tested against the shared vectors)
 and `ProjectStickActivity::tickBleSetup` (applies queued work).
 
-- Advertised name `StockStick-XXXX` (first four hex digits of the device id)
-  in both modes. Unbound: setup mode keyed with K; bound: the secret delivered
+- Advertising (since 2.5.0): the 31-byte packet carries the flags, the 128-bit
+  service UUID and manufacturer data `FF FF` + the four id characters; the
+  complete name `StockStick-XXXX` (first four hex digits of the device id) is
+  in the scan response, because it does not fit next to the UUID. Same in both
+  modes.
+- Radio lifecycle (`studio_ble::tick`, UI loop): a failed start (low heap,
+  controller or host init, advertising) is recorded and retried with backoff
+  (5 s … 60 s); an advertising watchdog restarts advertising, then the stack,
+  when the controller stops on its own; a phone that holds the link idle for
+  5 min is dropped. `HalPowerManager` never lowers the CPU clock while the BLE
+  controller is up (the controller needs the 80 MHz APB clock).
+- Settings > System > Bluetooth (`BluetoothActivity`): live state, advertised
+  name, address, last start error, counters and heap, plus the on/off switch
+  (`settings.json` `bluetoothEnabled`) and a stack restart.
+- Status notices (`stick_overlay::drawNotice`, driven by
+  `ProjectStickActivity::updateNotice`): phone connected, receiving with a
+  progress bar, verifying, done/failed, Wi-Fi join and scan, cloud heartbeat.
+  Busy notices animate once per `NOTICE_FRAME_MS`.
+- Unbound: setup mode keyed with K; bound: the secret delivered
   by `bind` (protocol 2 `begin`/`commit`, plus `scan`/`wifi`/`ota`).
 - Each connection pins its key. After `bind` the live setup session keeps K
   until the phone disconnects, so the phone can bind and then push Wi-Fi in one

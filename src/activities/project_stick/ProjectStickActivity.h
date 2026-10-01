@@ -7,6 +7,7 @@
 #include "network/WifiAutoConnect.h"
 #include "project_stick/ProjectStickBackgroundSync.h"
 #include "project_stick/ProjectStickService.h"
+#include "project_stick/StudioBluetooth.h"
 
 class ProjectStickActivity final : public Activity {
  public:
@@ -47,7 +48,6 @@ class ProjectStickActivity final : public Activity {
   // BLE setup (protocol 3): bind, Wi-Fi join and scan requested by the phone.
   static constexpr uint32_t BLE_WIFI_TIMEOUT_MS = 20000;
   static constexpr uint32_t BLE_SCAN_TIMEOUT_MS = 15000;
-  static constexpr uint32_t BLE_WIFI_MESSAGE_MS = 6000;
   std::string setupPayload;
   std::string bleWifiSsid;
   bool bleWifiActive = false;
@@ -60,15 +60,28 @@ class ProjectStickActivity final : public Activity {
   project_stick::Deadline otaQueueDeadline;
   uint32_t bleWifiStartedMs = 0;
   uint32_t bleScanStartedMs = 0;
-  // Transient status-screen line for a BLE Wi-Fi push (nullptr when none).
-  const char* bleWifiMessage = nullptr;
-  uint32_t bleWifiMessageUntilMs = 0;
+  // Status notice over the card or status screen: live work (a phone link, a
+  // transfer with progress, a Wi-Fi join, the cloud heartbeat) and its result.
+  static constexpr uint32_t NOTICE_RESULT_MS = 3000;
+  static constexpr uint32_t NOTICE_FAILURE_MS = 6000;
+  stick_overlay::Notice notice = stick_overlay::Notice::None;
+  int noticePercent = 0;
+  uint8_t noticeFrame = 0;
+  uint32_t noticeFrameMs = 0;
+  // A result shown for a fixed time once the live work ends.
+  stick_overlay::Notice transientNotice = stick_overlay::Notice::None;
+  uint32_t transientNoticeUntilMs = 0;
+  studio_ble::Transfer lastTransfer = studio_ble::Transfer::None;
+  studio_ble::Radio lastRadio = studio_ble::Radio::Idle;
+  uint32_t seenFailedTransfers = 0;
+  bool syncNoticeShown = false;
+  void showTransientNotice(stick_overlay::Notice result, uint32_t durationMs);
+  void updateNotice(uint32_t nowMs);
   void tickBleSetup();
   void startBleWifi(const std::string& ssid, const std::string& password);
   void pollBleWifi();
   void startBleScan();
   void pollBleScan();
-  void showBleWifiMessage(const char* message, uint32_t durationMs);
   void renderFirmwareUpdate();
   void renderStatusScreen();
   uint32_t lastSyncAttemptMs = 0;

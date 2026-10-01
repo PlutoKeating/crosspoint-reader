@@ -31,8 +31,12 @@ constexpr int QR_SIZE = 185;  // whole 5 px modules for version 5 (37 modules)
 constexpr int QR_GAP = 18;
 constexpr int PROMPT_GAP = 12;
 
-void drawNetworkStatusTag(const GfxRenderer& renderer, const Rect& headerBounds, int rightInset, bool connected) {
-  const char* label = connected ? tr(STR_PROJECT_STICK_STATUS_ONLINE) : tr(STR_PROJECT_STICK_STATUS_OFFLINE);
+constexpr int STATUS_TAG_GAP = 8;
+
+// One outline pill in the header: a dot (filled when `active`) and a label.
+// Tags stack leftwards from `rightInset`; returns the inset for the next one.
+int drawStatusTag(const GfxRenderer& renderer, const Rect& headerBounds, int rightInset, const char* label,
+                  bool connected) {
   // Chinese labels resolve to the Noto Sans SC 12 fallback; size the tag to
   // the font that actually renders so the glyphs stay inside the outline.
   const int textHeight = renderer.getTextLineHeight(SMALL_FONT_ID, label);
@@ -56,6 +60,13 @@ void drawNetworkStatusTag(const GfxRenderer& renderer, const Rect& headerBounds,
     renderer.drawRect(dotX, dotY, NETWORK_TAG_DOT_SIZE, NETWORK_TAG_DOT_SIZE);
   }
   renderer.drawText(SMALL_FONT_ID, dotX + NETWORK_TAG_DOT_SIZE + NETWORK_TAG_DOT_GAP, tagY + 2, label);
+  return safeRightInset + tagWidth + STATUS_TAG_GAP;
+}
+
+const char* bluetoothTagLabel(const studio_ble::Radio radio) {
+  if (radio == studio_ble::Radio::Connected) return tr(STR_PROJECT_STICK_BT_CONNECTED);
+  if (radio == studio_ble::Radio::Advertising) return tr(STR_PROJECT_STICK_BT_READY);
+  return tr(STR_PROJECT_STICK_BT_OFF);
 }
 
 int64_t epochSeconds(const project_stick::ShanghaiTime& time) {
@@ -67,6 +78,12 @@ void ProjectStickActivity::onEnter() {
   Activity::onEnter();
   renderer.setOrientation(GfxRenderer::Portrait);
   service.begin();
+  // Bring the radio up before Wi-Fi and TLS take their share of the heap; an
+  // unbound device starts it from tickBleSetup() once it has a setup key.
+  studio_ble::begin();
+  const auto link = studio_ble::link();
+  seenFailedTransfers = link.failed;
+  lastRadio = link.radio;
   backgroundResultSequence = PROJECT_STICK_BACKGROUND_SYNC.latestSequence();
   requestCloudSync();
   requestUpdate();
@@ -95,6 +112,13 @@ void ProjectStickActivity::applyBackgroundResult() {
   if (result.kind != ProjectStickBackgroundSync::WorkKind::Sync) return;
 
   const auto& report = result.syncReport;
+  if (syncNoticeShown) {
+    syncNoticeShown = false;
+    if (report.registerSucceeded)
+      showTransientNotice(stick_overlay::Notice::Synced, NOTICE_RESULT_MS);
+    else if (report.registerAttempted)
+      showTransientNotice(stick_overlay::Notice::SyncFailed, NOTICE_FAILURE_MS);
+  }
   service.adoptServerTime(report.synchronizedAt);
   if (project_stick::shouldRecordRegisterSuccess(report)) lastRegisterMs = millis();
   lastAlertPollMs = millis();
@@ -167,12 +191,72 @@ void ProjectStickActivity::updateFeedbackBubble() {
   if (repaint) requestUpdate();
 }
 
+void ProjectStickActivity::showTransientNotice(const stick_overlay::Notice result, const uint32_t durationMs) {
+  transientNotice = result;
+  transientNoticeUntilMs = millis() + durationMs;
+}
+
+// Picks the one notice to show and repaints the moment it changes; busy
+// notices also advance their animation (and transfer progress) once per frame.
+void ProjectStickActivity::updateNotice(const uint32_t nowMs) {
+  using stick_overlay::Notice;
+  const auto link = studio_ble::link();
+  if (link.failed != seenFailedTransfers) {
+    seenFailedTransfers = link.failed;
+    showTransientNotice(Notice::Failed, NOTICE_FAILURE_MS);
+  } else if (lastTransfer == studio_ble::Transfer::Refreshing && link.transfer == studio_ble::Transfer::None) {
+    showTransientNotice(Notice::Done, NOTICE_RESULT_MS);
+  }
+  lastTransfer = link.transfer;
+  if (transientNotice != Notice::None && static_cast<int32_t>(nowMs - transientNoticeUntilMs) >= 0)
+    transientNotice = Notice::None;
+
+  Notice next = Notice::None;
+  int percent = 0;
+  if (link.transfer == studio_ble::Transfer::Receiving) {
+    next = Notice::Receiving;
+    percent = link.total ? static_cast<int>(std::min<uint64_t>(100, uint64_t(link.received) * 100 / link.total)) : 0;
+  } else if (link.transfer == studio_ble::Transfer::Refreshing) {
+    next = Notice::Refreshing;
+  } else if (bleWifiActive) {
+    next = Notice::WifiConnecting;
+  } else if (bleScanActive) {
+    next = Notice::WifiScanning;
+  } else if (transientNotice != Notice::None) {
+    next = transientNotice;
+  } else if (link.radio == studio_ble::Radio::Connected) {
+    next = Notice::PhoneConnected;
+  } else if (PROJECT_STICK_BACKGROUND_SYNC.runningKind() == ProjectStickBackgroundSync::WorkKind::Sync) {
+    next = Notice::Syncing;
+    syncNoticeShown = true;
+  }
+
+  // The status screen also carries the radio state in its header tag.
+  const bool radioChanged = link.radio != lastRadio;
+  lastRadio = link.radio;
+  const bool kindChanged = next != notice;
+  const bool frameDue = stick_overlay::noticeBusy(next) && nowMs - noticeFrameMs >= stick_overlay::NOTICE_FRAME_MS;
+  if (!kindChanged && !frameDue) {
+    if (radioChanged && !StudioFrame::instance().hasContent()) requestUpdate();
+    return;
+  }
+  {
+    RenderLock lock;
+    noticeFrame = kindChanged ? 0 : noticeFrame + 1;
+    notice = next;
+    noticePercent = percent;
+  }
+  noticeFrameMs = nowMs;
+  requestUpdate(kindChanged);
+}
+
 void ProjectStickActivity::loop() {
   updateButtonHints(millis());
   updateFeedbackBubble();
   studio_ble::tick();
   service.syncClock();
   tickBleSetup();
+  updateNotice(millis());
   if (service.refreshOwnership()) requestUpdate();
   auto& frame = StudioFrame::instance();
   // No snapshot() here: it copies heap strings on every loop iteration.
@@ -281,15 +365,6 @@ void ProjectStickActivity::loop() {
   }
 }
 
-void ProjectStickActivity::showBleWifiMessage(const char* message, const uint32_t durationMs) {
-  {
-    RenderLock lock;
-    bleWifiMessage = message;
-    bleWifiMessageUntilMs = millis() + durationMs;
-  }
-  requestUpdate();
-}
-
 // Applies work a phone queued over BLE (studio_ble callbacks never touch the
 // SD card or the radio themselves).
 void ProjectStickActivity::tickBleSetup() {
@@ -329,14 +404,6 @@ void ProjectStickActivity::tickBleSetup() {
   }
   if (bleScanPending && !bleWifiActive && !bleScanActive) startBleScan();
   if (bleScanActive) pollBleScan();
-
-  if (bleWifiMessage && static_cast<int32_t>(millis() - bleWifiMessageUntilMs) >= 0) {
-    {
-      RenderLock lock;
-      bleWifiMessage = nullptr;
-    }
-    requestUpdate();
-  }
 }
 
 void ProjectStickActivity::startBleWifi(const std::string& ssid, const std::string& password) {
@@ -369,7 +436,6 @@ void ProjectStickActivity::startBleWifi(const std::string& ssid, const std::stri
   bleWifiActive = true;
   bleWifiStartedMs = millis();
   studio_ble::reportWifi(studio_ble::WifiState::Connecting, ssid);
-  showBleWifiMessage(tr(STR_PROJECT_STICK_WIFI_CONNECTING), BLE_WIFI_TIMEOUT_MS + 5000);
 }
 
 void ProjectStickActivity::pollBleWifi() {
@@ -379,7 +445,7 @@ void ProjectStickActivity::pollBleWifi() {
   if (status == WL_CONNECTED) {
     bleWifiActive = false;
     studio_ble::reportWifi(studio_ble::WifiState::Connected, bleWifiSsid);
-    showBleWifiMessage(tr(STR_PROJECT_STICK_WIFI_CONNECTED), BLE_WIFI_MESSAGE_MS);
+    showTransientNotice(stick_overlay::Notice::WifiConnected, NOTICE_RESULT_MS);
     return;
   }
   // The driver reports these once the join has had time to scan and handshake.
@@ -393,7 +459,7 @@ void ProjectStickActivity::pollBleWifi() {
   bleWifiActive = false;
   WiFi.disconnect();
   studio_ble::reportWifi(studio_ble::WifiState::Failed, bleWifiSsid, error);
-  showBleWifiMessage(tr(STR_PROJECT_STICK_WIFI_FAILED), BLE_WIFI_MESSAGE_MS);
+  showTransientNotice(stick_overlay::Notice::WifiFailed, NOTICE_FAILURE_MS);
   wifiAutoConnect.retrySoon();
 }
 
@@ -466,7 +532,12 @@ void ProjectStickActivity::renderStatusScreen() {
   renderer.clearScreen();
   const Rect headerBounds{0, metrics.topPadding, width, metrics.headerHeight};
   GUI.drawHeader(renderer, headerBounds, tr(STR_PROJECT_STICK));
-  drawNetworkStatusTag(renderer, headerBounds, metrics.contentSidePadding, online);
+  const int bluetoothInset =
+      drawStatusTag(renderer, headerBounds, metrics.contentSidePadding,
+                    online ? tr(STR_PROJECT_STICK_STATUS_ONLINE) : tr(STR_PROJECT_STICK_STATUS_OFFLINE), online);
+  const auto radio = studio_ble::link().radio;
+  drawStatusTag(renderer, headerBounds, bluetoothInset, bluetoothTagLabel(radio),
+                radio == studio_ble::Radio::Connected || radio == studio_ble::Radio::Advertising);
 
   const int contentTop = metrics.topPadding + metrics.headerHeight + metrics.verticalSpacing;
   const int hintTop = height - metrics.buttonHintsHeight;
@@ -480,7 +551,7 @@ void ProjectStickActivity::renderStatusScreen() {
     // BLE setup (protocol 3): the QR carries the device id and the one-time
     // key; the phone binds and pushes Wi-Fi over Bluetooth.
     const char* title = tr(STR_PROJECT_STICK_SETUP_TITLE);
-    const char* helper = bleWifiMessage ? bleWifiMessage : tr(STR_PROJECT_STICK_SETUP_HELP);
+    const char* helper = tr(STR_PROJECT_STICK_SETUP_HELP);
     const int titleHeight = renderer.getTextLineHeight(NOTOSANSSC_13_FONT_ID, title);
     const int helperLine = renderer.getTextLineHeight(NOTOSANSSC_10_FONT_ID, helper);
     const bool cjk = std::any_of(helper, helper + strlen(helper), [](char c) { return c & 0x80; });
@@ -500,7 +571,7 @@ void ProjectStickActivity::renderStatusScreen() {
     }
   } else {
     const char* title = tr(STR_PROJECT_STICK_NO_LOCAL_CONTENT);
-    const char* helper = bleWifiMessage ? bleWifiMessage : tr(STR_PROJECT_STICK_AWAIT_CONTENT);
+    const char* helper = tr(STR_PROJECT_STICK_AWAIT_CONTENT);
     const int titleHeight = renderer.getTextLineHeight(NOTOSANSSC_13_FONT_ID, title);
     const int helperLine = renderer.getTextLineHeight(NOTOSANSSC_13_FONT_ID, helper);
     const bool cjk = std::any_of(helper, helper + strlen(helper), [](char c) { return c & 0x80; });
@@ -541,6 +612,7 @@ void ProjectStickActivity::render(RenderLock&&) {
   }
   if (StudioFrame::instance().render(renderer)) {
     drawOverlays(true);
+    stick_overlay::drawNotice(renderer, notice, noticePercent, noticeFrame);
     renderer.displayBuffer();
     // Overlays are transient; the card underneath is what was displayed.
     StudioFrame::instance().displayed();
@@ -557,6 +629,7 @@ void ProjectStickActivity::render(RenderLock&&) {
   }
   renderStatusScreen();
   drawOverlays(false);
+  stick_overlay::drawNotice(renderer, notice, noticePercent, noticeFrame);
   renderer.displayBuffer();
 }
 

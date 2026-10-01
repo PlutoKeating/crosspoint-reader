@@ -69,6 +69,8 @@ inline std::vector<SettingInfo> getSettingsList() {
             "sleepTimeoutMinutes", StrId::STR_CAT_SYSTEM),
         // Persistence-only flag for the one-time NTP seed on first Wi-Fi connect.
         SettingInfo::Toggle(StrId::STR_CLOCK_SYNCED, &CrossPointSettings::clockHasBeenSynced, "clockHasBeenSynced"),
+        // Persistence-only: switched on the Bluetooth screen (Settings > System).
+        SettingInfo::Toggle(StrId::STR_BLUETOOTH, &CrossPointSettings::bluetoothEnabled, "bluetoothEnabled"),
     };
     return v;
   }();

@@ -170,7 +170,8 @@ to the cloud history; receipt authentication checks current owner/grant and epoc
 The same service runs BLE setup protocol 3 (since 2.3.0; unbound devices, key from
 the setup QR) and accepts `scan`/`wifi` and (since 2.4.0) `ota` ops in bound mode;
 bound STATUS also carries `fw`, `wifi`, `scan`, `networks` and `ota`, and the
-advertised name is `StockStick-XXXX`. Protocol 3 is defined in Project.StockStick
+advertised name is `StockStick-XXXX` (scan response; the advertising packet
+carries the service UUID and the id characters as manufacturer data). Protocol 3 is defined in Project.StockStick
 `docs/product/BLE-SETUP.md` and `BLE-ONLY-DELIVERY.md`; see also
 [project-stick.md](project-stick.md#ble-setup-protocol-3-since-230).
 

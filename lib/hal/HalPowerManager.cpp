@@ -4,6 +4,7 @@
 #include <Logging.h>
 #include <PowerManager.h>
 #include <WiFi.h>
+#include <esp_bt.h>
 #include <esp_sleep.h>
 #include <soc/soc_caps.h>
 
@@ -30,6 +31,12 @@ void HalPowerManager::setPowerSaving(bool enabled) {
   auto wifiMode = WiFi.getMode();
   if (wifiMode != WIFI_MODE_NULL) {
     // Wifi is active, force disabling power saving
+    enabled = false;
+  }
+  // The BLE controller needs the 80 MHz APB clock: at LOW_POWER_FREQ it stops
+  // advertising and drops links without any error, so an idle device (portable
+  // content, Wi-Fi never configured) became invisible to phones.
+  if (esp_bt_controller_get_status() != ESP_BT_CONTROLLER_STATUS_IDLE) {
     enabled = false;
   }
 

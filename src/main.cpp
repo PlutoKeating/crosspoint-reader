@@ -34,6 +34,7 @@
 #include "util/LanguagePacks.h"
 #include "network/OtaTrial.h"
 #include "project_stick/ProjectStickBackgroundSync.h"
+#include "project_stick/StudioBluetooth.h"
 #include "util/ScreenshotUtil.h"
 
 GfxRenderer renderer(display);
@@ -247,6 +248,7 @@ void setup() {
 
   SETTINGS.loadFromFile();
   APP_STATE.loadFromFile();
+  studio_ble::setEnabled(SETTINGS.bluetoothEnabled != 0);
   language_packs::apply(SETTINGS.language);
   UITheme::getInstance().reload();
   ButtonNavigator::setMappedInputManager(mappedInputManager);

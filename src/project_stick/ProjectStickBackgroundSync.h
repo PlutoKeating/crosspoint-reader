@@ -33,6 +33,8 @@ class ProjectStickBackgroundSync {
   // Downloads, verifies and flashes `target` on the worker (restarts on success).
   bool requestFirmwareInstall(const ProjectStickService::FirmwareTarget& target);
   bool busy() const;
+  // The job the worker is running right now (None when idle or only queued).
+  WorkKind runningKind() const;
   uint32_t latestSequence() const;
   bool takeResult(uint32_t& lastSequence, Result& result) const;
 
@@ -51,6 +53,7 @@ class ProjectStickBackgroundSync {
   mutable portMUX_TYPE stateMux = portMUX_INITIALIZER_UNLOCKED;
   project_stick::BackgroundWorkGate gate;
   WorkKind pendingKind = WorkKind::None;
+  WorkKind activeKind = WorkKind::None;
   ProjectStickService::FirmwareTarget pendingTarget;
   bool started = false;
   TaskHandle_t taskHandle = nullptr;

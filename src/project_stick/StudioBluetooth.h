@@ -31,6 +31,44 @@ void begin();
 void tick();
 bool connected();
 
+// Radio state as the user sees it (Settings > Bluetooth, status tags).
+enum class Radio : uint8_t {
+  Off,          // switched off in Settings
+  Idle,         // on, but nothing to advertise yet (no identity or key)
+  Advertising,  // discoverable, waiting for a phone
+  Connected,    // a phone holds the link
+  Paused,       // stack released for a cloud request or the flash writer
+  Failed,       // the last start failed; tick() retries with backoff
+};
+enum class Transfer : uint8_t { None, Receiving, Refreshing };
+// Allocation-free snapshot for the UI loop. `generation` changes whenever the
+// radio or session state does; `completed`/`failed` count transfers since boot.
+struct Link {
+  Radio radio = Radio::Idle;
+  Transfer transfer = Transfer::None;
+  bool setupMode = false;
+  size_t received = 0, total = 0;
+  uint32_t completed = 0, failed = 0;
+  uint32_t generation = 0;
+};
+Link link();
+// Everything the Bluetooth settings screen shows.
+struct Diagnostics {
+  Link link;
+  std::string name, address, error;
+  int errorCode = 0;
+  uint32_t starts = 0, startFailures = 0, connections = 0, advertisingRestarts = 0;
+  // Seconds since the last connect / disconnect; -1 when there was none.
+  int32_t sinceConnect = -1, sinceDisconnect = -1;
+};
+Diagnostics diagnostics();
+// The user's switch (Settings > Bluetooth). Off deinitialises the stack and
+// keeps it off; content cannot be delivered until it is switched on again.
+void setEnabled(bool enabled);
+bool enabled();
+// Tears the stack down and starts it again (drops a connected phone).
+void restart();
+
 // Enters setup mode for an unbound device (no-op while a secret exists).
 void setup(const std::string& deviceId);
 // Setup QR payload, or empty when not in setup mode.

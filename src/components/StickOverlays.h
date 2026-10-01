@@ -53,6 +53,32 @@ void drawFrontKeyHints(const GfxRenderer& renderer, const char* back, const char
 // 0..BUBBLE_FINAL_FRAME.
 void drawFeedbackBubble(const GfxRenderer& renderer, Bubble bubble, uint8_t frame);
 
+// Live status of the phone link and the cloud heartbeat, shown the moment it
+// starts so the user never has to guess whether something is happening. Busy
+// notices animate (three dots, one frame per NOTICE_FRAME_MS); Receiving also
+// carries a progress bar.
+enum class Notice : uint8_t {
+  None,
+  PhoneConnected,
+  Receiving,
+  Refreshing,
+  Done,
+  Failed,
+  Syncing,
+  Synced,
+  SyncFailed,
+  WifiConnecting,
+  WifiConnected,
+  WifiFailed,
+  WifiScanning,
+};
+constexpr uint32_t NOTICE_FRAME_MS = 1200;
+// True for notices that describe work in progress (and therefore animate).
+bool noticeBusy(Notice notice);
+// Outline window above the front-key bar. `percent` is 0..100 for Receiving,
+// ignored otherwise.
+void drawNotice(const GfxRenderer& renderer, Notice notice, int percent, uint8_t frame);
+
 // Lock badge, plus (after a key press while locked) the unlock guide: step
 // pills at the side keys (the key to press next is the one filled pill) and a
 // prompt in the front bar. Once the left step is done chevrons walk toward the

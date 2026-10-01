@@ -89,6 +89,9 @@ class CrossPointSettings : public PersistableStore<CrossPointSettings> {
   uint8_t uiTheme = LYRA;
   // Sunlight fading compensation
   uint8_t fadingFix = 0;
+  // Bluetooth radio switch (Settings > Bluetooth). Content only arrives over
+  // BLE, so this stays on unless the user turns it off for diagnosis.
+  uint8_t bluetoothEnabled = 1;
   // UI language code: the built-in catalogue ("ZH") or an SD-card pack in
   // /.crosspoint/lang/<code>.lang. Persisted as the "language" string.
   char language[8] = "ZH";

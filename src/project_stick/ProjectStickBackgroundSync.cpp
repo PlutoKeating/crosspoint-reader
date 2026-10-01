@@ -67,6 +67,13 @@ bool ProjectStickBackgroundSync::busy() const {
   return value;
 }
 
+ProjectStickBackgroundSync::WorkKind ProjectStickBackgroundSync::runningKind() const {
+  taskENTER_CRITICAL(&stateMux);
+  const WorkKind value = activeKind;
+  taskEXIT_CRITICAL(&stateMux);
+  return value;
+}
+
 uint32_t ProjectStickBackgroundSync::latestSequence() const {
   std::lock_guard<std::mutex> lock(resultMutex);
   return latestResult.sequence;
@@ -95,6 +102,7 @@ void ProjectStickBackgroundSync::taskLoop() {
       kind = pendingKind;
       std::swap(target, pendingTarget);
       pendingKind = WorkKind::None;
+      activeKind = kind;
     }
     taskEXIT_CRITICAL(&stateMux);
     if (kind == WorkKind::None) continue;
@@ -123,6 +131,7 @@ void ProjectStickBackgroundSync::taskLoop() {
 
     taskENTER_CRITICAL(&stateMux);
     gate.complete();
+    activeKind = WorkKind::None;
     taskEXIT_CRITICAL(&stateMux);
   }
 }
