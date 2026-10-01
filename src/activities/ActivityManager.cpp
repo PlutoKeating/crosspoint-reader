@@ -48,7 +48,18 @@ void ActivityManager::renderTaskLoop() {
     RenderLock lock;
     if (mappedInput.isKeyguardLocked() && !(currentActivity && currentActivity->composesKeyguardOverlay())) {
       HalPowerManager::Lock powerLock;
-      renderKeyguard(std::move(lock));
+      // The activity keeps rendering under the lock: a firmware check, a
+      // download or a Wi-Fi connection that finishes while the device is
+      // locked must show its result, not stay frozen on the last frame (the
+      // 20 s keyguard used to freeze "正在检查更新…" until unlocked).
+      HalDisplay::RefreshMode mode = HalDisplay::FAST_REFRESH;
+      if (currentActivity) {
+        renderer.deferDisplay(true);
+        currentActivity->render(std::move(lock));
+        renderer.takeDeferredDisplay(mode);
+        renderer.deferDisplay(false);
+      }
+      renderKeyguard(std::move(lock), mode);
     } else if (currentActivity) {
       HalPowerManager::Lock powerLock;  // Ensure we don't go into low-power mode while rendering
       currentActivity->render(std::move(lock));
@@ -65,12 +76,12 @@ void ActivityManager::renderTaskLoop() {
   }
 }
 
-void ActivityManager::renderKeyguard(RenderLock&&) {
-  // Preserve the current activity framebuffer. Locking is a status overlay,
-  // not a navigation event or a replacement screen.
+void ActivityManager::renderKeyguard(RenderLock&&, const HalDisplay::RefreshMode mode) {
+  // Drawn over the activity's current frame. Locking is a status overlay, not
+  // a navigation event or a replacement screen.
   stick_overlay::drawKeyguard(renderer, mappedInput.keyguardState(), mappedInput.isKeyguardPromptVisible(),
                               mappedInput.keyguardCueFrame());
-  renderer.displayBuffer();
+  renderer.displayBuffer(mode);
 }
 
 void ActivityManager::loop() {

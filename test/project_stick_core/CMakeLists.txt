@@ -26,3 +26,6 @@ target_link_libraries(ProjectStickCoreTest PRIVATE OpenSSL::Crypto)
 
 # Shared cloud API backoff (header-only).
 target_sources(ProjectStickCoreTest PRIVATE ApiBackoffTest.cpp)
+
+# Heap/failure/deadline policy for cloud requests (header-only).
+target_sources(ProjectStickCoreTest PRIVATE NetPolicyTest.cpp)

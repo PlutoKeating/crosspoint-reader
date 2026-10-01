@@ -175,7 +175,58 @@ bool ProjectStickService::ensureIdentity() {
   return true;
 }
 
+ProjectStickService::RadioLease::RadioLease(ProjectStickService& service)
+    : service(service), outer(!service.leaseActive) {
+  service.leaseActive = true;
+}
+
+ProjectStickService::RadioLease::~RadioLease() {
+  if (!outer) return;
+  service.leaseActive = false;
+  if (service.radioLent) {
+    studio_ble::restoreRadio();
+    service.radioLent = false;
+  }
+}
+
+// Before a TLS connection: if the heap cannot afford the handshake, lend
+// NimBLE's heap for the rest of the cloud operation.
+void ProjectStickService::lendRadioIfLow(const char* what) {
+#ifndef SIMULATOR
+  const uint32_t freeHeap = ESP.getFreeHeap(), maxAlloc = ESP.getMaxAllocHeap();
+  LOG_INF("STICK", "%s: heap=%u max=%u%s", what, (unsigned)freeHeap, (unsigned)maxAlloc,
+          radioLent ? " (BLE released)" : "");
+  if (radioLent || project_stick::tlsHeapSufficient(freeHeap, maxAlloc)) return;
+  if (studio_ble::releaseRadio()) {
+    radioLent = true;
+    LOG_INF("STICK", "%s: heap below TLS needs; BLE released for this request", what);
+  }
+#else
+  (void)what;
+#endif
+}
+
+// After a transport failure: retry with NimBLE released, since an allocation
+// failure inside the handshake looks like any other transport failure.
+bool ProjectStickService::lendRadioAfterFailure(const char* what) {
+  if (radioLent || !studio_ble::releaseRadio()) return false;
+  radioLent = true;
+  LOG_INF("STICK", "%s: transport failed; retrying with BLE released", what);
+  return true;
+}
+
+void ProjectStickService::recordOutcome(const bool clockReady, const int status) {
+#ifndef SIMULATOR
+  const bool heapLow = !project_stick::tlsHeapSufficient(ESP.getFreeHeap(), ESP.getMaxAllocHeap());
+#else
+  const bool heapLow = false;
+#endif
+  lastFailure = project_stick::classifyRequest(clockReady, status, heapLow);
+  lastFailureStatus = status;
+}
+
 ProjectStickService::SyncReport ProjectStickService::sync() {
+  RadioLease lease(*this);
   HttpBurst burst(http);
   const uint32_t syncStartedMs = millis();
   SyncReport report;
@@ -214,6 +265,15 @@ bool ProjectStickService::registerDevice(int& status) {
     request["device_id"] = PROJECT_STICK_STORE.deviceId;
   }
   describeFirmware(request);
+  // Field telemetry: the next heap or radio problem is visible server-side.
+  // Names match the register route's accepted metrics.
+  JsonObject metrics = request["metrics"].to<JsonObject>();
+  metrics["heap_free"] = ESP.getFreeHeap();
+  metrics["heap_min"] = ESP.getMinFreeHeap();
+  metrics["heap_max_alloc"] = ESP.getMaxAllocHeap();
+  metrics["uptime_ms"] = millis();
+  metrics["wifi_rssi"] = WiFi.RSSI();
+  metrics["battery_percent"] = powerManager.getBatteryPercentage();
   std::string body;
   serializeJson(request, body);
 
@@ -285,6 +345,7 @@ bool ProjectStickService::pollAlerts() {
 #endif
   if (!eligible) return false;
 
+  RadioLease lease(*this);
   HttpBurst burst(http);
   std::string response;
   const std::string url = baseUrl + "/api/v2/device/alerts?device_id=" + deviceId;
@@ -367,7 +428,11 @@ bool ProjectStickService::requestPost(const std::string& path, const std::string
     deviceToken = PROJECT_STICK_STORE.deviceToken;
   }
   if (deviceToken.empty()) return false;  // no credential, no cloud requests
-  if (!trustedClockReady()) return false;
+  if (!trustedClockReady()) {
+    LOG_ERR("STICK", "POST %s skipped: no trusted time (NTP unreachable)", path.c_str());
+    recordOutcome(false, 0);
+    return false;
+  }
 #ifdef SIMULATOR
   static bool injectedRegisterFailure = false;
   if (!injectedRegisterFailure && path == "/api/v2/device/register" &&
@@ -379,8 +444,10 @@ bool ProjectStickService::requestPost(const std::string& path, const std::string
 #endif
   if (apiBlockedNow()) {
     LOG_INF("STICK", "POST %s skipped: API backoff active", path.c_str());
+    recordOutcome(true, 429);
     return false;
   }
+  lendRadioIfLow(path.c_str());
   // One extra attempt, and only for a transport failure (dropped keep-alive,
   // Wi-Fi hiccup). A server answer, including 429/5xx, is never retried here:
   // the shared backoff decides when the next request may go out.
@@ -406,6 +473,7 @@ bool ProjectStickService::requestPost(const std::string& path, const std::string
 #else
     const bool complete = http.responseComplete();
 #endif
+    recordOutcome(true, status > 0 && complete ? status : -1);
     if (status > 0 && complete) {
       noteApiResult(status, retryAfterHeader(http));
       LOG_INF("STICK", "POST %s completed (status=%d bytes=%u time=%ums)", path.c_str(), status,
@@ -415,7 +483,7 @@ bool ProjectStickService::requestPost(const std::string& path, const std::string
     }
     LOG_ERR("STICK", "POST %s failed (status=%d complete=%u bytes=%u)", path.c_str(), status, complete ? 1u : 0u,
             (unsigned)response.size());
-    if (attempt == 0) delay(500);
+    if (attempt == 0 && !lendRadioAfterFailure(path.c_str())) delay(500);
   }
   noteApiResult(status > 0 ? status : -1, "");
   return false;
@@ -432,8 +500,8 @@ bool ProjectStickService::fetchJson(const std::string& url, std::string& respons
       return true;
     });
     if (ok) return true;
-    if (lastFetchStatus > 0) break;
-    if (attempt == 0) delay(500);
+    if (lastFetchStatus > 0 || lastFailure == project_stick::NetFailure::Clock) break;
+    if (attempt == 0 && !lendRadioAfterFailure("GET")) delay(500);
   }
   response.clear();
   return false;
@@ -449,11 +517,17 @@ bool ProjectStickService::fetchAuthenticated(const std::string& url,
   }
   lastFetchStatus = 0;
   if (deviceToken.empty()) return false;  // no credential, no cloud requests
-  if (!trustedClockReady()) return false;
-  if (apiBlockedNow()) {
-    lastFetchStatus = 429;  // not a transport failure: do not retry
+  if (!trustedClockReady()) {
+    LOG_ERR("STICK", "GET skipped: no trusted time (NTP unreachable)");
+    recordOutcome(false, 0);
     return false;
   }
+  if (apiBlockedNow()) {
+    lastFetchStatus = 429;  // not a transport failure: do not retry
+    recordOutcome(true, 429);
+    return false;
+  }
+  lendRadioIfLow("GET");
   if (!http.begin(url)) return false;
   // Pinned-root client; the ESP-IDF HTTP client (and the mbedTLS TLS stack it
   // pulls in) is not linked.
@@ -472,6 +546,8 @@ bool ProjectStickService::fetchAuthenticated(const std::string& url,
   // A body cut short by the network counts as a transport failure; a local
   // abort (storage full) says nothing about the server.
   lastFetchStatus = status > 0 && !complete && !http.callbackAborted() ? -1 : status;
+  recordOutcome(true, lastFetchStatus);
+  if (lastFetchStatus <= 0) LOG_ERR("STICK", "GET failed (status=%d)", status);
   noteApiResult(lastFetchStatus, retryAfterHeader(http));
   return success;
 }
@@ -701,14 +777,13 @@ void ProjectStickService::installFirmware(const FirmwareTarget& target) {
     firmware_update::fail("device_busy");
     return;
   }
-  // TLS and the flash writer need the heap NimBLE holds.
-  studio_ble::pause(true);
+  // TLS and the flash writer need the heap NimBLE holds: release it for the
+  // whole install (a success restarts; a failure restores it with the lease).
+  RadioLease lease(*this);
+  if (!radioLent && studio_ble::releaseRadio()) radioLent = true;
   HalPowerManager::Lock powerLock;
   firmware_update::begin(target.version.c_str(), target.bytes);
-  auto fail = [](const char* error) {
-    firmware_update::fail(error);
-    studio_ble::pause(false);
-  };
+  auto fail = [](const char* error) { firmware_update::fail(error); };
   if (downloadFirmware(target) != DownloadResult::Complete) return fail("download_failed");
 
   firmware_update::setPhase(firmware_update::Phase::Verifying);
@@ -829,14 +904,20 @@ ProjectStickService::FirmwareOffer ProjectStickService::checkFirmware() {
     offer.status = FirmwareOffer::Status::Unbound;
     return offer;
   }
+  RadioLease lease(*this);
   HttpBurst burst(http);
   std::string response;
   if (!fetchJson(baseUrl + "/api/v2/device/firmware/latest?device_id=" + deviceId() + "&channel=stable", response,
                  4096)) {
+    offer.failure = lastFailure == project_stick::NetFailure::None ? project_stick::NetFailure::Network : lastFailure;
+    offer.httpStatus = lastFailureStatus;
     return offer;
   }
   JsonDocument doc;
-  if (deserializeJson(doc, response)) return offer;
+  if (deserializeJson(doc, response)) {
+    offer.failure = project_stick::NetFailure::Server;
+    return offer;
+  }
   if (doc["latest"].isNull()) {
     offer.status = FirmwareOffer::Status::UpToDate;
     return offer;

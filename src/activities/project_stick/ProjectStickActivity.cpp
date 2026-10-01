@@ -3,6 +3,7 @@
 #include <GfxRenderer.h>
 #include <HalGPIO.h>
 #include <I18n.h>
+#include <Logging.h>
 #include <WiFi.h>
 
 #include <algorithm>
@@ -66,7 +67,6 @@ void ProjectStickActivity::onEnter() {
   Activity::onEnter();
   renderer.setOrientation(GfxRenderer::Portrait);
   service.begin();
-  PROJECT_STICK_BACKGROUND_SYNC.begin();
   backgroundResultSequence = PROJECT_STICK_BACKGROUND_SYNC.latestSequence();
   requestCloudSync();
   requestUpdate();
@@ -204,7 +204,17 @@ void ProjectStickActivity::loop() {
     studioGeneration = frame.generation();
     requestUpdate();
   }
-  if (otaPending && PROJECT_STICK_BACKGROUND_SYNC.requestFirmwareInstall(otaTarget)) otaPending = false;
+  if (otaPending && PROJECT_STICK_BACKGROUND_SYNC.requestFirmwareInstall(otaTarget)) {
+    otaPending = false;
+    otaQueueDeadline.stop();
+  } else if (otaPending && otaQueueDeadline.expired(millis())) {
+    // The worker never became free: report it to the phone (STATUS.ota) rather
+    // than leaving the request queued forever.
+    LOG_ERR("OTA", "BLE update request not accepted by the worker in time");
+    otaPending = false;
+    otaQueueDeadline.stop();
+    firmware_update::fail("device_busy");
+  }
   applyBackgroundResult();
 #ifdef SIMULATOR
   if (simulatorAlertPollPending) {
@@ -311,6 +321,7 @@ void ProjectStickActivity::tickBleSetup() {
   if (studio_ble::takeOtaRequest(ota)) {
     otaTarget = {ota.version, ota.url, ota.sha256, ota.bytes};
     otaPending = true;
+    otaQueueDeadline.start(millis(), project_stick::OTA_QUEUE_DEADLINE_MS);
   }
   if (bleScanPending && !bleWifiActive && !bleScanActive) startBleScan();
   if (bleScanActive) pollBleScan();

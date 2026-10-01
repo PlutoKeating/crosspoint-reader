@@ -150,7 +150,10 @@ them (see [i18n.md](i18n.md)).
   locks after 20 seconds without button or touch activity: all non-power
   button events are suppressed and only a small lock icon is added at the top
   left (a lock icon in a small outline circle); content keeps updating
-  underneath. The power button always works and
+  underneath, on every screen: since 2.4.2 the activity manager renders the
+  current activity under the lock and draws the lock on top (before, screens
+  other than the StockStick page froze on their last frame, e.g. a firmware
+  check stayed on 「正在检查更新…」 after its result arrived). The power button always works and
   BLE delivery and the cloud heartbeat continue.
 - Unlock by releasing the left side key, then the right side key. A key press
   while locked shows `屏幕已锁定 · 依次按左、右侧边键` in the front bar and step
@@ -204,5 +207,11 @@ register failure (these need a provisioned device token).
   (register, events) reuses the same TLS connection and closes it afterwards.
 - Studio frames and programs stream directly to SD; seen alerts and pending
   events have explicit caps (32 each).
-- BLE pauses while a firmware image downloads (TLS and the flash writer need
-  the heap NimBLE holds).
+- NimBLE is deinitialised (host and controller heap freed) for a cloud request
+  when the heap is below what a TLS handshake needs, for a retry after a
+  transport failure, and for a whole firmware install; it is restored with the
+  same identity afterwards (see "Cloud requests" in studio-protocol.md).
+- The cloud worker's 8 KB stack is static (created at boot), so it cannot fail
+  to start on a fragmented heap.
+- NimBLE APIs are never called while holding the BLE state mutex, which the
+  NimBLE host callbacks take (`radioMutex` serialises init/deinit/advertising).

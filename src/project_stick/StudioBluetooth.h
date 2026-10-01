@@ -21,7 +21,12 @@ void revoke();
 // reconnects with the new key. Returns true when anything changed.
 bool adoptAuthority(const std::string& deviceId, const std::string& secret, uint32_t epoch,
                     const std::string& owner);
-void pause(bool paused);
+// Deinitialises NimBLE (host and controller) so a TLS request or the flash
+// writer can use its heap; on the C3, Wi-Fi + NimBLE + a TLS session may not
+// fit together. Returns false (nothing to do) when NimBLE is not running or a phone is
+// connected. restoreRadio() brings it back with the same identity and key.
+bool releaseRadio();
+void restoreRadio();
 void begin();
 void tick();
 bool connected();

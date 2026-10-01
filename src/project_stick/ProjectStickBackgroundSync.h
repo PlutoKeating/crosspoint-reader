@@ -25,6 +25,7 @@ class ProjectStickBackgroundSync {
 
   static ProjectStickBackgroundSync& getInstance();
 
+  // Starts the worker; called once at boot from setup(). Later calls are no-ops.
   void begin();
   bool requestSync();
   bool requestAlertPoll();
@@ -40,6 +41,9 @@ class ProjectStickBackgroundSync {
   ProjectStickBackgroundSync(const ProjectStickBackgroundSync&) = delete;
   ProjectStickBackgroundSync& operator=(const ProjectStickBackgroundSync&) = delete;
 
+  // ESP-IDF FreeRTOS counts stack depth in bytes (StackType_t is uint8_t).
+  // TLS handshakes run on this stack.
+  static constexpr uint32_t TASK_STACK_BYTES = 8192;
   static void taskTrampoline(void* context);
   [[noreturn]] void taskLoop();
   bool queue(WorkKind kind, const ProjectStickService::FirmwareTarget& target = {});

@@ -33,6 +33,7 @@
 #include "util/ButtonNavigator.h"
 #include "util/LanguagePacks.h"
 #include "network/OtaTrial.h"
+#include "project_stick/ProjectStickBackgroundSync.h"
 #include "util/ScreenshotUtil.h"
 
 GfxRenderer renderer(display);
@@ -288,6 +289,10 @@ void setup() {
       LOG_INF("MAIN", "Recovery firmware mode (UP + POWER held at boot)");
     }
   }
+
+  // The cloud worker (register, alerts, firmware) starts here, before Wi-Fi and
+  // NimBLE take their heap; its stack is static so it always exists.
+  PROJECT_STICK_BACKGROUND_SYNC.begin();
 
   // First serial output only here to avoid timing inconsistencies for power button press duration verification
   LOG_DBG("MAIN", "Starting CrossPoint version " CROSSPOINT_VERSION);

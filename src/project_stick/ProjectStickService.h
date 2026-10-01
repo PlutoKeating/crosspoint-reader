@@ -1,6 +1,7 @@
 #pragma once
 
 #include <ProjectStickCore.h>
+#include <ProjectStickNetPolicy.h>
 #include <ProjectStickSyncState.h>
 #include <SecureHttpClient.h>
 
@@ -39,6 +40,9 @@ class ProjectStickService {
   struct FirmwareOffer {
     enum class Status : uint8_t { UpdateAvailable, UpToDate, Unbound, Failed, InstallFailed };
     Status status = Status::Failed;
+    // Why a check failed (shown on the firmware screen); httpStatus for Server.
+    project_stick::NetFailure failure = project_stick::NetFailure::None;
+    int httpStatus = 0;
     FirmwareTarget target;
     std::string notes;
   };
@@ -95,6 +99,26 @@ class ProjectStickService {
   bool fetchAuthenticated(const std::string& url, const std::function<bool(const uint8_t*, size_t)>& onData);
   // HTTP status of the last fetchAuthenticated (-1 transport failure, 429 while backing off).
   int lastFetchStatus = 0;
+  // Outcome of the last request, for user-facing errors.
+  project_stick::NetFailure lastFailure = project_stick::NetFailure::None;
+  int lastFailureStatus = 0;
+  void recordOutcome(bool clockReady, int status);
+
+  // NimBLE heap lending (worker task only). A cloud operation releases NimBLE
+  // when the heap cannot afford a TLS handshake, or after a transport failure,
+  // and the outermost RadioLease brings it back when the operation ends.
+  bool radioLent = false;
+  bool leaseActive = false;
+  void lendRadioIfLow(const char* what);
+  bool lendRadioAfterFailure(const char* what);
+  struct RadioLease {
+    explicit RadioLease(ProjectStickService& service);
+    ~RadioLease();
+    RadioLease(const RadioLease&) = delete;
+    RadioLease& operator=(const RadioLease&) = delete;
+    ProjectStickService& service;
+    bool outer;
+  };
   bool parseServerTime(const char* value);
   bool hashFile(const std::string& path, std::string& result);
   bool flushEvents();

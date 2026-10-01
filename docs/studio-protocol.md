@@ -83,12 +83,37 @@ requests at all. All requests use `Authorization: Bearer <device_token>`:
 - `GET /api/v2/device/firmware/latest` on a manual 「检查更新」, then a direct
   download of the catalogue `url` (see OTA below).
 
+Since 2.4.2 the register body also carries `metrics` (`heap_free`, `heap_min`,
+`heap_max_alloc`, `uptime_ms`, `wifi_rssi`, `battery_percent`), so field heap and
+radio problems are visible server-side (the server stores the names it knows).
+
 One backoff gate covers every request. Transport failures, 429 and 5xx block all
 cloud requests for 30 s, 60 s, 120 s … up to 10 min (reset by any other answer);
 a 429 honours `Retry-After` in seconds (capped at 10 min; the simulator's HTTP
 shim exposes no headers). A manual firmware check may skip an error backoff,
 never a 429. Requests retry once, only on a transport failure. A failed
 heartbeat changes nothing on screen: content keeps playing locally.
+
+Worker, heap and time limits (2.4.2):
+
+- All cloud I/O runs on one worker task created once at boot in `setup()`
+  (before Wi-Fi and NimBLE allocate) with a static 8 KB stack, so it always
+  exists; activities only queue work and read results.
+- Every request is bounded: no trusted clock after 10 s of NTP fails it (no
+  request is sent), TCP connect and response reads use the 20 s HTTP timeout,
+  and the wolfSSL handshake has its own 15 s deadline per attempt
+  (SecureNet). A firmware check that has not answered within 60 s ends on the
+  screen as 「检查失败：网络请求超时」; other failures are shown specifically
+  (no clock, unreachable server, low memory, server busy, HTTP error code).
+  A BLE `ota` request the worker has not accepted within 60 s fails with
+  `device_busy` in `STATUS.ota`.
+- NimBLE (host and controller) holds heap a TLS session needs. Before each
+  request the worker logs `heap`/`max`; below 56 KB free or a 24 KB largest
+  block it deinitialises NimBLE for the rest of that cloud operation, and a
+  transport failure is retried once with NimBLE released. NimBLE comes back
+  with the same identity and key when the operation ends; a firmware install
+  keeps it released until the restart. Requests never release NimBLE while a
+  phone is connected (cloud requests wait for the phone to disconnect).
 
 Ownership changes clear Studio data, pending events and alert state; device
 settings and saved Wi-Fi networks are kept. A new owner binds over BLE setup,

@@ -2,6 +2,7 @@
 
 #include <GfxRenderer.h>
 #include <I18n.h>
+#include <Logging.h>
 #include <WiFi.h>
 
 #include <cstdio>
@@ -17,9 +18,36 @@
 #include "project_stick/FirmwareUpdateState.h"
 #include "project_stick/ProjectStickBackgroundSync.h"
 
+namespace {
+// The specific reason a check failed, with the HTTP status
+// for server errors.
+const char* checkFailureText(const ProjectStickService::FirmwareOffer& offer, char* buffer, size_t size) {
+  using project_stick::NetFailure;
+  switch (offer.failure) {
+    case NetFailure::Timeout:
+      return tr(STR_OTA_FAIL_TIMEOUT);
+    case NetFailure::Clock:
+      return tr(STR_OTA_FAIL_CLOCK);
+    case NetFailure::Network:
+      return tr(STR_OTA_FAIL_NETWORK);
+    case NetFailure::Memory:
+      return tr(STR_OTA_FAIL_MEMORY);
+    case NetFailure::RateLimited:
+      return tr(STR_OTA_FAIL_BUSY);
+    case NetFailure::Server:
+      if (offer.httpStatus > 0) {
+        snprintf(buffer, size, "%s (%d)", tr(STR_OTA_FAIL_SERVER), offer.httpStatus);
+        return buffer;
+      }
+      return tr(STR_OTA_FAIL_SERVER);
+    default:
+      return tr(STR_OTA_CHECK_FAILED);
+  }
+}
+}  // namespace
+
 void FirmwareUpdateActivity::onEnter() {
   Activity::onEnter();
-  PROJECT_STICK_BACKGROUND_SYNC.begin();
   backgroundSequence = PROJECT_STICK_BACKGROUND_SYNC.latestSequence();
   const auto outcome = ota_trial::pendingOutcome();
   rolledBackNotice = outcome.pending && outcome.rolledBack;
@@ -44,9 +72,12 @@ void FirmwareUpdateActivity::startCheck() {
     return;
   }
   state = State::Checking;
+  offer = {};
+  checkDeadline.start(millis(), project_stick::FIRMWARE_CHECK_DEADLINE_MS);
   // A user-initiated check may skip an error backoff (not a server rate limit).
   ProjectStickService::clearBackoffForManualSync();
   awaitingWork = PROJECT_STICK_BACKGROUND_SYNC.requestFirmwareCheck();
+  LOG_INF("OTA", "Firmware check %s", awaitingWork ? "queued" : "waiting for the worker");
   requestUpdate();
 }
 
@@ -73,6 +104,7 @@ void FirmwareUpdateActivity::pollBackground() {
       offer = result.firmware;
       state = State::Result;
       awaitingWork = false;
+      checkDeadline.stop();
       requestUpdate();
     } else if (result.kind == Kind::FirmwareInstall && state == State::Installing) {
       // A successful install restarts the device, so reaching here means the
@@ -82,6 +114,17 @@ void FirmwareUpdateActivity::pollBackground() {
       awaitingWork = false;
       requestUpdate();
     }
+  }
+  if (state == State::Checking && checkDeadline.expired(millis())) {
+    // The worker is stuck behind a long job or the request outlived every
+    // timeout: say so instead of spinning. A late result is ignored.
+    LOG_ERR("OTA", "Firmware check timed out (worker %s)", awaitingWork ? "busy with it" : "never free");
+    offer = {};
+    offer.failure = project_stick::NetFailure::Timeout;
+    state = State::Result;
+    awaitingWork = false;
+    checkDeadline.stop();
+    requestUpdate();
   }
   const auto progress = firmware_update::snapshot();
   if (progress.generation != renderedProgressGeneration) {
@@ -176,7 +219,7 @@ void FirmwareUpdateActivity::render(RenderLock&&) {
       } else if (offer.status == Status::InstallFailed) {
         message = strcmp(progress.error, "low_battery") == 0 ? tr(STR_OTA_LOW_BATTERY) : tr(STR_OTA_FAILED);
       } else {
-        message = tr(STR_OTA_CHECK_FAILED);
+        message = checkFailureText(offer, line, sizeof(line));
       }
       break;
     case State::Installing: {

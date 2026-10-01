@@ -57,6 +57,7 @@ class ProjectStickActivity final : public Activity {
   // An OTA the phone requested over BLE, held until the worker accepts it.
   bool otaPending = false;
   ProjectStickService::FirmwareTarget otaTarget;
+  project_stick::Deadline otaQueueDeadline;
   uint32_t bleWifiStartedMs = 0;
   uint32_t bleScanStartedMs = 0;
   // Transient status-screen line for a BLE Wi-Fi push (nullptr when none).

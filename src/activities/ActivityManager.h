@@ -53,7 +53,7 @@ class ActivityManager {
   TaskHandle_t renderTaskHandle = nullptr;
   static void renderTaskTrampoline(void* param);
   [[noreturn]] virtual void renderTaskLoop();
-  void renderKeyguard(RenderLock&& lock);
+  void renderKeyguard(RenderLock&& lock, HalDisplay::RefreshMode mode = HalDisplay::FAST_REFRESH);
 
   // Set by requestUpdateAndWait(); read and cleared by the render task after render completes.
   // Note: only one waiting task is supported at a time

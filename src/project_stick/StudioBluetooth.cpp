@@ -2,6 +2,7 @@
 
 #include <ArduinoJson.h>
 #include <HalStorage.h>
+#include <Logging.h>
 
 #include <algorithm>
 #include <mutex>
@@ -25,11 +26,18 @@ constexpr const char* CONTROL = "9fe10001-6bc2-4ce7-8e62-77262df32ef1";
 constexpr const char* DATA = "9fe10002-6bc2-4ce7-8e62-77262df32ef1";
 constexpr const char* STATUS = "9fe10003-6bc2-4ce7-8e62-77262df32ef1";
 constexpr const char* CREDENTIALS = "/.crosspoint/studio/ble.json";
+// Lock rules (a violation can freeze the NimBLE host and with it every cloud
+// request): `mutex` guards this file's state and is taken by the NimBLE host
+// callbacks, so it is never held while calling a NimBLE API. `radioMutex`
+// serialises NimBLE init/deinit/advertising/disconnect from app tasks and is
+// never taken by callbacks (deinit waits for the host task to stop).
 std::recursive_mutex mutex;
+std::mutex radioMutex;
 std::string authorityOwner, identity, secret, nonce, control, state = "ready", error, task, hash, baseTask;
 int64_t taskExpires = 0, planBoundary = 0;
 uint32_t epoch = 0, lastActivity = 0;
-bool paused = false;
+// released: NimBLE deinitialised to lend its heap to TLS or the flash writer.
+bool released = false;
 bool started = false, authenticated = false, isConnected = false;
 // Setup mode (unbound): one-time key K shown in the QR. Each connection pins
 // its key: a setup session keeps K until disconnect even after a bind.
@@ -266,23 +274,31 @@ bool handleSetupOp(const std::string& op, JsonDocument& doc) {
   return false;
 }
 class ServerCallbacks final : public NimBLEServerCallbacks {
+  // Host-task context: state under `mutex`, NimBLE calls after releasing it.
   void onConnect(NimBLEServer* server, NimBLEConnInfo& info) override {
-    std::lock_guard<std::recursive_mutex> lock(mutex);
-    if (isConnected) {
-      server->disconnect(info.getConnHandle());
-      return;
+    bool reject = false;
+    {
+      std::lock_guard<std::recursive_mutex> lock(mutex);
+      reject = isConnected;
+      if (!reject) {
+        isConnected = true;
+        connectionHandle = info.getConnHandle();
+        resetSession();
+      }
     }
-    isConnected = true;
-    connectionHandle = info.getConnHandle();
-    resetSession();
+    if (reject) server->disconnect(info.getConnHandle());
   }
   void onDisconnect(NimBLEServer*, NimBLEConnInfo& info, int) override {
-    std::lock_guard<std::recursive_mutex> lock(mutex);
-    if (connectionHandle != info.getConnHandle()) return;
-    resetSession();
-    isConnected = false;
-    connectionHandle = 0xffff;
-    if (!paused) NimBLEDevice::startAdvertising();
+    bool advertise = false;
+    {
+      std::lock_guard<std::recursive_mutex> lock(mutex);
+      if (connectionHandle != info.getConnHandle()) return;
+      resetSession();
+      isConnected = false;
+      connectionHandle = 0xffff;
+      advertise = started && !released;
+    }
+    if (advertise) NimBLEDevice::startAdvertising();
   }
 };
 class Callbacks final : public NimBLECharacteristicCallbacks {
@@ -414,68 +430,30 @@ bool validSecret() {
   uint8_t decoded[32];
   return unhex(secret, decoded, 32);
 }
-}  // namespace
-void pause(bool value) {
-  std::lock_guard<std::recursive_mutex> lock(mutex);
-  paused = value;
-  if (!started) return;
-  if (value) {
-    NimBLEDevice::getAdvertising()->stop();
-    if (isConnected) NimBLEDevice::getServer()->disconnect(connectionHandle);
-  } else if (!secret.empty() || !setupKey.empty())
-    NimBLEDevice::startAdvertising();
-}
-void revoke() {
-  std::lock_guard<std::recursive_mutex> lock(mutex);
-  if (secret.empty()) return;
-  if (isConnected) NimBLEDevice::getServer()->disconnect(connectionHandle);
-  resetSession();
-  identity.clear();
-  secret.clear();
-  epoch = 0;
-  bindState = BindState::None;
-  Storage.remove(CREDENTIALS);
-  if (started) NimBLEDevice::getAdvertising()->stop();
-}
-bool adoptAuthority(const std::string& deviceId, const std::string& key, uint32_t keyEpoch,
-                    const std::string& owner) {
-  std::lock_guard<std::recursive_mutex> lock(mutex);
-  if (deviceId.size() != 36 || !ble_setup::validAuthority(key, keyEpoch)) return false;
-  if (identity == deviceId && secret == key && epoch == keyEpoch && authorityOwner == owner) return false;
-  if (!authorityOwner.empty() && authorityOwner != owner) StudioFrame::instance().clear();
-  if (isConnected) NimBLEDevice::getServer()->disconnect(connectionHandle);
-  authorityOwner = owner;
-  identity = deviceId;
-  secret = key;
-  epoch = keyEpoch;
-  setupKey.clear();
-  writeCredentials();
-  if (!started)
-    begin();
-  else if (!paused && !isConnected)
-    NimBLEDevice::startAdvertising();
-  return true;
-}
-void begin() {
-  std::lock_guard<std::recursive_mutex> lock(mutex);
-  if (started || paused) return;
-  if (secret.empty()) {
-    HalFile file;
-    if (Storage.openFileForRead("STUDIO", CREDENTIALS, file)) {
-      JsonDocument doc;
-      const auto parseError = deserializeJson(doc, file);
-      file.close();
-      if (!parseError) {
-        authorityOwner = doc["owner_id"] | "";
-        identity = doc["device_id"] | "";
-        secret = doc["secret"] | "";
-        epoch = doc["epoch"] | 0;
+// Starts NimBLE for the current identity. Caller holds radioMutex.
+void startRadioLocked() {
+  std::string name;
+  {
+    std::lock_guard<std::recursive_mutex> lock(mutex);
+    if (started || released) return;
+    if (secret.empty()) {
+      HalFile file;
+      if (Storage.openFileForRead("STUDIO", CREDENTIALS, file)) {
+        JsonDocument doc;
+        const auto parseError = deserializeJson(doc, file);
+        file.close();
+        if (!parseError) {
+          authorityOwner = doc["owner_id"] | "";
+          identity = doc["device_id"] | "";
+          secret = doc["secret"] | "";
+          epoch = doc["epoch"] | 0;
+        }
       }
     }
+    if (!validIdentity() || (!validSecret() && setupKey.empty())) return;
+    if (validSecret()) setupKey.clear();
+    name = ble_setup::advertisedName(identity);
   }
-  if (!validIdentity() || (!validSecret() && setupKey.empty())) return;
-  if (validSecret()) setupKey.clear();
-  const std::string name = ble_setup::advertisedName(identity);
   NimBLEDevice::init(name.c_str());
   NimBLEDevice::setMTU(247);
   auto* server = NimBLEDevice::createServer();
@@ -490,20 +468,126 @@ void begin() {
   advertising->setName(name.c_str());
   advertising->enableScanResponse(true);
   advertising->start();
+  std::lock_guard<std::recursive_mutex> lock(mutex);
   started = true;
+  LOG_INF("BLE", "NimBLE up as %s (heap=%u max=%u)", name.c_str(), (unsigned)ESP.getFreeHeap(),
+          (unsigned)ESP.getMaxAllocHeap());
+}
+// Caller holds radioMutex.
+void disconnectLocked(uint16_t handle) {
+  if (handle == 0xffff) return;
+  if (auto* server = NimBLEDevice::getServer()) server->disconnect(handle);
+}
+// Caller holds radioMutex.
+void advertiseIfIdleLocked() {
+  bool advertise = false;
+  {
+    std::lock_guard<std::recursive_mutex> lock(mutex);
+    advertise = started && !released && !isConnected && (!secret.empty() || !setupKey.empty());
+  }
+  if (advertise) NimBLEDevice::startAdvertising();
+}
+}  // namespace
+bool releaseRadio() {
+  std::lock_guard<std::mutex> radio(radioMutex);
+  {
+    std::lock_guard<std::recursive_mutex> lock(mutex);
+    if (!started || released || isConnected) return false;
+    released = true;
+    started = false;
+  }
+  const uint32_t before = ESP.getFreeHeap();
+  NimBLEDevice::deinit(true);
+  {
+    // A connection racing the shutdown is gone with the stack.
+    std::lock_guard<std::recursive_mutex> lock(mutex);
+    if (isConnected) resetSession();
+    isConnected = false;
+    connectionHandle = 0xffff;
+  }
+  LOG_INF("BLE", "NimBLE released for network/flash (heap %u -> %u, max=%u)", (unsigned)before,
+          (unsigned)ESP.getFreeHeap(), (unsigned)ESP.getMaxAllocHeap());
+  return true;
+}
+void restoreRadio() {
+  std::lock_guard<std::mutex> radio(radioMutex);
+  {
+    std::lock_guard<std::recursive_mutex> lock(mutex);
+    if (!released) return;
+    released = false;
+  }
+  startRadioLocked();
+}
+void revoke() {
+  std::lock_guard<std::mutex> radio(radioMutex);
+  uint16_t handle = 0xffff;
+  bool stopAdvertising = false;
+  {
+    std::lock_guard<std::recursive_mutex> lock(mutex);
+    if (secret.empty()) return;
+    if (isConnected) handle = connectionHandle;
+    resetSession();
+    identity.clear();
+    secret.clear();
+    epoch = 0;
+    bindState = BindState::None;
+    Storage.remove(CREDENTIALS);
+    stopAdvertising = started;
+  }
+  disconnectLocked(handle);
+  if (stopAdvertising) NimBLEDevice::getAdvertising()->stop();
+}
+bool adoptAuthority(const std::string& deviceId, const std::string& key, uint32_t keyEpoch,
+                    const std::string& owner) {
+  std::lock_guard<std::mutex> radio(radioMutex);
+  uint16_t handle = 0xffff;
+  bool needStart = false;
+  {
+    std::lock_guard<std::recursive_mutex> lock(mutex);
+    if (deviceId.size() != 36 || !ble_setup::validAuthority(key, keyEpoch)) return false;
+    if (identity == deviceId && secret == key && epoch == keyEpoch && authorityOwner == owner) return false;
+    if (!authorityOwner.empty() && authorityOwner != owner) StudioFrame::instance().clear();
+    if (isConnected) handle = connectionHandle;
+    authorityOwner = owner;
+    identity = deviceId;
+    secret = key;
+    epoch = keyEpoch;
+    setupKey.clear();
+    writeCredentials();
+    needStart = !started && !released;
+  }
+  disconnectLocked(handle);
+  if (needStart)
+    startRadioLocked();
+  else
+    advertiseIfIdleLocked();
+  return true;
+}
+void begin() {
+  std::lock_guard<std::mutex> radio(radioMutex);
+  startRadioLocked();
 }
 void tick() {
   static uint32_t lastStartAttempt = 0;
-  if (!started && millis() - lastStartAttempt > 5000) {
+  bool start = false;
+  uint16_t timedOut = 0xffff;
+  {
+    std::lock_guard<std::recursive_mutex> lock(mutex);
+    start = !started && !released && millis() - lastStartAttempt > 5000;
+    if (isConnected && millis() - lastActivity > 30000 && state == "receiving") {
+      StudioFrame::instance().abort();
+      error = "transfer_timeout";
+      state = "paused";
+      timedOut = connectionHandle;
+    }
+  }
+  if (start) {
     lastStartAttempt = millis();
     begin();
   }
-  std::lock_guard<std::recursive_mutex> lock(mutex);
-  if (isConnected && millis() - lastActivity > 30000 && state == "receiving") {
-    StudioFrame::instance().abort();
-    error = "transfer_timeout";
-    state = "paused";
-    NimBLEDevice::getServer()->disconnect(connectionHandle);
+  if (timedOut != 0xffff) {
+    std::lock_guard<std::mutex> radio(radioMutex);
+    disconnectLocked(timedOut);
   }
 }
 bool connected() {
@@ -511,18 +595,23 @@ bool connected() {
   return isConnected;
 }
 void setup(const std::string& deviceId) {
-  std::lock_guard<std::recursive_mutex> lock(mutex);
-  if (!secret.empty() || deviceId.size() != 36) return;
-  if (identity == deviceId && !setupKey.empty()) return;
-  identity = deviceId;
-  uint8_t key[ble_setup::SETUP_KEY_BYTES];
-  esp_fill_random(key, sizeof(key));
-  setupKey = ble_setup::hex(key, sizeof(key));
-  bindState = BindState::None;
-  if (!started)
-    begin();
-  else if (!paused && !isConnected)
-    NimBLEDevice::startAdvertising();
+  std::lock_guard<std::mutex> radio(radioMutex);
+  bool needStart = false;
+  {
+    std::lock_guard<std::recursive_mutex> lock(mutex);
+    if (!secret.empty() || deviceId.size() != 36) return;
+    if (identity == deviceId && !setupKey.empty()) return;
+    identity = deviceId;
+    uint8_t key[ble_setup::SETUP_KEY_BYTES];
+    esp_fill_random(key, sizeof(key));
+    setupKey = ble_setup::hex(key, sizeof(key));
+    bindState = BindState::None;
+    needStart = !started && !released;
+  }
+  if (needStart)
+    startRadioLocked();
+  else
+    advertiseIfIdleLocked();
 }
 std::string setupPayload() {
   std::lock_guard<std::recursive_mutex> lock(mutex);
@@ -590,7 +679,8 @@ void reportScan(bool scanning, std::vector<ble_setup::Network> found) {
 namespace studio_ble {
 void revoke() {}
 bool adoptAuthority(const std::string&, const std::string&, uint32_t, const std::string&) { return false; }
-void pause(bool) {}
+bool releaseRadio() { return false; }
+void restoreRadio() {}
 void begin() {}
 void tick() {}
 bool connected() { return false; }

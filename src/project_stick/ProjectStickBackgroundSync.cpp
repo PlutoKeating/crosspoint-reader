@@ -7,24 +7,33 @@ ProjectStickBackgroundSync& ProjectStickBackgroundSync::getInstance() {
   return instance;
 }
 
+// Called once from setup(), before Wi-Fi or NimBLE allocate. The task stack
+// and TCB are static, so the worker always exists: a lazily created task could
+// fail on a fragmented heap and leave every cloud request (and the firmware
+// check screen) waiting forever.
 void ProjectStickBackgroundSync::begin() {
   taskENTER_CRITICAL(&stateMux);
   const bool alreadyStarted = started;
-  if (!started) started = true;
+  started = true;
   taskEXIT_CRITICAL(&stateMux);
   if (alreadyStarted) return;
 
-  // The UI-side service has already loaded the shared store. This second
-  // instance owns all cloud I/O and keeps its network/display state off the UI
-  // task.
+  // This instance owns all cloud I/O and keeps its network state off the UI
+  // task; it also loads the shared store first.
   service.begin();
-  const BaseType_t created = xTaskCreate(&taskTrampoline, "ProjectStickSync", 8192, this, 1, &taskHandle);
-  if (created != pdTRUE || taskHandle == nullptr) {
-    LOG_ERR("STICK", "Could not create background sync task");
-    taskENTER_CRITICAL(&stateMux);
-    started = false;
-    taskEXIT_CRITICAL(&stateMux);
-  }
+#ifdef SIMULATOR
+  TaskHandle_t handle = nullptr;
+  xTaskCreate(&taskTrampoline, "ProjectStickSync", TASK_STACK_BYTES, this, 1, &handle);
+#else
+  static StackType_t stack[TASK_STACK_BYTES];
+  static StaticTask_t taskBuffer;
+  TaskHandle_t handle =
+      xTaskCreateStatic(&taskTrampoline, "ProjectStickSync", TASK_STACK_BYTES, this, 1, stack, &taskBuffer);
+#endif
+  if (handle == nullptr) LOG_ERR("STICK", "Background sync task was not created");
+  taskENTER_CRITICAL(&stateMux);
+  taskHandle = handle;
+  taskEXIT_CRITICAL(&stateMux);
 }
 
 bool ProjectStickBackgroundSync::requestSync() { return queue(WorkKind::Sync); }

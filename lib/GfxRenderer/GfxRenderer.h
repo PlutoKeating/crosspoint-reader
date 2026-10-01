@@ -74,6 +74,10 @@ class GfxRenderer {
   mutable int _stripY0 = 0;
   mutable int _stripRows = 0;
   mutable bool _stripActive = false;
+  // See deferDisplay().
+  mutable bool displayDeferred_ = false;
+  mutable bool deferredDisplayRequested_ = false;
+  mutable HalDisplay::RefreshMode deferredRefreshMode_ = HalDisplay::FAST_REFRESH;
 
   // CJK UI font fallback map: primary (built-in, Latin-only) UI font id -> a
   // size-matched SD-card font id that carries CJK glyphs. When a string drawn
@@ -179,6 +183,20 @@ class GfxRenderer {
   // support. See HalDisplay::displayBufferAsync for the baseline contract.
   void displayBufferAsync(HalDisplay::RefreshMode refreshMode = HalDisplay::FAST_REFRESH) const;
   void waitRefreshComplete() const;
+  // While deferred, displayBuffer()/displayBufferAsync() only record the
+  // request: the activity manager renders an activity under the keyguard, draws
+  // the lock on top and then refreshes once (takeDeferredDisplay gives the
+  // refresh mode the activity asked for, false when it drew nothing).
+  void deferDisplay(bool deferred) const {
+    displayDeferred_ = deferred;
+    deferredDisplayRequested_ = false;
+  }
+  bool takeDeferredDisplay(HalDisplay::RefreshMode& mode) const {
+    mode = deferredRefreshMode_;
+    const bool requested = deferredDisplayRequested_;
+    deferredDisplayRequested_ = false;
+    return requested;
+  }
   // True when displayBufferAsync() genuinely overlaps: panel defers and
   // fadingFix isn't forcing the blocking path. Callers can skip overlap
   // scaffolding (e.g. whole-plane grayscale buffers) when false.
