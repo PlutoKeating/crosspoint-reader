@@ -179,6 +179,10 @@ void ProjectStickActivity::showFeedbackBubble(const stick_overlay::Bubble bubble
 
 // Advances the bubble through its discrete slide frames, then clears it.
 void ProjectStickActivity::updateFeedbackBubble() {
+  // Checked before taking the render lock: with no bubble up (almost always)
+  // this must not wait for an e-paper refresh — that wait stalled the BLE
+  // chunk queue during every repaint of a transfer.
+  if (feedbackBubble == stick_overlay::Bubble::None) return;
   bool repaint = false;
   {
     RenderLock lock;
@@ -243,7 +247,10 @@ void ProjectStickActivity::updateNotice(const uint32_t nowMs) {
   const bool radioChanged = link.radio != lastRadio;
   lastRadio = link.radio;
   const bool kindChanged = next != notice;
-  const bool frameDue = stick_overlay::noticeBusy(next) && nowMs - noticeFrameMs >= stick_overlay::NOTICE_FRAME_MS;
+  // A repaint re-reads the card from SD and refreshes the panel; while a
+  // transfer streams to the same card it animates more slowly.
+  const uint32_t frameMs = next == Notice::Receiving ? RECEIVING_FRAME_MS : stick_overlay::NOTICE_FRAME_MS;
+  const bool frameDue = stick_overlay::noticeBusy(next) && nowMs - noticeFrameMs >= frameMs;
   if (!kindChanged && !frameDue) {
     if (radioChanged && !StudioFrame::instance().hasContent()) requestUpdate();
     return;
@@ -368,7 +375,7 @@ void ProjectStickActivity::loop() {
       nowMs - lastSyncAttemptMs >= service.pollIntervalSeconds() * 1000UL) {
     requestCloudSync();
   }
-  if (cloudAllowed && nowMs - lastAlertPollMs >= service.alertPollIntervalSeconds() * 1000UL) {
+  if (cloudAllowed && service.inAlertWindow() && nowMs - lastAlertPollMs >= service.alertPollIntervalSeconds() * 1000UL) {
     if (PROJECT_STICK_BACKGROUND_SYNC.requestAlertPoll()) lastAlertPollMs = nowMs;
   }
 }
@@ -377,7 +384,7 @@ void ProjectStickActivity::loop() {
 // SD card or the radio themselves).
 void ProjectStickActivity::tickBleSetup() {
   if (!service.isBound()) studio_ble::setup(service.deviceId());
-  const std::string payload = studio_ble::setupPayload();
+  const std::string payload = service.isBound() ? std::string() : studio_ble::setupPayload();
   if (payload != setupPayload) {
     {
       RenderLock lock;
@@ -517,8 +524,11 @@ void ProjectStickActivity::pollBleScan() {
 void ProjectStickActivity::refreshBleState(uint32_t nowMs) {
   // Nothing competes with a running transfer for the main loop and the card.
   if (nowMs != 0 && StudioFrame::instance().busy()) return;
-  const uint32_t interval = studio_ble::connected() ? STATE_REFRESH_LINKED_MS : STATE_REFRESH_IDLE_MS;
-  if (nowMs != 0 && lastStateRefreshMs != 0 && nowMs - lastStateRefreshMs < interval) return;
+  const bool connected = studio_ble::connected();
+  const bool justConnected = connected && !stateLinkWasConnected;  // fresh values before the phone's first read
+  stateLinkWasConnected = connected;
+  const uint32_t interval = connected ? STATE_REFRESH_LINKED_MS : STATE_REFRESH_IDLE_MS;
+  if (nowMs != 0 && !justConnected && lastStateRefreshMs != 0 && nowMs - lastStateRefreshMs < interval) return;
   lastStateRefreshMs = nowMs ? nowMs : millis();
   studio_ble::setState(service.phoneStateJson());
 }

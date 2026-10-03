@@ -79,6 +79,8 @@ class ProjectStickService {
   static bool apiBlocked();
   static bool clearBackoffForManualSync();
   bool isTradingDay() const;
+  // Trading day and inside A-share continuous trading hours (alerts can only change then).
+  bool inAlertWindow() const;
   bool hasClock() const { return serverTime.valid; }
   bool isBound() const;
   // True when the device holds a cloud credential (a bound physical device).

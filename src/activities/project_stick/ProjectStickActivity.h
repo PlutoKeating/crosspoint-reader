@@ -64,6 +64,7 @@ class ProjectStickActivity final : public Activity {
   // Status notice over the card or status screen: live work (a phone link, a
   // transfer with progress, a Wi-Fi join, the cloud heartbeat) and its result.
   static constexpr uint32_t NOTICE_RESULT_MS = 3000;
+  static constexpr uint32_t RECEIVING_FRAME_MS = 3000;
   static constexpr uint32_t NOTICE_FAILURE_MS = 6000;
   stick_overlay::Notice notice = stick_overlay::Notice::None;
   int noticePercent = 0;
@@ -90,8 +91,9 @@ class ProjectStickActivity final : public Activity {
   uint32_t lastRegisterMs = 0;
   // BLE STATE characteristic refresh: often while a phone is connected, rarely otherwise.
   static constexpr uint32_t STATE_REFRESH_LINKED_MS = 2000;
-  static constexpr uint32_t STATE_REFRESH_IDLE_MS = 30000;
+  static constexpr uint32_t STATE_REFRESH_IDLE_MS = 10UL * 60UL * 1000UL;
   uint32_t lastStateRefreshMs = 0;
+  bool stateLinkWasConnected = false;
   void refreshBleState(uint32_t nowMs);
 #ifdef SIMULATOR
   bool simulatorAlertPollPending = false;

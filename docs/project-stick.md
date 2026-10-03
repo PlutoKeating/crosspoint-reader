@@ -108,6 +108,14 @@ and `ProjectStickActivity::tickBleSetup` (applies queued work).
   download; STATUS `ota` reports `queued`/`downloading`/…/`failed` with the
   error, and bound STATUS carries `fw` so the phone can confirm the new version
   after the restart.
+- Loop hygiene (2.6.3): the main loop sleeps 2 ms per iteration instead of a
+  busy `yield()` whenever a page asks for no delay; the feedback-bubble check
+  no longer takes the render lock (it used to wait out every e-paper refresh,
+  stalling the BLE chunk queue); the receiving notice repaints every 3 s
+  instead of 1.2 s; the STATE characteristic is rebuilt when a phone connects,
+  every 2 s while connected and every 10 min otherwise; alert polls are only
+  requested inside the A-share trading window and the store is saved only when
+  an alert or the trading-day flag changed; boot hashes each program file once.
 - `sync` / `unbind` (bound mode only, 2.6.0): the phone relays the STATE
   characteristic to the cloud and acknowledges it, or drops the binding after
   an unbind in the mini program; see "Phone-relayed sync" in studio-protocol.md.

@@ -380,22 +380,31 @@ bool ProjectStickService::registerDevice(int& status) {
   return true;
 }
 
-bool ProjectStickService::pollAlerts() {
+// A-share continuous trading (Shanghai 09:30–11:30, 13:00–15:00) on a trading
+// day; alerts only change inside it, so nothing polls outside.
+bool ProjectStickService::inAlertWindow() const {
   project_stick::ShanghaiTime current;
   bool eligible = false;
-  std::string deviceId;
   {
     ProjectStickStateLock lock(projectStickStateMutex);
     current = now();
     eligible = PROJECT_STICK_STORE.tradingDay && current.valid;
-    deviceId = PROJECT_STICK_STORE.deviceId;
   }
   const uint16_t minute = current.minuteOfDay();
   eligible = eligible && ((minute >= 570 && minute < 690) || (minute >= 780 && minute < 900));
 #ifdef SIMULATOR
   eligible = eligible || std::getenv("CROSSPOINT_SIM_FORCE_ALERT_WINDOW") != nullptr;
 #endif
-  if (!eligible) return false;
+  return eligible;
+}
+
+bool ProjectStickService::pollAlerts() {
+  if (!inAlertWindow()) return false;
+  std::string deviceId;
+  {
+    ProjectStickStateLock lock(projectStickStateMutex);
+    deviceId = PROJECT_STICK_STORE.deviceId;
+  }
 
   RadioLease lease(*this);
   HttpBurst burst(http);
@@ -409,6 +418,7 @@ bool ProjectStickService::pollAlerts() {
   // scene and StudioFrame::tick shows it while alertUntil lies in the future.
   ProjectStickStateLock lock(projectStickStateMutex);
   parseServerTime(doc["server_time"] | "");
+  const bool wasTradingDay = PROJECT_STICK_STORE.tradingDay;
   PROJECT_STICK_STORE.tradingDay = doc["is_trading_day"] | PROJECT_STICK_STORE.tradingDay;
   bool received = false;
   for (JsonObjectConst alert : doc["alerts"].as<JsonArrayConst>()) {
@@ -425,7 +435,8 @@ bool ProjectStickService::pollAlerts() {
     }
     received = true;
   }
-  PROJECT_STICK_STORE.saveToFile();
+  // The store only hits the card when something changed (every 30 s otherwise).
+  if (received || wasTradingDay != PROJECT_STICK_STORE.tradingDay) PROJECT_STICK_STORE.saveToFile();
   return received;
 }
 

@@ -82,19 +82,28 @@ void StudioFrame::load() {
     if (error) continue;
     const std::string hash = doc["hash"] | "";
     if (!validHash(hash)) continue;
-    if (!verifyFile(fileFor(hash), hash)) continue;
+    // The active file, the last visual and the saved program are usually the
+    // same (multi-megabyte) file: hash each distinct file once at boot.
+    std::string verified;
+    auto verifiedFile = [&verified](const std::string& h) {
+      if (h == verified) return true;
+      if (!verifyFile(fileFor(h), h)) return false;
+      verified = h;
+      return true;
+    };
+    if (!verifiedFile(hash)) continue;
     active = {doc["task"] | "", hash, doc["expires"] | int64_t(0), false, doc["size"] | BYTES, doc["card"] | ""};
     auto visual = doc["visual"];
     lastVisual = {visual["task"] | "", visual["hash"] | "", 0, false, visual["size"] | BYTES, ""};
     lastVisualOffset = visual["offset"] | size_t(0);
-    if (!validHash(lastVisual.hash) || !verifyFile(fileFor(lastVisual.hash), lastVisual.hash) ||
+    if (!validHash(lastVisual.hash) || !verifiedFile(lastVisual.hash) ||
         lastVisualOffset + BYTES > lastVisual.size)
       lastVisual = {};
     auto saved = doc["program"];
     savedProgram = {saved["task"] | "", saved["hash"] | "", 0, false, saved["size"] | BYTES, ""};
     if (active.size > BYTES) savedProgram = active;
     if (!savedProgram.hash.empty() && validHash(savedProgram.hash) &&
-        verifyFile(fileFor(savedProgram.hash), savedProgram.hash) && readProgram(savedProgram, program, headerOffset)) {
+        verifiedFile(savedProgram.hash) && readProgram(savedProgram, program, headerOffset)) {
       auto state = doc["playback"];
       playback.lastTime = state["time"] | int64_t(0);
       playback.lastChange = state["change"] | int64_t(0);

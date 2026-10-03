@@ -525,7 +525,9 @@ void loop() {
   // Otherwise, use longer delay to save power
   if (activityManager.skipLoopDelay()) {
     powerManager.setPowerSaving(false);  // Make sure we're at full performance when skipLoopDelay is requested
-    yield();                             // Give FreeRTOS a chance to run tasks, but return immediately
+    // A real (2 ms) sleep, not a busy yield: it lets the idle task run and
+    // keeps the loop far ahead of the ~20 ms BLE chunk cadence.
+    delay(2);
   } else {
     if (millis() - lastActivityTime >= HalPowerManager::IDLE_POWER_SAVING_MS) {
       // If we've been inactive for a while, increase the delay to save power
