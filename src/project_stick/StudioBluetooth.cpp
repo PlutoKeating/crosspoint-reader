@@ -177,7 +177,10 @@ void resetSession() {
   memset(stream, 0, sizeof(stream));
   lastActivity = millis();
 }
-void fail(const char* reason) {
+// `discard` drops the partial on the card (protocol, cipher or validation
+// failures: the bytes cannot be trusted); a stall keeps it so the retry
+// resumes from what reached the card instead of starting over.
+void fail(const char* reason, const bool discard = true) {
   // The first cause is the one the phone must see; later chunks arriving
   // after a failure would otherwise overwrite it (the 2.6.0 reports all read
   // "unauthorized_or_invalid_chunk" whatever had actually gone wrong).
@@ -187,7 +190,7 @@ void fail(const char* reason) {
   state = "failed";
   if (authenticated) {
     dropQueueLocked();
-    requestAbortLocked(true);
+    requestAbortLocked(discard);
   }
   changed();
 }
@@ -447,7 +450,7 @@ class Callbacks final : public NimBLECharacteristicCallbacks {
     }
     if (xSemaphoreTake(queueSpace, pdMS_TO_TICKS(QUEUE_WAIT_MS)) != pdTRUE) {
       std::lock_guard<std::recursive_mutex> lock(mutex);
-      if (session == sessionId && state == "receiving") fail("device_busy");
+      if (session == sessionId && state == "receiving") fail("device_busy", false);
       return;
     }
     std::lock_guard<std::recursive_mutex> lock(mutex);
@@ -460,7 +463,7 @@ class Callbacks final : public NimBLECharacteristicCallbacks {
         uint32_t(bytes[0]) | uint32_t(bytes[1]) << 8 | uint32_t(bytes[2]) << 16 | uint32_t(bytes[3]) << 24;
     if (offset != queuedEnd) {
       xSemaphoreGive(queueSpace);
-      fail("offset_mismatch");
+      fail("offset_mismatch", false);  // the card's partial is intact; the retry resumes from it
       return;
     }
     Chunk& slot = chunkQueue[(queueHead + queueCount) % QUEUE_SLOTS];
@@ -936,7 +939,7 @@ void pump() {
       } else if (!ok) {
         fail("device_busy_or_invalid_frame");
       } else if (frame.received() != announcedOffset) {
-        fail("offset_mismatch");  // the partial on the card was not what `begin` was told; a retry resumes correctly
+        fail("offset_mismatch", false);  // start() corrected the partial record; the retry resumes from it
       }
       continue;
     }
