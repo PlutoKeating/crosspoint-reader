@@ -7,16 +7,22 @@ the flag, leaving Arduino's host/controller routines unchanged.
 The patch must be in place before pioarduino's framework-library rebuild (the
 custom_sdkconfig scaffold links NimBLE-Arduino against the core without this
 project's sources), so the core package has to exist when this pre: script
-runs: CI installs packages first (`pio pkg install -e gh_release`). A missing
-package is reported instead of skipped.
+runs; a missing package is installed here rather than skipped.
 """
 from pathlib import Path
 
 Import("env")
-package = env.PioPlatform().get_package_dir("framework-arduinoespressif32")
+platform = env.PioPlatform()
+package = platform.get_package_dir("framework-arduinoespressif32")
 if not package:
-    print("patch_arduino_bt_controller: framework-arduinoespressif32 is not installed yet; "
-          "run `pio pkg install` first or the BLE host will fail to link (_btLibraryInUse)")
+    # Frameworks are installed lazily during the build, i.e. after this pre:
+    # script on a clean machine or CI runner; fetch it now so the patch is in
+    # place for the scaffold link.
+    print("patch_arduino_bt_controller: installing framework-arduinoespressif32 before patching")
+    platform.install_package("framework-arduinoespressif32")
+    package = platform.get_package_dir("framework-arduinoespressif32")
+if not package:
+    raise RuntimeError("framework-arduinoespressif32 could not be installed; the BLE host would fail to link")
 if package:
     path = Path(package) / "cores/esp32/esp32-hal-bt.c"
     source = path.read_text()
