@@ -173,7 +173,15 @@ to the cloud history; receipt authentication checks current owner/grant and epoc
 
 Since 2.5.1 the GATT callbacks only verify, decrypt and queue (the NimBLE host
 task must not touch the SD card, see memory-budget.md); `studio_ble::pump()` on
-the main loop performs `start`/`append`/`commit`. STATUS `received` while
+the main loop performs `start`/`append`/`commit`. The queue is 16 static slots
+of 240 bytes (~4 KB, 2.6.2; 8 before) and every chunk goes straight to the
+card's `incoming.bin`, so a program of any size costs no heap. A chunk waits
+up to 6 s for a slot (the phone's write deadline is 8 s); longer main-loop
+stalls fail the transfer as `device_busy`. Since 2.6.2 the first failure is
+what STATUS keeps: chunks still in flight after it are dropped instead of
+overwriting the cause with `unauthorized_or_invalid_chunk`, and no SD usage
+scan (`freeClusterCount`, seconds on a large card) runs while a transfer is
+receiving — the STATE metrics reuse a reading taken when idle. STATUS `received` while
 `receiving` is the number of bytes accepted from the phone (queued chunks
 included), so the phone's progress check after each burst still matches; a
 later storage failure shows up as `failed` on the next read, and a retry

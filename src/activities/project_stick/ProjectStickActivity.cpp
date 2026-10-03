@@ -515,6 +515,8 @@ void ProjectStickActivity::pollBleScan() {
 // Publishes the STATE characteristic (firmware, metrics, pending events, OTA
 // outcome) the phone reads during a BLE session. `nowMs == 0` forces a refresh.
 void ProjectStickActivity::refreshBleState(uint32_t nowMs) {
+  // Nothing competes with a running transfer for the main loop and the card.
+  if (nowMs != 0 && StudioFrame::instance().busy()) return;
   const uint32_t interval = studio_ble::connected() ? STATE_REFRESH_LINKED_MS : STATE_REFRESH_IDLE_MS;
   if (nowMs != 0 && lastStateRefreshMs != 0 && nowMs - lastStateRefreshMs < interval) return;
   lastStateRefreshMs = nowMs ? nowMs : millis();

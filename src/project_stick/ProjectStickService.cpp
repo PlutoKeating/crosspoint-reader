@@ -112,11 +112,22 @@ void describeMetrics(JsonObject metrics) {
   metrics["uptime_ms"] = millis();
   metrics["wifi_rssi"] = WiFi.status() == WL_CONNECTED ? WiFi.RSSI() : 0;
   metrics["battery_percent"] = powerManager.getBatteryPercentage();
-  // SdFat caches the free-cluster scan; the values are 0 without a card.
-  const uint64_t total = Storage.totalBytes();
-  if (total) {
-    metrics["sd_total"] = total;
-    metrics["sd_used"] = Storage.usedBytes();
+  // The free-cluster scan behind usedBytes() reads the whole FAT (seconds on
+  // a large card) and SdFat caches it for only 20 s. It must never run while
+  // a transfer streams to the card (it would starve the chunk queue), so the
+  // reading is taken only when idle and kept for ten minutes.
+  static uint64_t cachedTotal = 0, cachedUsed = 0;
+  static uint32_t cachedAtMs = 0;
+  constexpr uint32_t SD_USAGE_TTL_MS = 10UL * 60UL * 1000UL;
+  if (!StudioFrame::instance().busy() && !studio_ble::connected() &&
+      (cachedAtMs == 0 || millis() - cachedAtMs >= SD_USAGE_TTL_MS)) {
+    cachedTotal = Storage.totalBytes();
+    cachedUsed = cachedTotal ? Storage.usedBytes() : 0;
+    cachedAtMs = millis() ? millis() : 1;
+  }
+  if (cachedTotal) {
+    metrics["sd_total"] = cachedTotal;
+    metrics["sd_used"] = cachedUsed;
   }
 }
 

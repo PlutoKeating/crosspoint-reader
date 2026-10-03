@@ -65,8 +65,11 @@ struct Chunk {
   uint16_t length;
   uint8_t bytes[240];
 };
-constexpr size_t QUEUE_SLOTS = 8;  // ~2 KB static
-constexpr uint32_t QUEUE_WAIT_MS = 3000;
+// 16 slots (~4 KB static) ride out a main-loop stall of a few seconds (an
+// e-paper refresh plus an SD read); the wait stays under the phone's 8 s
+// write deadline so a real stall fails the transfer, not the link.
+constexpr size_t QUEUE_SLOTS = 16;
+constexpr uint32_t QUEUE_WAIT_MS = 6000;
 Chunk chunkQueue[QUEUE_SLOTS];
 size_t queueHead = 0, queueCount = 0;    // under `mutex`
 size_t queuedEnd = 0, announcedOffset = 0;  // bytes accepted from the phone; offset promised at `begin`
@@ -175,6 +178,10 @@ void resetSession() {
   lastActivity = millis();
 }
 void fail(const char* reason) {
+  // The first cause is the one the phone must see; later chunks arriving
+  // after a failure would otherwise overwrite it (the 2.6.0 reports all read
+  // "unauthorized_or_invalid_chunk" whatever had actually gone wrong).
+  if (state == "failed" && !error.empty()) return;
   if (authenticated && (state == "receiving" || state == "refreshing")) ++failedTransfers;
   error = reason;
   state = "failed";
@@ -431,6 +438,7 @@ class Callbacks final : public NimBLECharacteristicCallbacks {
       std::lock_guard<std::recursive_mutex> lock(mutex);
       if (info.getConnHandle() != connectionHandle) return;
       lastActivity = millis();
+      if (state == "failed") return;  // in-flight chunks after a failure: drop, keep the recorded cause
       if (!authenticated || state != "receiving" || value.size() <= 4 || value.size() > 244) {
         fail("unauthorized_or_invalid_chunk");
         return;
