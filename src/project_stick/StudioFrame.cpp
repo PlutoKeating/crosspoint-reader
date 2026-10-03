@@ -345,17 +345,26 @@ bool StudioFrame::persist() {
   return true;
 }
 bool StudioFrame::render(const GfxRenderer& renderer) {
-  std::lock_guard<std::recursive_mutex> lock(mutex);
-  if (active.hash.empty() || renderer.getScreenWidth() != WIDTH || renderer.getScreenHeight() != HEIGHT) return false;
-  const bool hold = active.size > BYTES && selectedFrame < 0;
-  const auto& visual = alertFrame >= 0 ? savedProgram : hold ? lastVisual : active;
-  const size_t start = alertFrame >= 0 ? headerOffset + size_t(alertFrame) * BYTES
-                       : hold          ? lastVisualOffset
-                                       : pixelOffset;
-  if (visual.hash.empty()) return false;
+  // Only the choice of file and offset needs the lock. The SD read and the
+  // pixel loop below take hundreds of milliseconds on the render task; holding
+  // the lock through them stalled the UI loop (frame.tick, hasContent) and
+  // with it button sampling, so a key released during a repaint was lost.
+  std::string path;
+  size_t size = 0, start = 0;
+  {
+    std::lock_guard<std::recursive_mutex> lock(mutex);
+    if (active.hash.empty() || renderer.getScreenWidth() != WIDTH || renderer.getScreenHeight() != HEIGHT)
+      return false;
+    const bool hold = active.size > BYTES && selectedFrame < 0;
+    const auto& visual = alertFrame >= 0 ? savedProgram : hold ? lastVisual : active;
+    start = alertFrame >= 0 ? headerOffset + size_t(alertFrame) * BYTES : hold ? lastVisualOffset : pixelOffset;
+    if (visual.hash.empty()) return false;
+    path = fileFor(visual.hash);
+    size = visual.size;
+  }
   HalFile file;
-  if (!Storage.openFileForRead("STUDIO", fileFor(visual.hash), file)) return false;
-  if (file.size() != visual.size || !file.seek(start)) {
+  if (!Storage.openFileForRead("STUDIO", path, file)) return false;
+  if (file.size() != size || !file.seek(start)) {
     file.close();
     return false;
   }

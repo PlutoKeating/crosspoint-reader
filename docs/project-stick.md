@@ -116,6 +116,11 @@ and `ProjectStickActivity::tickBleSetup` (applies queued work).
   every 2 s while connected and every 10 min otherwise; alert polls are only
   requested inside the A-share trading window and the store is saved only when
   an alert or the trading-day flag changed; boot hashes each program file once.
+- `StudioFrame::render` (2.6.4) holds the frame lock only while choosing the
+  file and offset; the SD read and pixel loop run unlocked on the render task.
+  Before, every repaint stalled the UI loop for hundreds of milliseconds and a
+  side key released during the repaint that a first key press triggers (the
+  hints appearing) was never seen, so the click did nothing.
 - `sync` / `unbind` (bound mode only, 2.6.0): the phone relays the STATE
   characteristic to the cloud and acknowledges it, or drops the binding after
   an unbind in the mini program; see "Phone-relayed sync" in studio-protocol.md.
