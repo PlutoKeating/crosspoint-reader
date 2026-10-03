@@ -41,6 +41,44 @@ allocations plus lwIP holding closed sockets in TIME_WAIT (`LWIP_TCP_MSL=60 s`).
 Removing the fast-math P-384 path and the TLS 1.2 retry removes most of that
 churn.
 
+## 2.4.3 crash: stack overflow in the NimBLE host task (fixed in 2.5.1)
+
+`crash_report.txt` from a 2.4.3 device: empty panic reason, heap sample at
+50.9 s `free=30432 min=27948 largest=27636`, log shows NimBLE up at 5.9 s with
+83 KB free and Wi-Fi retrying an unreachable saved network. Symbolised with
+`stockstick-2.4.3.elf`, the stack dump reads (innermost last):
+
+```
+studio_ble::Callbacks::onWrite            (NimBLE host task, `begin` op)
+  -> std::string / operator new
+  -> HalStorage::openFileForRead -> SDCardManager::openFileForRead
+  -> FatFile::mkdir / FatFile::open (LFN) / readDirCache / FsCache::prepare
+  -> SdSpiCard::cardCommand -> SPIClass::beginTransaction -> digitalWrite
+  -> xQueueSemaphoreTake
+```
+
+The exception SP (0x3FCC7080) sits less than 64 bytes below the task's
+`0xA5A5A5A5` stack fill: the `nimble_host` task (library default 4096 bytes)
+overflowed while `StudioFrame::start()` did FAT long-name opens from inside the
+GATT write callback. The canary check only runs at a context switch, so the
+report had no reason.
+
+| Fix in 2.5.1 | Mechanism |
+|---|---|
+| GATT callbacks no longer touch the SD card | `onData` decrypts into a static 8-slot queue (~2 KB); `studio_ble::pump()` on the main loop runs start/append/commit/abort with `mutex` released. The host task waits on a counting semaphore for a free slot (back-pressure through the ATT write response), 3 s max. |
+| `CONFIG_BT_NIMBLE_HOST_TASK_STACK_SIZE=8192` | Margin for JSON, HMAC/AES and STATUS building that stay in the callback (+4 KB heap). |
+| `CONFIG_FREERTOS_WATCHPOINT_END_OF_STACK=y` | An overflow now traps immediately with the task name instead of corrupting the neighbour. |
+| Crash report records CPU exceptions | `mcause`/`mepc`/`ra`/`mtval`, the faulting task and its stack high-water mark (`HalSystem`). |
+| Wi-Fi driver released between failed auto-connect attempts | `WiFi.disconnect(true)` after a timed-out join; ~50 KB back while the saved network is out of reach. |
+| Stack telemetry | `[MEM]` line adds the loop task's free stack; the sync worker logs its high-water mark after each job; Settings > Bluetooth shows the host task's. |
+
+Task stacks after 2.5.1: Arduino loop 8 KB (UI, StudioFrame I/O, pump), render
+task 8 KB (frame reads, fonts), sync worker 8 KB static (TLS, firmware
+download), `nimble_host` 8 KB (callbacks only), `fi_input` 4 KB (GPIO polling),
+esp_timer 4 KB, FreeRTOS timers 2.5 KB. None of the app tasks does recursion;
+the largest stack objects are SdFat long-name paths and the 512-byte resume
+buffer in `StudioFrame::start()`.
+
 ## Where the RAM goes
 
 Static, from `riscv32-esp-elf-size -A` on the release ELF (2.4.2 → 2.4.3):

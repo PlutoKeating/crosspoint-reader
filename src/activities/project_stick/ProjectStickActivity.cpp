@@ -253,7 +253,6 @@ void ProjectStickActivity::updateNotice(const uint32_t nowMs) {
 void ProjectStickActivity::loop() {
   updateButtonHints(millis());
   updateFeedbackBubble();
-  studio_ble::tick();
   service.syncClock();
   tickBleSetup();
   updateNotice(millis());

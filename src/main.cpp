@@ -412,8 +412,9 @@ void loop() {
   renderer.setFadingFix(SETTINGS.fadingFix);
 
   if (Serial && millis() - lastMemPrint >= 10000) {
-    LOG_INF("MEM", "Free: %d bytes, Total: %d bytes, Min Free: %d bytes, MaxAlloc: %d bytes", ESP.getFreeHeap(),
-            ESP.getHeapSize(), ESP.getMinFreeHeap(), ESP.getMaxAllocHeap());
+    LOG_INF("MEM", "Free: %d bytes, Total: %d bytes, Min Free: %d bytes, MaxAlloc: %d bytes, loop stack free: %u",
+            ESP.getFreeHeap(), ESP.getHeapSize(), ESP.getMinFreeHeap(), ESP.getMaxAllocHeap(),
+            (unsigned)uxTaskGetStackHighWaterMark(nullptr));
     lastMemPrint = millis();
   }
 
@@ -502,6 +503,10 @@ void loop() {
   }
 
   ota_trial::tick(WiFi.status() == WL_CONNECTED);
+
+  // The radio and queued BLE transfer work run on every page, so a phone can
+  // deliver content while the device sits in Settings.
+  studio_ble::tick();
 
   const unsigned long activityStartTime = millis();
   activityManager.loop();

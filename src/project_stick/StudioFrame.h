@@ -41,6 +41,10 @@ class StudioFrame {
   Snapshot displaySnapshot() const;
   bool busy() const;
   size_t received() const;
+  // Bytes of this exact transfer already on the SD card, from the RAM copy of
+  // the partial-transfer record, so a BLE callback can answer `begin` without
+  // touching the card. start() recomputes it from the file.
+  size_t resumeOffset(const std::string& task, const std::string& hash, size_t size) const;
   uint32_t generation() const { return revision.load(); }
 
  private:
@@ -57,6 +61,12 @@ class StudioFrame {
   HalFile output;
   mbedtls_sha256_context sha{};
   size_t offset = 0;
+  // The partial transfer on the card (incoming.json + incoming.bin), mirrored
+  // in RAM; empty task when there is none.
+  struct Partial {
+    std::string task, hash;
+    size_t size = 0, bytes = 0;
+  } partial;
   bool receiving = false, loaded = false;
   std::atomic<uint32_t> revision{0};
   bool persist();

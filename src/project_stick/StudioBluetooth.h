@@ -58,6 +58,8 @@ struct Diagnostics {
   std::string name, address, error;
   int errorCode = 0;
   uint32_t starts = 0, startFailures = 0, connections = 0, advertisingRestarts = 0;
+  // Unused stack of the NimBLE host task in bytes (0 when the stack is down).
+  uint32_t hostStackFree = 0;
   // Seconds since the last connect / disconnect; -1 when there was none.
   int32_t sinceConnect = -1, sinceDisconnect = -1;
 };

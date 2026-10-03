@@ -63,7 +63,10 @@ bool WifiAutoConnect::tick(uint32_t nowMs) {
   if (connecting) {
     if (nowMs - attemptStartedMs < CONNECT_TIMEOUT_MS) return false;
     connecting = false;
-    WiFi.disconnect();
+    // Power the radio down between attempts: an unreachable saved network
+    // otherwise keeps the Wi-Fi driver (~50 KB) resident for nothing, heap
+    // that BLE transfers and rendering need. startAttempt() brings it back.
+    WiFi.disconnect(true);
     if (failures < 16) ++failures;
     // One backoff step per full round over the saved networks.
     const size_t networks = std::max<size_t>(1, WIFI_STORE.getCredentials().size());

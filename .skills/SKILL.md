@@ -232,6 +232,10 @@ static DRAM_ATTR uint32_t isrEventFlags = 0;
 | ISR → task (data) | `xQueueSendFromISR()` + `portYIELD_FROM_ISR()` |
 | ISR → task (signal) | `xSemaphoreGiveFromISR()` + `portYIELD_FROM_ISR()` |
 | Task → task | `xSemaphoreTake()` / mutex |
+
+**NimBLE callbacks never touch the SD card.** `onRead`/`onWrite`/`onConnect` run on the `nimble_host` task; keep them to
+verification, crypto and queueing (`studio_ble` chunk queue, drained by `pump()` on the main loop). A FAT long-name open
+from a callback overflowed that task's stack in 2.4.3 (`docs/memory-budget.md`).
 | Simple flag (single writer ISR) | `volatile bool` + `portENTER_CRITICAL_ISR()` |
 
 #### RISC-V Alignment

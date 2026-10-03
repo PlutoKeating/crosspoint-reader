@@ -87,6 +87,10 @@ and `ProjectStickActivity::tickBleSetup` (applies queued work).
 - Each connection pins its key. After `bind` the live setup session keeps K
   until the phone disconnects, so the phone can bind and then push Wi-Fi in one
   connection; the next connection is in bound mode.
+- Content transfers: the callbacks decrypt into a static chunk queue and
+  `studio_ble::pump()` (called from `studio_ble::tick()` in the main loop, so
+  it runs on every page) writes to the card; see memory-budget.md for the
+  2.4.3 host-task stack overflow this removed.
 - NimBLE callbacks only verify and queue. The activity loop applies a bind
   (`ProjectStickService::applyBleBinding`: token, owner, `bound=true`; then the
   BLE credential is persisted by `studio_ble::finishBinding`), a Wi-Fi join (saved to `WifiCredentialStore` and marked last

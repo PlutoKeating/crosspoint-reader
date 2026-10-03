@@ -59,6 +59,20 @@ void StudioFrame::load() {
   if (loaded) return;
   loaded = true;
   Storage.mkdir(ROOT, true);
+  {
+    // Remember the resumable partial, if any, for resumeOffset().
+    HalFile metadata;
+    if (Storage.openFileForRead("STUDIO", PARTIAL, metadata)) {
+      JsonDocument doc;
+      const bool valid = !deserializeJson(doc, metadata);
+      metadata.close();
+      HalFile temp;
+      if (valid && Storage.openFileForRead("STUDIO", TEMP, temp)) {
+        partial = {doc["task"] | "", doc["hash"] | "", doc["size"] | size_t(0), temp.size()};
+        temp.close();
+      }
+    }
+  }
   for (const char* path : {STATE, BACKUP}) {
     HalFile input;
     if (!Storage.openFileForRead("STUDIO", path, input)) continue;
@@ -143,6 +157,7 @@ bool StudioFrame::start(const std::string& task, const std::string& hash, int64_
     offset = 0;
     mbedtls_sha256_starts(&sha, 0);
     Storage.remove(TEMP);
+    partial = {};
   }
   const uint64_t total = Storage.totalBytes(), used = Storage.usedBytes();
   if (total <= used || total - used < size - offset + 65536) {
@@ -172,7 +187,13 @@ bool StudioFrame::start(const std::string& task, const std::string& hash, int64_
     return false;
   }
   receiving = true;
+  partial = {task, hash, size, offset};
   return true;
+}
+size_t StudioFrame::resumeOffset(const std::string& task, const std::string& hash, const size_t size) const {
+  std::lock_guard<std::recursive_mutex> lock(mutex);
+  return partial.task == task && partial.hash == hash && partial.size == size && partial.bytes <= size ? partial.bytes
+                                                                                                        : 0;
 }
 bool StudioFrame::append(size_t expectedOffset, const uint8_t* data, size_t length) {
   std::lock_guard<std::recursive_mutex> lock(mutex);
@@ -183,6 +204,7 @@ bool StudioFrame::append(size_t expectedOffset, const uint8_t* data, size_t leng
   }
   mbedtls_sha256_update(&sha, data, length);
   offset += length;
+  partial.bytes = offset;
   return true;
 }
 bool StudioFrame::commit() {
@@ -196,6 +218,7 @@ bool StudioFrame::commit() {
   mbedtls_sha256_free(&sha);
   receiving = false;
   output.close();
+  partial = {};
   char digest[65];
   for (size_t i = 0; i < 32; ++i) snprintf(digest + i * 2, 3, "%02x", bytes[i]);
   if (incoming.hash != digest) {
@@ -271,6 +294,7 @@ void StudioFrame::abort(bool discard) {
     Storage.remove(TEMP);
     Storage.remove(PARTIAL);
     offset = 0;
+    partial = {};
   }
 }
 bool StudioFrame::persist() {

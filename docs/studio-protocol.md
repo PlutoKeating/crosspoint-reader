@@ -167,6 +167,14 @@ if no current frame, or `displayed2` with the actual frame after display complet
 The phone persists the frozen package/source/receipt and uploads the signed receipt
 to the cloud history; receipt authentication checks current owner/grant and epoch.
 
+Since 2.5.1 the GATT callbacks only verify, decrypt and queue (the NimBLE host
+task must not touch the SD card, see memory-budget.md); `studio_ble::pump()` on
+the main loop performs `start`/`append`/`commit`. STATUS `received` while
+`receiving` is the number of bytes accepted from the phone (queued chunks
+included), so the phone's progress check after each burst still matches; a
+later storage failure shows up as `failed` on the next read, and a retry
+resumes from what actually reached the card.
+
 The same service runs BLE setup protocol 3 (since 2.3.0; unbound devices, key from
 the setup QR) and accepts `scan`/`wifi` and (since 2.4.0) `ota` ops in bound mode;
 bound STATUS also carries `fw`, `wifi`, `scan`, `networks` and `ota`, and the

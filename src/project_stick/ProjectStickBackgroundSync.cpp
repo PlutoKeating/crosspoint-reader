@@ -123,6 +123,10 @@ void ProjectStickBackgroundSync::taskLoop() {
       if (completed.alertReceived) completed.alertDisplay = service.displaySnapshot();
     }
 
+    // TLS and the flash writer run on this 8 KB stack; the high-water mark
+    // shows how much of it a job actually used.
+    LOG_INF("STICK", "Worker job %u done (stack free %u B)", (unsigned)kind,
+            (unsigned)uxTaskGetStackHighWaterMark(nullptr));
     {
       std::lock_guard<std::mutex> lock(resultMutex);
       completed.sequence = latestResult.sequence + 1;

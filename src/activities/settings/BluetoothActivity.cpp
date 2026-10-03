@@ -48,8 +48,6 @@ void BluetoothActivity::onEnter() {
 }
 
 void BluetoothActivity::loop() {
-  // The StockStick page normally drives the radio; keep it retrying here too.
-  studio_ble::tick();
   const uint32_t generation = studio_ble::link().generation;
   if (generation != renderedGeneration) {
     renderedGeneration = generation;
@@ -126,6 +124,10 @@ void BluetoothActivity::render(RenderLock&&) {
   snprintf(text, sizeof(text), "%u / %u KB", static_cast<unsigned>(ESP.getFreeHeap() / 1024),
            static_cast<unsigned>(ESP.getMaxAllocHeap() / 1024));
   row(tr(STR_BT_MEMORY), text);
+  if (info.hostStackFree) {
+    snprintf(text, sizeof(text), "%u B", static_cast<unsigned>(info.hostStackFree));
+    row(tr(STR_BT_HOST_STACK), text);
+  }
 
   y += metrics.verticalSpacing * 2;
   renderer.drawLine(side, y, pageWidth - side, y, 1, true);
