@@ -38,6 +38,14 @@ jobs:
           echo "SHORT_SHA=${GITHUB_SHA::7}" >> $GITHUB_ENV
           echo "BRANCH_SUFFIX=${GITHUB_REF_NAME#release/}" >> $GITHUB_ENV
 
+      # First pass on a fresh workspace: pioarduino reinstalls the Arduino core
+      # for the custom sdkconfig *after* the pre: scripts ran, which undoes
+      # scripts/patch_arduino_bt_controller.py and fails the framework-library
+      # scaffold link (_btLibraryInUse). The second pass finds the framework in
+      # place, patches it and builds the real image.
+      - name: Prepare the framework (first pass)
+        run: pio run -e gh_release_rc || echo "first pass only prepared the framework"
+
       - name: Build CrossPoint Release Candidate
         env:
           CROSSPOINT_RC_HASH: ${{ env.SHORT_SHA }}
