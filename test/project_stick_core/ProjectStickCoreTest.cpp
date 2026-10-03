@@ -65,6 +65,40 @@ TEST(ProjectStickKeyguard, RightKeyCueAnimatesOnlyAfterTheLeftStep) {
   EXPECT_EQ(keyguard.cueFrame(22500), 0);
 }
 
+TEST(ProjectStickKeyguard, UnlockPromptHidesAfterFiveIdleSeconds) {
+  Keyguard keyguard;
+  keyguard.begin(0);
+  ASSERT_TRUE(keyguard.update(Keyguard::LOCK_AFTER_MS));
+  ASSERT_TRUE(keyguard.update(21000, Keyguard::Input::ButtonActivity));
+  EXPECT_TRUE(keyguard.promptVisible());
+  EXPECT_FALSE(keyguard.update(21000 + Keyguard::PROMPT_TIMEOUT_MS - 1));
+  EXPECT_TRUE(keyguard.promptVisible());
+  EXPECT_TRUE(keyguard.update(21000 + Keyguard::PROMPT_TIMEOUT_MS));
+  EXPECT_FALSE(keyguard.promptVisible());
+  EXPECT_TRUE(keyguard.locked());
+  // Any further key action brings the guide back with a fresh timeout.
+  EXPECT_TRUE(keyguard.update(30000, Keyguard::Input::ButtonActivity));
+  EXPECT_TRUE(keyguard.promptVisible());
+  // A key action while the guide is up only restarts its timeout (no redraw).
+  EXPECT_FALSE(keyguard.update(34000, Keyguard::Input::ButtonActivity));
+  EXPECT_FALSE(keyguard.update(34000 + Keyguard::PROMPT_TIMEOUT_MS - 1));
+  EXPECT_TRUE(keyguard.update(34000 + Keyguard::PROMPT_TIMEOUT_MS));
+}
+
+TEST(ProjectStickKeyguard, IdleTimeoutForgetsTheLeftStep) {
+  Keyguard keyguard;
+  keyguard.begin(0);
+  ASSERT_TRUE(keyguard.update(Keyguard::LOCK_AFTER_MS));
+  ASSERT_TRUE(keyguard.update(21000, Keyguard::Input::LeftSide));
+  EXPECT_EQ(keyguard.state(), Keyguard::State::AwaitRight);
+  EXPECT_TRUE(keyguard.update(21000 + Keyguard::PROMPT_TIMEOUT_MS));
+  EXPECT_EQ(keyguard.state(), Keyguard::State::AwaitLeft);
+  EXPECT_FALSE(keyguard.promptVisible());
+  // Right alone after the timeout must not unlock.
+  EXPECT_TRUE(keyguard.update(27000, Keyguard::Input::RightSide));
+  EXPECT_TRUE(keyguard.locked());
+}
+
 TEST(ProjectStickKeyguard, FrontButtonRestartsAnIncompleteUnlock) {
   Keyguard keyguard;
   keyguard.begin(0);

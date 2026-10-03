@@ -35,6 +35,7 @@ class ProjectStickActivity final : public Activity {
   // BUTTON_HINT_TIMEOUT_MS without one; never while locked.
   static constexpr uint32_t BUTTON_HINT_TIMEOUT_MS = 5000;
   bool buttonHintsVisible = false;
+  bool keyguardWasLocked = false;
   uint32_t lastKeyActionMs = 0;
   void updateButtonHints(uint32_t nowMs);
   // Feedback window after a side key: slides in from that key's edge.

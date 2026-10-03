@@ -144,11 +144,16 @@ void ProjectStickActivity::updateState(const project_stick::SyncReport& report) 
 void ProjectStickActivity::updateButtonHints(const uint32_t nowMs) {
   // Hints appear on any key action and hide after 5 s; the 20 s keyguard
   // always engages later, and locked presses show the unlock prompt instead.
-  if (mappedInput.isKeyguardLocked()) {
+  // Unlocking shows them right away (the unlock release itself is consumed,
+  // so it would not count as a key action) and starts the same 5 s countdown.
+  const bool locked = mappedInput.isKeyguardLocked();
+  const bool justUnlocked = keyguardWasLocked && !locked;
+  keyguardWasLocked = locked;
+  if (locked) {
     buttonHintsVisible = false;
     return;
   }
-  if (mappedInput.wasAnyPressed() || mappedInput.wasAnyReleased()) {
+  if (justUnlocked || mappedInput.wasAnyPressed() || mappedInput.wasAnyReleased()) {
     lastKeyActionMs = nowMs;
     if (!buttonHintsVisible) {
       buttonHintsVisible = true;

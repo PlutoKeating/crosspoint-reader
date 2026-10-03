@@ -10,6 +10,10 @@ class Keyguard {
   enum class Input : uint8_t { None, Activity, ButtonActivity, LeftSide, RightSide, OtherButton };
 
   static constexpr uint32_t LOCK_AFTER_MS = 20UL * 1000UL;
+  // The unlock guide hides again after this long without a key action while
+  // still locked (same timeout as the button hints); a half-done unlock
+  // (left step taken) is forgotten with it.
+  static constexpr uint32_t PROMPT_TIMEOUT_MS = 5UL * 1000UL;
   // After the left step the unlock cue slides toward the right side key in a
   // few discrete, e-paper-safe frames.
   static constexpr uint32_t CUE_FRAME_MS = 150;
@@ -34,7 +38,14 @@ class Keyguard {
       return state_ != previous || promptVisible_ != previousPromptVisible;
     }
 
-    if (input != Input::None) promptVisible_ = true;
+    if (input != Input::None) {
+      promptVisible_ = true;
+      promptSinceMs_ = nowMs;
+    } else if (promptVisible_ && nowMs - promptSinceMs_ >= PROMPT_TIMEOUT_MS) {
+      promptVisible_ = false;
+      state_ = State::AwaitLeft;
+      return state_ != previous || promptVisible_ != previousPromptVisible;
+    }
     if (input == Input::LeftSide) {
       if (state_ != State::AwaitRight) awaitRightSinceMs_ = nowMs;
       state_ = State::AwaitRight;
@@ -66,6 +77,7 @@ class Keyguard {
   State state_ = State::Unlocked;
   uint32_t lastActivityMs_ = 0;
   uint32_t awaitRightSinceMs_ = 0;
+  uint32_t promptSinceMs_ = 0;
   bool promptVisible_ = false;
 };
 

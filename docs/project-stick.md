@@ -174,7 +174,8 @@ them (see [i18n.md](i18n.md)).
 - On the StockStick page any key action pops up the hints and they hide after
   5 seconds without one. Front labels: 返回 / Wi-Fi / – / 换一张 (the last one
   only while a Studio card is shown). On a Studio card the side pills are thumb-down 没啥用
-  (left) and 有用 thumb-up (right). Hints never show while locked.
+  (left) and 有用 thumb-up (right). Hints never show while locked; since
+  2.6.1 they show right after an unlock and then run the same 5 s countdown.
 - A device-wide Nokia-style keyguard (since 2.2.0 also on the Studio card page)
   locks after 20 seconds without button or touch activity: all non-power
   button events are suppressed and only a small lock icon is added at the top
@@ -192,7 +193,10 @@ them (see [i18n.md](i18n.md)).
   `已按` with a check, the right pill is filled and outline chevrons walk
   toward it in three 150 ms frames.
   Right-first does nothing, a front key restarts at the left step, and the
-  unlocking right release is consumed (it never sends feedback).
+  unlocking right release is consumed (it never sends feedback). Since 2.6.1
+  the guide hides again after 5 s without a key action (`PROMPT_TIMEOUT_MS`),
+  and a left step taken before that is forgotten; the next key action shows
+  the guide from step 1.
 - With a Studio frame installed: the left side key is "没啥用" (show the next
   card, `studio_next`) and the right side key is "有用" (keep the card,
   `studio_useful`). Each shows a feedback card (white, 16 px radius, 2-pixel
