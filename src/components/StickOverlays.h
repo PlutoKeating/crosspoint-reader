@@ -62,6 +62,7 @@ enum class Notice : uint8_t {
   PhoneConnected,
   Receiving,
   Refreshing,
+  Resuming,
   Done,
   Failed,
   Syncing,

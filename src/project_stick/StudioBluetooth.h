@@ -49,6 +49,8 @@ struct Link {
   bool setupMode = false;
   size_t received = 0, total = 0;
   uint32_t completed = 0, failed = 0;
+  // A stopped transfer the phone is expected to resume (shown as waiting, not failed).
+  bool resuming = false;
   uint32_t generation = 0;
 };
 Link link();

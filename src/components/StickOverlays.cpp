@@ -235,6 +235,7 @@ bool noticeBusy(const Notice notice) {
   switch (notice) {
     case Notice::Receiving:
     case Notice::Refreshing:
+    case Notice::Resuming:
     case Notice::Syncing:
     case Notice::WifiConnecting:
     case Notice::WifiScanning:
@@ -258,6 +259,9 @@ void drawNotice(const GfxRenderer& renderer, const Notice notice, const int perc
       break;
     case Notice::Refreshing:
       text = tr(STR_LINK_REFRESHING);
+      break;
+    case Notice::Resuming:
+      text = tr(STR_LINK_RESUMING);
       break;
     case Notice::Done:
       text = tr(STR_LINK_DONE);

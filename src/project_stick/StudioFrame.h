@@ -40,6 +40,12 @@ class StudioFrame {
   bool hasContent() const;
   Snapshot displaySnapshot() const;
   bool busy() const;
+  // Card usage for the capacity check and the phone's metrics. The free-cluster
+  // scan behind it reads the whole FAT (seconds on a large card), so only
+  // refreshStorageUsage() scans — called from the background worker when no
+  // transfer runs — and storageUsage() returns the last reading (false: none yet).
+  static bool storageUsage(uint64_t& total, uint64_t& used);
+  static void refreshStorageUsage();
   size_t received() const;
   // Bytes of this exact transfer already on the SD card, from the RAM copy of
   // the partial-transfer record, so a BLE callback can answer `begin` without

@@ -230,6 +230,8 @@ void ProjectStickActivity::updateNotice(const uint32_t nowMs) {
     percent = link.total ? static_cast<int>(std::min<uint64_t>(100, uint64_t(link.received) * 100 / link.total)) : 0;
   } else if (link.transfer == studio_ble::Transfer::Refreshing) {
     next = Notice::Refreshing;
+  } else if (link.resuming) {
+    next = Notice::Resuming;
   } else if (bleWifiActive) {
     next = Notice::WifiConnecting;
   } else if (bleScanActive) {

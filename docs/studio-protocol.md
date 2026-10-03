@@ -179,9 +179,17 @@ card's `incoming.bin`, so a program of any size costs no heap. A chunk waits
 up to 6 s for a slot (the phone's write deadline is 8 s); longer main-loop
 stalls fail the transfer as `device_busy`. Since 2.6.2 the first failure is
 what STATUS keeps: chunks still in flight after it are dropped instead of
-overwriting the cause with `unauthorized_or_invalid_chunk`, and no SD usage
-scan (`freeClusterCount`, seconds on a large card) runs while a transfer is
-receiving — the STATE metrics reuse a reading taken when idle. STATUS `received` while
+overwriting the cause with `unauthorized_or_invalid_chunk`. Since 2.6.5 the
+card usage scan (`freeClusterCount`, seconds on a large card) runs only on the
+background worker (20 s after boot, then every 10 min, never while a phone is
+connected); `StudioFrame::start()` and the STATE metrics read its last value
+and never scan, so `begin` no longer stalls the main loop while the first
+chunks arrive (that scan was the "fails at 2 %" report). A stop the phone
+resumes on its own — `device_busy`, `offset_mismatch`, `transfer_timeout`, a
+dropped link — is shown on the device as 「传输暂停，正在等待手机续传」 and
+only becomes 「传输中断」 after 45 s without a new `begin`; the mini program
+reconnects and resumes the same task up to five times (1.5 s apart) before it
+tells the user anything. STATUS `received` while
 `receiving` is the number of bytes accepted from the phone (queued chunks
 included), so the phone's progress check after each burst still matches; a
 later storage failure shows up as `failed` on the next read, and a retry

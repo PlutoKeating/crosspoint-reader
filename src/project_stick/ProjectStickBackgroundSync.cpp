@@ -1,4 +1,6 @@
 #include "ProjectStickBackgroundSync.h"
+#include "StudioFrame.h"
+#include "StudioBluetooth.h"
 
 #include <Logging.h>
 
@@ -92,8 +94,20 @@ void ProjectStickBackgroundSync::taskTrampoline(void* context) {
 }
 
 void ProjectStickBackgroundSync::taskLoop() {
+  // Housekeeping between jobs: the card usage scan (whole FAT, seconds) runs
+  // here, never on the UI loop, and only while no phone is connected.
+  constexpr uint32_t FIRST_HOUSEKEEPING_MS = 20UL * 1000UL, HOUSEKEEPING_MS = 10UL * 60UL * 1000UL;
+  uint32_t housekeepingWaitMs = FIRST_HOUSEKEEPING_MS;
   while (true) {
-    ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+    if (ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(housekeepingWaitMs)) == 0) {
+      if (!StudioFrame::instance().busy() && !studio_ble::connected()) {
+        StudioFrame::refreshStorageUsage();
+        housekeepingWaitMs = HOUSEKEEPING_MS;
+      } else {
+        housekeepingWaitMs = FIRST_HOUSEKEEPING_MS;  // try again once the phone is gone
+      }
+      continue;
+    }
 
     WorkKind kind = WorkKind::None;
     ProjectStickService::FirmwareTarget target;

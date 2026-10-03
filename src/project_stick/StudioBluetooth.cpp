@@ -54,6 +54,14 @@ std::string startError, advertisedAs, address;
 int startErrorCode = 0;
 uint32_t starts = 0, startFailures = 0, connections = 0, advertisingRestarts = 0;
 uint32_t completedTransfers = 0, failedTransfers = 0;
+// A transfer stopped in a way the phone resumes on its own (a stall, a dropped
+// link, an offset mismatch): the UI shows "waiting for the phone" instead of a
+// failure, and only after RESUME_WAIT_MS without a new `begin` counts it as failed.
+constexpr uint32_t RESUME_WAIT_MS = 45UL * 1000UL;
+uint32_t resumeWaitSinceMs = 0;
+void awaitResume() {
+  if (resumeWaitSinceMs == 0) resumeWaitSinceMs = millis() ? millis() : 1;
+}
 uint32_t lastConnectMs = 0, lastDisconnectMs = 0;
 bool everConnected = false, everDisconnected = false;
 size_t transferTotal = 0;
@@ -151,8 +159,8 @@ void requestAbortLocked(const bool discard) {
   pendingDiscard = pendingDiscard || discard;
 }
 void resetSession() {
-  if (authenticated && state == "receiving") ++failedTransfers;  // the phone left mid-transfer
-  if (authenticated) requestAbortLocked(false);                 // keep the partial for a resume
+  if (authenticated && state == "receiving") awaitResume();  // the phone left mid-transfer; it reconnects and resumes
+  if (authenticated) requestAbortLocked(false);              // keep the partial for a resume
   dropQueueLocked();
   queuedEnd = announcedOffset = 0;
   ++sessionId;
@@ -185,7 +193,12 @@ void fail(const char* reason, const bool discard = true) {
   // after a failure would otherwise overwrite it (the 2.6.0 reports all read
   // "unauthorized_or_invalid_chunk" whatever had actually gone wrong).
   if (state == "failed" && !error.empty()) return;
-  if (authenticated && (state == "receiving" || state == "refreshing")) ++failedTransfers;
+  if (authenticated && (state == "receiving" || state == "refreshing")) {
+    if (discard)
+      ++failedTransfers;
+    else
+      awaitResume();
+  }
   error = reason;
   state = "failed";
   if (authenticated) {
@@ -553,6 +566,7 @@ class Callbacks final : public NimBLECharacteristicCallbacks {
       mbedtls_aes_init(&aes);
       mbedtls_aes_setkey_enc(&aes, encryptionKey, 256);
       authenticated = true;
+      resumeWaitSinceMs = 0;  // the phone is back (same task resumes, or a new one starts)
       task = incomingTask;
       hash = incomingHash;
       taskExpires = expires;
@@ -834,6 +848,7 @@ Link link() {
   }
   result.completed = completedTransfers;
   result.failed = failedTransfers;
+  result.resuming = resumeWaitSinceMs != 0 && !(isConnected && authenticated);
   result.generation = linkGeneration.load();
   return result;
 }
@@ -959,6 +974,7 @@ void pump() {
       continue;
     }
     state = "refreshing";
+    resumeWaitSinceMs = 0;
     ++completedTransfers;
     changed();
   }
@@ -982,13 +998,18 @@ void tick() {
     if (isConnected && now - lastActivity > 30000 && state == "receiving") {
       dropQueueLocked();
       requestAbortLocked(false);
-      ++failedTransfers;
+      awaitResume();
       error = "transfer_timeout";
       state = "paused";
       stalled = connectionHandle;
       changed();
     } else if (isConnected && state != "receiving" && now - lastActivity > IDLE_LINK_TIMEOUT_MS) {
       stalled = connectionHandle;
+    }
+    if (resumeWaitSinceMs && now - resumeWaitSinceMs >= RESUME_WAIT_MS && !(isConnected && authenticated)) {
+      resumeWaitSinceMs = 0;
+      ++failedTransfers;  // the phone never came back: now it is a failure the user should see
+      changed();
     }
   }
   if (!start && !watch && stalled == 0xffff) return;

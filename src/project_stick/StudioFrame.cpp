@@ -1,5 +1,7 @@
 #include "StudioFrame.h"
 
+#include <atomic>
+
 #include <ArduinoJson.h>
 #include <GfxRenderer.h>
 
@@ -128,6 +130,24 @@ void StudioFrame::load() {
     break;
   }
 }
+namespace {
+// Written by refreshStorageUsage() (worker task), read anywhere; a torn read of
+// a stale pair only affects a capacity estimate.
+std::atomic<uint64_t> usageTotal{0}, usageUsed{0};
+std::atomic<bool> usageValid{false};
+}  // namespace
+bool StudioFrame::storageUsage(uint64_t& total, uint64_t& used) {
+  total = usageTotal.load(std::memory_order_relaxed);
+  used = usageUsed.load(std::memory_order_relaxed);
+  return usageValid.load(std::memory_order_acquire);
+}
+void StudioFrame::refreshStorageUsage() {
+  const uint64_t total = Storage.totalBytes();
+  const uint64_t used = total ? Storage.usedBytes() : 0;
+  usageTotal.store(total, std::memory_order_relaxed);
+  usageUsed.store(used, std::memory_order_relaxed);
+  usageValid.store(total > 0, std::memory_order_release);
+}
 bool StudioFrame::start(const std::string& task, const std::string& hash, int64_t expires, size_t size) {
   std::lock_guard<std::recursive_mutex> lock(mutex);
   if (receiving || task.size() != 36 || !validHash(hash) || size < BYTES || size > MAX_BYTES) return false;
@@ -168,8 +188,11 @@ bool StudioFrame::start(const std::string& task, const std::string& hash, int64_
     Storage.remove(TEMP);
     partial = {};
   }
-  const uint64_t total = Storage.totalBytes(), used = Storage.usedBytes();
-  if (total <= used || total - used < size - offset + 65536) {
+  // Capacity check from the worker's last reading: a scan here would stall the
+  // main loop (and the chunk queue) for seconds right after `begin`. Without a
+  // reading the write itself reports a full card.
+  uint64_t total = 0, used = 0;
+  if (storageUsage(total, used) && (total <= used || total - used < size - offset + 65536)) {
     mbedtls_sha256_free(&sha);
     return false;
   }
