@@ -32,6 +32,12 @@ jobs:
           key: pio-${{ runner.os }}-${{ hashFiles('platformio.ini') }}
           restore-keys: pio-${{ runner.os }}-
 
+      # The framework core must be on disk before the build: the pre: patch
+      # script fixes its BT flag, and the custom_sdkconfig scaffold link
+      # needs that fix (see scripts/patch_arduino_bt_controller.py).
+      - name: Install platform packages
+        run: pio pkg install -e gh_release_rc
+
       - name: Extract env
         run: |
           echo "SHORT_SHA=${GITHUB_SHA::7}" >> $GITHUB_ENV
