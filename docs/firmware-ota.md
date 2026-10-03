@@ -123,9 +123,9 @@ python3 scripts/firmware_release.py --build --notes RELEASE_NOTES.md \
 |---|---|
 | 写完新镜像、切换启动槽之前 | 记录旧槽、目标槽、目标版本，`armed=true` |
 | 每次启动（`setup()` 最早阶段） | 运行在旧槽 → 记为回滚（`bootloader_rollback`）；上一次是 panic/看门狗复位 → 失败次数 +1；达到 3 次 → 切回旧槽并重启（`repeated_crash`）。掉电、欠压复位和深睡唤醒不计入。计数写入 NVS 后即向 bootloader 标记镜像有效，之后由应用层计数负责 |
-| 运行中（主循环） | 任意一次 StockStick API 返回 HTTP 状态 → 确认；同一次 Wi-Fi 连接期间，API 请求周期在传输层失败（每 30 秒最多计 1 次，Wi-Fi 断开即清零）累计 ≥ 5 次且首末相隔 ≥ 5 分钟 → 回滚（`cloud_unreachable`）；从未联网且运行满 2 分钟 → 确认；超过 60 分钟仍无结论 → 确认。刷写进行中不做判定 |
+| 运行中（主循环） | 任意一次 StockStick API 返回 HTTP 状态 → 确认；手机经蓝牙完成一次签名的 `sync` 操作（2.6.0）→ 确认（`phone_ok`）；同一次 Wi-Fi 连接期间，API 请求周期在传输层失败（每 30 秒最多计 1 次，Wi-Fi 断开即清零）累计 ≥ 5 次且首末相隔 ≥ 5 分钟 → 回滚（`cloud_unreachable`）；从未联网且运行满 2 分钟 → 确认；超过 60 分钟仍无结论 → 确认。刷写进行中不做判定 |
 | 正常进入深度睡眠 | 视为健康，确认 |
-| 下一次注册 | 回滚结果作为事件 `firmware_rolled_back`（`payload.detail` = "<版本> <原因>"）上报 |
+| 下一次同步 | 回滚结果作为事件 `firmware_rolled_back`（`payload.detail` = "<版本> <原因>"）上报：优先由手机经蓝牙 STATE 的 `ota_outcome` 中继到 `/api/v1/miniapp/studio/devices/state`，否则随下一次注册心跳 |
 
 `verifyRollbackLater()` 返回 true，Arduino 不再在 `initArduino()` 中自动确认镜像，而是由
 `ota_trial::onBoot()` 在写入计数后调用 `esp_ota_mark_app_valid_cancel_rollback()`。
@@ -145,6 +145,7 @@ PENDING_VERIFY 状态下的**任何**复位都当作失败；若把确认推迟�
 | `GET <API 基址>/firmware/<version>/stockstick-<version>.bin` | 网站静态托管的镜像，支持 `Range`；设备不带凭据直接下载 |
 | `POST /api/v2/device/events` | 回滚事件 `firmware_rolled_back` |
 | `POST /api/v2/device/register` | 以新 `firmware_version` 注册即表示升级完成 |
+| `POST /api/v1/miniapp/studio/devices/state`（手机调用） | 手机读取蓝牙 STATE 后中继：新 `firmware_version`、运行指标、回滚事件；6 小时内有过手机同步的设备不再自行注册 |
 
 ## 8. 迁移与已知限制
 

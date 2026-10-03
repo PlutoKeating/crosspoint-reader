@@ -11,6 +11,7 @@ void ProjectStickStore::toJson(JsonDocument& doc) const {
   doc["poll_interval_seconds"] = pollIntervalSeconds;
   doc["alert_poll_interval_seconds"] = alertPollIntervalSeconds;
   doc["is_trading_day"] = tradingDay;
+  if (lastPhoneSyncUtc > 0) doc["last_phone_sync"] = lastPhoneSyncUtc;
   if (alertUntil.valid) {
     doc["alert_until_day"] = alertUntil.day;
     doc["alert_until_second"] = alertUntil.secondOfDay;
@@ -41,6 +42,7 @@ bool ProjectStickStore::fromJson(JsonVariantConst doc) {
   pollIntervalSeconds = std::clamp<uint32_t>(doc["poll_interval_seconds"] | 300, 30, 86400);
   alertPollIntervalSeconds = std::clamp<uint32_t>(doc["alert_poll_interval_seconds"] | 30, 10, 3600);
   tradingDay = doc["is_trading_day"] | false;
+  lastPhoneSyncUtc = doc["last_phone_sync"] | int64_t(0);
   alertUntil.day = doc["alert_until_day"] | 0;
   alertUntil.secondOfDay = doc["alert_until_second"] | 0;
   alertUntil.valid = alertUntil.day != 0 && alertUntil.secondOfDay < 86400;

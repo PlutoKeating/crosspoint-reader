@@ -65,7 +65,10 @@ Only a bound device holding a device token talks to the cloud; an unbound device
 requests at all. All requests use `Authorization: Bearer <device_token>`:
 
 - `POST /api/v2/device/register`: heartbeat every 6 h and on coming online
-  (retried no faster than `poll_interval_seconds`). Returns `bound`, `owner_id`,
+  (retried no faster than `poll_interval_seconds`) — **only when no phone has
+  synced the device over BLE within the last 6 h** (2.6.0, "Phone-relayed
+  sync" below; `last_phone_sync` in `project_stick.json`). Closing the device's
+  Wi-Fi screen still forces one. Returns `bound`, `owner_id`,
   `server_time`, `is_trading_day`, `alert_poll_interval_seconds` and
   `bluetooth: {secret, epoch}`. `bound: false` or a 401 drops the credential,
   the Studio data and the BLE authority: the device is back in BLE setup mode.
@@ -79,7 +82,8 @@ requests at all. All requests use `Authorization: Bearer <device_token>`:
   trading windows (see project-stick.md "Market alerts").
 - `POST /api/v2/device/events`: batched Studio feedback (`studio_next`,
   `studio_useful`) and `firmware_rolled_back` (`payload.detail` = "<version>
-  <reason>"), sent after a heartbeat; queue capped at 32.
+  <reason>"), sent after a heartbeat; queue capped at 32. Since 2.6.0 the
+  phone drains the same queue over BLE first (STATE `events` + `sync` `ack`).
 - `GET /api/v2/device/firmware/latest` on a manual 「检查更新」, then a direct
   download of the catalogue `url` (see OTA below).
 
@@ -174,6 +178,41 @@ the main loop performs `start`/`append`/`commit`. STATUS `received` while
 included), so the phone's progress check after each burst still matches; a
 later storage failure shows up as `failed` on the next read, and a retry
 resumes from what actually reached the card.
+
+## Phone-relayed sync (since 2.6.0, BLE-first)
+
+Everything the heartbeat used to carry goes through the phone, which is always
+at hand when content is pushed (Project.StockStick `docs/product/BLE-ONLY-DELIVERY.md`):
+
+- STATE characteristic `9fe10004…` (read, ≤ 512 bytes, no proof): built on the
+  UI loop (`ProjectStickService::phoneStateJson`, refreshed every 2 s while a
+  phone is connected, every 30 s otherwise; GATT reads only copy it). Fields:
+  `v` (1), `firmware_version`, `firmware_build`, `capabilities{ble,ota,panel}`,
+  `metrics{heap_free,heap_min,heap_max_alloc,uptime_ms,wifi_rssi,battery_percent,sd_total,sd_used}`
+  (the register metrics, SD values only with a card), `clock` (trusted time
+  held), `bound`, `trading`, `synced` (Unix seconds of the last phone sync, 0
+  never), `pending` (queued event count), `events[{id,type,ts?,task?,card?,detail?}]`
+  (oldest first, as many as fit in 512 bytes) and `ota_outcome{version,rolled_back,reason}`
+  while a trial outcome is unreported.
+- Op `sync` (bound mode): `{op:"sync", time, trading, ack:[ids], ota_ack, proof}`
+  with proof `mac(secret, "sync3|n|time|trading|<ack count>|<ota_ack 0/1>")`.
+  The phone sends it after `POST /api/v1/miniapp/studio/devices/state`
+  accepted the STATE it read: `time` is the server clock (adopted like
+  `begin`'s `time`, and it also becomes the working server time), `trading`
+  the server's trading-day flag (-1 unknown), `ack` the event ids the cloud
+  stored (removed from the queue), `ota_ack` clears the outcome. The device
+  records `last_phone_sync`, restarts the heartbeat interval and, during a
+  trial boot, confirms the image (`phone_ok`). The phone re-reads STATE and
+  repeats while `pending` > 0.
+- Op `unbind` (bound mode): `{op:"unbind", proof: mac(secret, "unbind3|n")}`,
+  sent by the owner's phone right after `DELETE /api/v1/miniapp/devices`
+  succeeded; the device drops the binding exactly like `bound:false`.
+
+Trading-hours alert polling is unchanged: alerts are market events the phone
+cannot relay in time. A rotated BLE authority (ownership transfer, collaborator
+revoke) still reaches the device through register: the phone's transfer fails
+with an epoch mismatch, which is not a successful sync, so the heartbeat is not
+suppressed; the user can also close the Wi-Fi screen to force one.
 
 The same service runs BLE setup protocol 3 (since 2.3.0; unbound devices, key from
 the setup QR) and accepts `scan`/`wifi` and (since 2.4.0) `ota` ops in bound mode;

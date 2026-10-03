@@ -85,6 +85,12 @@ std::string otaMessage(const std::string& nonce, const std::string& version, con
   return "ota3|" + nonce + "|" + version + "|" + sha256 + "|" + std::to_string(bytes) + "|" + url;
 }
 
+std::string syncMessage(const std::string& nonce, int64_t time, int trading, size_t ackCount, bool otaAck) {
+  return "sync3|" + nonce + "|" + std::to_string(time) + "|" + std::to_string(trading) + "|" +
+         std::to_string(ackCount) + "|" + (otaAck ? "1" : "0");
+}
+std::string unbindMessage(const std::string& nonce) { return "unbind3|" + nonce; }
+
 std::string setupQrPayload(const std::string& deviceId, const std::string& keyHex) {
   return "stockstick://setup?d=" + deviceId + "&k=" + keyHex;
 }

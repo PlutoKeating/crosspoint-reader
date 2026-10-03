@@ -38,6 +38,13 @@ std::string bindMessage(const std::string& nonce, const std::string& owner, uint
 // BLE-triggered OTA (Project.StockStick docs/product/BLE-ONLY-DELIVERY.md).
 std::string otaMessage(const std::string& nonce, const std::string& version, const std::string& sha256, size_t bytes,
                        const std::string& url);
+// Phone-relayed sync (since 2.6.0, BLE-first): the phone uploaded the STATE
+// characteristic to the cloud and hands back the server clock, the trading-day
+// flag, how many pending events it acknowledges and whether the OTA outcome
+// was taken. `trading` is -1 (unknown), 0 or 1.
+std::string syncMessage(const std::string& nonce, int64_t time, int trading, size_t ackCount, bool otaAck);
+// The owner unbound the device in the mini program while standing next to it.
+std::string unbindMessage(const std::string& nonce);
 
 // stockstick://setup?d=<device_id>&k=<K>; 94 characters (QR version 5-L, byte mode).
 std::string setupQrPayload(const std::string& deviceId, const std::string& keyHex);

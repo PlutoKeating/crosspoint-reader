@@ -33,6 +33,9 @@ class ProjectStickStore : public PersistableStore<ProjectStickStore> {
   uint32_t pollIntervalSeconds = 300;
   uint32_t alertPollIntervalSeconds = 30;
   bool tradingDay = false;
+  // Unix seconds of the last BLE `sync` op a phone completed (BLE-first,
+  // 2.6.0): while younger than the heartbeat interval no cloud heartbeat runs.
+  int64_t lastPhoneSyncUtc = 0;
   // End of the latest market alert; the Studio program shows its alert scene until then.
   project_stick::ShanghaiTime alertUntil;
   std::vector<int64_t> seenAlertIds;

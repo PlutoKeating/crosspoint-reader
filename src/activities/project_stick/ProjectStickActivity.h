@@ -87,12 +87,19 @@ class ProjectStickActivity final : public Activity {
   uint32_t lastSyncAttemptMs = 0;
   uint32_t lastAlertPollMs = 0;
   uint32_t lastRegisterMs = 0;
+  // BLE STATE characteristic refresh: often while a phone is connected, rarely otherwise.
+  static constexpr uint32_t STATE_REFRESH_LINKED_MS = 2000;
+  static constexpr uint32_t STATE_REFRESH_IDLE_MS = 30000;
+  uint32_t lastStateRefreshMs = 0;
+  void refreshBleState(uint32_t nowMs);
 #ifdef SIMULATOR
   bool simulatorAlertPollPending = false;
 #endif
 
   void applyBackgroundResult();
-  bool requestCloudSync();
+  // The cloud heartbeat; skipped while a phone sync is fresh unless `manual`
+  // (the user closed the Wi-Fi screen, which is an explicit "sync now").
+  bool requestCloudSync(bool manual = false);
   void updateState(const project_stick::SyncReport& report);
   void launchWifiSelection();
 };

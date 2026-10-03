@@ -33,6 +33,10 @@ void disarm();
 // transport/TLS failure. Safe to call from any task.
 void noteApiResult(int httpStatus, bool wifiConnected);
 
+// A phone completed an authenticated BLE sync (2.6.0): BLE, storage and the
+// store work, which confirms the image like an API response would.
+void notePhoneSync();
+
 // Call from the main loop; confirms or rolls back when the policy decides.
 void tick(bool wifiConnected);
 

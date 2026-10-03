@@ -118,6 +118,13 @@ TEST(ProjectStickSyncState, FailedRegistrationRemainsDueAtTheNextPoll) {
   EXPECT_FALSE(registrationDue(5UL * 60UL * 1000UL, 60UL * 1000UL));
   EXPECT_FALSE(registrationDue(4UL * 60UL * 60UL * 1000UL + 1, 1));
   EXPECT_TRUE(registrationDue(6UL * 60UL * 60UL * 1000UL + 1, 1));
+  // A phone sync within the heartbeat interval replaces the cloud heartbeat.
+  EXPECT_FALSE(phoneSyncFresh(0, 1759482000));
+  EXPECT_FALSE(phoneSyncFresh(1759482000, 0));
+  EXPECT_TRUE(phoneSyncFresh(1759482000, 1759482000));
+  EXPECT_TRUE(phoneSyncFresh(1759482000 + 6 * 3600 - 1, 1759482000));
+  EXPECT_FALSE(phoneSyncFresh(1759482000 + 6 * 3600, 1759482000));
+  EXPECT_FALSE(phoneSyncFresh(1759481999, 1759482000));  // clock went backwards
 }
 
 TEST(ProjectStickCore, ParsesProtocolTimesIntoShanghai) {

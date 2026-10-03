@@ -100,6 +100,23 @@ struct OtaRequest {
 };
 bool takeOtaRequest(OtaRequest& out);
 
+// BLE-first sync (2.6.0, Project.StockStick docs/product/BLE-ONLY-DELIVERY.md):
+// the STATE characteristic carries what the cloud heartbeat used to (firmware,
+// metrics, pending events, an OTA outcome); the phone uploads it and answers
+// with op `sync`. The activity builds the JSON (it may read the SD card and
+// the store) and hands it over here; GATT reads only copy it.
+void setState(std::string json);
+struct SyncRequest {
+  int64_t time = 0;  // phone/server clock, Unix seconds, 0 when absent
+  int trading = -1;  // -1 unknown, 0 not a trading day, 1 trading day
+  std::vector<std::string> ack;  // event ids the cloud accepted
+  bool otaAck = false;           // the OTA outcome was uploaded
+};
+bool takeSyncRequest(SyncRequest& out);
+// Op `unbind` (bound mode): the owner unbound the device in the mini program
+// while next to it; the activity drops the binding like a `bound:false`.
+bool takeUnbindRequest();
+
 enum class WifiState { Idle, Connecting, Connected, Failed };
 void reportWifi(WifiState state, const std::string& ssid, const char* error = "");
 void reportScan(bool scanning, std::vector<ble_setup::Network> networks = {});

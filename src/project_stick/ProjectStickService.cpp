@@ -102,6 +102,31 @@ void describeFirmware(JsonDocument& request) {
   capabilities["panel"] = gpio.deviceIsX3() ? "xteink_x3" : "xteink_x4";
 }
 
+// Field telemetry: the next heap or radio problem is visible server-side.
+// Names match the register route's accepted metrics; the BLE STATE
+// characteristic carries the same object so the phone can relay it.
+void describeMetrics(JsonObject metrics) {
+  metrics["heap_free"] = ESP.getFreeHeap();
+  metrics["heap_min"] = ESP.getMinFreeHeap();
+  metrics["heap_max_alloc"] = ESP.getMaxAllocHeap();
+  metrics["uptime_ms"] = millis();
+  metrics["wifi_rssi"] = WiFi.status() == WL_CONNECTED ? WiFi.RSSI() : 0;
+  metrics["battery_percent"] = powerManager.getBatteryPercentage();
+  // SdFat caches the free-cluster scan; the values are 0 without a card.
+  const uint64_t total = Storage.totalBytes();
+  if (total) {
+    metrics["sd_total"] = total;
+    metrics["sd_used"] = Storage.usedBytes();
+  }
+}
+
+// Unix seconds when the system clock is trusted, else from the server clock, else 0.
+int64_t trustedUnixNow(const project_stick::ShanghaiTime& fallback) {
+  const std::time_t wall = std::time(nullptr);
+  if (wall >= 1735689600) return static_cast<int64_t>(wall);
+  return fallback.valid ? fallback.day * 86400LL + fallback.secondOfDay - 8 * 3600 : 0;
+}
+
 bool trustedClockReady() {
 #ifndef SIMULATOR
   if (std::time(nullptr) >= 1735689600) return true;
@@ -289,15 +314,7 @@ bool ProjectStickService::registerDevice(int& status) {
     request["device_id"] = PROJECT_STICK_STORE.deviceId;
   }
   describeFirmware(request);
-  // Field telemetry: the next heap or radio problem is visible server-side.
-  // Names match the register route's accepted metrics.
-  JsonObject metrics = request["metrics"].to<JsonObject>();
-  metrics["heap_free"] = ESP.getFreeHeap();
-  metrics["heap_min"] = ESP.getMinFreeHeap();
-  metrics["heap_max_alloc"] = ESP.getMaxAllocHeap();
-  metrics["uptime_ms"] = millis();
-  metrics["wifi_rssi"] = WiFi.RSSI();
-  metrics["battery_percent"] = powerManager.getBatteryPercentage();
+  describeMetrics(request["metrics"].to<JsonObject>());
   std::string body;
   serializeJson(request, body);
 
@@ -1052,6 +1069,102 @@ void ProjectStickService::importSimulatorProgram() {
   LOG_INF("STICK", "Simulator program import %s (%u bytes)", installed ? "installed" : "failed", (unsigned)size);
 }
 #endif
+
+// STATE characteristic (≤ 512 bytes): firmware identity and capabilities,
+// metrics, clock/trading-day state, the last phone sync, pending events (as
+// many as fit, oldest first; `pending` is the full count) and an unreported
+// OTA outcome. The phone uploads it to the cloud and acknowledges with `sync`.
+std::string ProjectStickService::phoneStateJson() {
+  JsonDocument doc;
+  doc["v"] = 1;
+  describeFirmware(doc);
+  describeMetrics(doc["metrics"].to<JsonObject>());
+  doc["clock"] = trustedUnixNow(serverTime) > 0;
+  std::vector<ProjectStickEvent> events;
+  {
+    ProjectStickStateLock lock(projectStickStateMutex);
+    const auto& s = PROJECT_STICK_STORE;
+    doc["bound"] = s.bound;
+    doc["trading"] = s.tradingDay;
+    doc["synced"] = s.lastPhoneSyncUtc;
+    doc["pending"] = s.pendingEvents.size();
+    events = s.pendingEvents;
+  }
+  if (ota_trial::hasPendingOutcome()) {
+    const auto outcome = ota_trial::pendingOutcome();
+    if (outcome.pending) {
+      JsonObject out = doc["ota_outcome"].to<JsonObject>();
+      out["version"] = outcome.version;
+      out["rolled_back"] = outcome.rolledBack;
+      out["reason"] = outcome.reason;
+    }
+  }
+  JsonArray list = doc["events"].to<JsonArray>();
+  for (const auto& event : events) {
+    JsonObject obj = list.add<JsonObject>();
+    obj["id"] = event.id;
+    obj["type"] = event.type;
+    if (!event.clientTs.empty()) obj["ts"] = event.clientTs;
+    if (!event.studioTask.empty()) {
+      obj["task"] = event.studioTask;
+      obj["card"] = event.studioCard;
+    }
+    if (!event.detail.empty()) obj["detail"] = event.detail;
+    if (measureJson(doc) > ble_setup::STATUS_LIMIT) {
+      list.remove(list.size() - 1);
+      break;
+    }
+  }
+  std::string json;
+  serializeJson(doc, json);
+  return json;
+}
+
+void ProjectStickService::applyPhoneSync(const studio_ble::SyncRequest& request) {
+  // The phone hands over the server clock it just received; a device without
+  // a trusted clock adopts it, one with a clock only corrects a drift > 30 s.
+  if (request.time >= 1735689600 && request.time < 4102444800LL) {
+    adoptSystemTime(request.time);
+    const std::time_t utc = static_cast<std::time_t>(request.time);
+    std::tm parts{};
+    project_stick::ShanghaiTime parsed;
+    if (gmtime_r(&utc, &parts) &&
+        project_stick::shanghaiFromUtc(parts.tm_year + 1900, parts.tm_mon + 1, parts.tm_mday, parts.tm_hour,
+                                       parts.tm_min, parts.tm_sec, parsed)) {
+      serverTime = parsed;
+      serverTimeCapturedMs = millis();
+    }
+  }
+  const int64_t syncedAt = request.time > 0 ? request.time : trustedUnixNow(serverTime);
+  {
+    ProjectStickStateLock lock(projectStickStateMutex);
+    auto& s = PROJECT_STICK_STORE;
+    if (request.trading >= 0) s.tradingDay = request.trading == 1;
+    for (const auto& id : request.ack) {
+      s.pendingEvents.erase(std::remove_if(s.pendingEvents.begin(), s.pendingEvents.end(),
+                                           [&id](const ProjectStickEvent& event) { return event.id == id; }),
+                            s.pendingEvents.end());
+    }
+    if (syncedAt > 0) s.lastPhoneSyncUtc = syncedAt;
+    s.saveToFile();
+  }
+  if (request.otaAck) ota_trial::clearOutcome();
+  // A phone that completed an authenticated sync proves the image works.
+  ota_trial::notePhoneSync();
+  LOG_INF("STICK", "Phone sync applied (acked=%u trading=%d synced=%lld)", (unsigned)request.ack.size(),
+          request.trading, (long long)syncedAt);
+}
+
+void ProjectStickService::unbindFromPhone() {
+  LOG_INF("STICK", "Unbound by the phone over BLE");
+  dropBinding();
+}
+
+bool ProjectStickService::phoneSyncFresh() const {
+  const int64_t nowUtc = trustedUnixNow(serverTime);
+  ProjectStickStateLock lock(projectStickStateMutex);
+  return project_stick::phoneSyncFresh(nowUtc, PROJECT_STICK_STORE.lastPhoneSyncUtc);
+}
 
 void ProjectStickService::sendStudioFeedback(const std::string& task, const std::string& card, bool useful) {
   ProjectStickStateLock lock(projectStickStateMutex);

@@ -5,6 +5,8 @@
 #include <ProjectStickSyncState.h>
 #include <SecureHttpClient.h>
 
+#include "StudioBluetooth.h"
+
 #include <cstdint>
 #include <functional>
 #include <string>
@@ -52,6 +54,17 @@ class ProjectStickService {
   void installFirmware(const FirmwareTarget& target);
   void sendStudioFeedback(const std::string& task, const std::string& card, bool useful);
   bool refreshOwnership();
+
+  // BLE-first sync (2.6.0, docs/studio-protocol.md "Phone-relayed sync"): the
+  // phone reads STATE, uploads it and answers with op `sync`. UI loop only
+  // (store writes, SD usage, OTA outcome in NVS).
+  std::string phoneStateJson();
+  void applyPhoneSync(const studio_ble::SyncRequest& request);
+  // Op `unbind`: the owner unbound the device in the mini program next to it.
+  void unbindFromPhone();
+  // True while the last phone sync is younger than the heartbeat interval: the
+  // cloud heartbeat (register + events) is skipped, Wi-Fi stays for alerts.
+  bool phoneSyncFresh() const;
 
   const Display& display() const { return currentDisplay; }
   Display displaySnapshot() const;

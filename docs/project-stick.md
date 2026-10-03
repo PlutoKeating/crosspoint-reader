@@ -38,7 +38,10 @@ built in Simplified Chinese; other languages load from SD-card packs.
    Bluetooth. See "BLE setup" below. The token is persisted on SD but never
    written to logs or rendered.
 4. A bound device sends the `/api/v2/device/register` heartbeat every 6 hours
-   and on coming online; it returns `bound`, `owner_id`, `server_time`,
+   and on coming online, unless a phone synced it over BLE within the last
+   6 hours (2.6.0, "Phone-relayed sync" in studio-protocol.md: the phone
+   relays firmware, metrics and events and hands back clock and trading day);
+   it returns `bound`, `owner_id`, `server_time`,
    `is_trading_day`, the alert interval and the current BLE authority (a
    rotated key is adopted, see "Cloud requests" in studio-protocol.md). A successful registration corrects
    the working clock. `bound: false` (unbound in the mini program) or a 401
@@ -52,7 +55,8 @@ built in Simplified Chinese; other languages load from SD-card packs.
    the official plan over BLE right after binding, so this screen is normally
    transient.
 6. Studio feedback events (`studio_next`, `studio_useful`) and firmware
-   rollbacks are persisted in the state file and uploaded after a heartbeat;
+   rollbacks are persisted in the state file and drained by the phone over BLE
+   (STATE `events`, `sync` `ack`) or, failing that, uploaded after a heartbeat;
    the queue is capped at 32.
 
 ## BLE setup (protocol 3, since 2.3.0)
@@ -104,8 +108,12 @@ and `ProjectStickActivity::tickBleSetup` (applies queued work).
   download; STATUS `ota` reports `queued`/`downloading`/…/`failed` with the
   error, and bound STATUS carries `fw` so the phone can confirm the new version
   after the restart.
+- `sync` / `unbind` (bound mode only, 2.6.0): the phone relays the STATE
+  characteristic to the cloud and acknowledges it, or drops the binding after
+  an unbind in the mini program; see "Phone-relayed sync" in studio-protocol.md.
 - Cloud requests wait while a phone is connected over BLE; the offline->online
-  edge and the first registration after a BLE bind run once it disconnects.
+  edge and the first registration after a BLE bind run once it disconnects,
+  and not at all while a phone sync is fresh.
 - `studio_ble::revoke()` is a no-op in setup mode. The desktop/web simulator has
   no radio but still renders the setup QR.
 

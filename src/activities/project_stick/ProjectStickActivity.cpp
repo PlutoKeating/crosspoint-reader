@@ -90,9 +90,12 @@ void ProjectStickActivity::onEnter() {
 }
 
 // Register heartbeat (plus events and an OTA outcome) of a bound device.
-// Content never comes from the cloud; unbound devices make no requests.
-bool ProjectStickActivity::requestCloudSync() {
+// Content never comes from the cloud; unbound devices make no requests. Since
+// 2.6.0 the phone relays the same data over BLE (STATE + op `sync`), so the
+// heartbeat only runs when no phone has synced within the heartbeat interval.
+bool ProjectStickActivity::requestCloudSync(bool manual) {
   if (WiFi.status() != WL_CONNECTED || ProjectStickService::apiBlocked() || !service.hasCredential()) return false;
+  if (!manual && service.phoneSyncFresh()) return false;
   const bool queued = PROJECT_STICK_BACKGROUND_SYNC.requestSync();
   if (queued) lastSyncAttemptMs = millis();
   return queued;
@@ -255,6 +258,7 @@ void ProjectStickActivity::loop() {
   updateFeedbackBubble();
   service.syncClock();
   tickBleSetup();
+  refreshBleState(millis());
   updateNotice(millis());
   if (service.refreshOwnership()) requestUpdate();
   auto& frame = StudioFrame::instance();
@@ -391,6 +395,23 @@ void ProjectStickActivity::tickBleSetup() {
     requestUpdate();
   }
 
+  studio_ble::SyncRequest sync;
+  if (studio_ble::takeSyncRequest(sync)) {
+    RenderLock lock;
+    service.applyPhoneSync(sync);
+    // The phone relayed the heartbeat: restart the cloud interval from here.
+    lastRegisterMs = millis();
+    lock.unlock();
+    refreshBleState(0);
+    requestUpdate();
+  }
+  if (studio_ble::takeUnbindRequest()) {
+    RenderLock lock;
+    service.unbindFromPhone();
+    lock.unlock();
+    requestUpdate();
+  }
+
   studio_ble::WifiRequest wifi;
   if (studio_ble::takeWifiRequest(wifi)) startBleWifi(wifi.ssid, wifi.password);
   if (bleWifiActive) pollBleWifi();
@@ -486,11 +507,20 @@ void ProjectStickActivity::pollBleScan() {
   if (WiFi.status() != WL_CONNECTED) wifiAutoConnect.retrySoon();
 }
 
+// Publishes the STATE characteristic (firmware, metrics, pending events, OTA
+// outcome) the phone reads during a BLE session. `nowMs == 0` forces a refresh.
+void ProjectStickActivity::refreshBleState(uint32_t nowMs) {
+  const uint32_t interval = studio_ble::connected() ? STATE_REFRESH_LINKED_MS : STATE_REFRESH_IDLE_MS;
+  if (nowMs != 0 && lastStateRefreshMs != 0 && nowMs - lastStateRefreshMs < interval) return;
+  lastStateRefreshMs = nowMs ? nowMs : millis();
+  studio_ble::setState(service.phoneStateJson());
+}
+
 void ProjectStickActivity::launchWifiSelection() {
   startActivityForResult(std::make_unique<WifiSelectionActivity>(renderer, mappedInput, false),
                          [this](const ActivityResult&) {
                            wifiAutoConnect.retrySoon();
-                           requestCloudSync();
+                           requestCloudSync(true);
                            requestUpdate();
                          });
 }

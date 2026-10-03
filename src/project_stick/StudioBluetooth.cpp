@@ -30,6 +30,7 @@ constexpr const char* SERVICE = "9fe10000-6bc2-4ce7-8e62-77262df32ef1";
 constexpr const char* CONTROL = "9fe10001-6bc2-4ce7-8e62-77262df32ef1";
 constexpr const char* DATA = "9fe10002-6bc2-4ce7-8e62-77262df32ef1";
 constexpr const char* STATUS = "9fe10003-6bc2-4ce7-8e62-77262df32ef1";
+constexpr const char* STATE = "9fe10004-6bc2-4ce7-8e62-77262df32ef1";
 constexpr const char* CREDENTIALS = "/.crosspoint/studio/ble.json";
 // Lock rules (a violation can freeze the NimBLE host and with it every cloud
 // request): `mutex` guards this file's state and is taken by the NimBLE host
@@ -96,6 +97,10 @@ BindState bindState = BindState::None;
 std::optional<Binding> pendingBinding;
 std::optional<WifiRequest> pendingWifi;
 std::optional<OtaRequest> pendingOta;
+std::optional<SyncRequest> pendingSync;
+bool pendingUnbind = false;
+// STATE characteristic value, built on the UI loop (setState) and copied by onRead.
+std::string stateJson = "{}";
 bool scanRequested = false;
 WifiState wifiState = WifiState::Idle;
 std::string wifiSsid, wifiError, scanState = "idle";
@@ -343,6 +348,33 @@ bool handleSetupOp(const std::string& op, JsonDocument& doc) {
     pendingOta = std::move(request);
     return true;
   }
+  if (op == "sync") {
+    if (sessionSetup) return reject("invalid_control");
+    SyncRequest request;
+    request.time = doc["time"] | int64_t(0);
+    request.trading = doc["trading"] | -1;
+    request.otaAck = doc["ota_ack"] | false;
+    JsonArrayConst ack = doc["ack"].as<JsonArrayConst>();
+    if (!equalProof(proof, mac(ble_setup::syncMessage(nonce, request.time, request.trading, ack.size(),
+                                                      request.otaAck))))
+      return reject("authorization_failed");
+    if (request.trading < -1 || request.trading > 1 || ack.size() > 32) return reject("invalid_control");
+    request.ack.reserve(ack.size());
+    for (JsonVariantConst entry : ack) {
+      const char* id = entry.as<const char*>();
+      if (id && *id) request.ack.emplace_back(id);
+    }
+    error.clear();
+    pendingSync = std::move(request);
+    return true;
+  }
+  if (op == "unbind") {
+    if (sessionSetup) return reject("invalid_control");
+    if (!equalProof(proof, mac(ble_setup::unbindMessage(nonce)))) return reject("authorization_failed");
+    error.clear();
+    pendingUnbind = true;
+    return true;
+  }
   return false;
 }
 class ServerCallbacks final : public NimBLEServerCallbacks {
@@ -383,6 +415,10 @@ class Callbacks final : public NimBLECharacteristicCallbacks {
     std::lock_guard<std::recursive_mutex> lock(mutex);
     if (info.getConnHandle() != connectionHandle) return;
     lastActivity = millis();  // a phone polling STATUS is an active session
+    if (characteristic->getUUID() == NimBLEUUID(STATE)) {
+      characteristic->setValue(stateJson);
+      return;
+    }
     characteristic->setValue(statusJson());
   }
   // DATA: one encrypted chunk. Waits for a queue slot without holding `mutex`
@@ -633,6 +669,7 @@ bool startRadioLocked() {
   service->createCharacteristic(CONTROL, NIMBLE_PROPERTY::WRITE, 512)->setCallbacks(&callbacks);
   service->createCharacteristic(DATA, NIMBLE_PROPERTY::WRITE, 244)->setCallbacks(&callbacks);
   service->createCharacteristic(STATUS, NIMBLE_PROPERTY::READ, 512)->setCallbacks(&callbacks);
+  service->createCharacteristic(STATE, NIMBLE_PROPERTY::READ, 512)->setCallbacks(&callbacks);
   if (!server->start()) {
     failStartLocked("gatt", 0);
     return false;
@@ -1053,6 +1090,24 @@ bool takeOtaRequest(OtaRequest& out) {
   pendingOta.reset();
   return true;
 }
+void setState(std::string json) {
+  std::lock_guard<std::recursive_mutex> lock(mutex);
+  if (json.size() > ble_setup::STATUS_LIMIT) json = "{}";
+  stateJson = std::move(json);
+}
+bool takeSyncRequest(SyncRequest& out) {
+  std::lock_guard<std::recursive_mutex> lock(mutex);
+  if (!pendingSync) return false;
+  out = std::move(*pendingSync);
+  pendingSync.reset();
+  return true;
+}
+bool takeUnbindRequest() {
+  std::lock_guard<std::recursive_mutex> lock(mutex);
+  const bool requested = pendingUnbind;
+  pendingUnbind = false;
+  return requested;
+}
 void reportWifi(WifiState state, const std::string& ssid, const char* reason) {
   std::lock_guard<std::recursive_mutex> lock(mutex);
   wifiState = state;
@@ -1140,6 +1195,9 @@ void finishBinding(bool, const Binding&) {}
 bool takeWifiRequest(WifiRequest&) { return false; }
 bool takeScanRequest() { return false; }
 bool takeOtaRequest(OtaRequest&) { return false; }
+void setState(std::string) {}
+bool takeSyncRequest(SyncRequest&) { return false; }
+bool takeUnbindRequest() { return false; }
 void reportWifi(WifiState, const std::string&, const char*) {}
 void reportScan(bool, std::vector<ble_setup::Network>) {}
 }  // namespace studio_ble

@@ -70,6 +70,13 @@ TEST(BleSetupProtocol, OtaProof) {
   EXPECT_EQ(ble_setup::mac(SECRET, message), "a379b3f844093dddde5017052e1e0108f899fbda3a36d91c0427dc0c6985e75b");
 }
 
+TEST(BleSetupProtocol, SyncAndUnbindMessages) {
+  EXPECT_EQ(ble_setup::syncMessage(N, 1759482000, 1, 2, true), "sync3|" + N + "|1759482000|1|2|1");
+  EXPECT_EQ(ble_setup::syncMessage(N, 0, -1, 0, false), "sync3|" + N + "|0|-1|0|0");
+  EXPECT_EQ(ble_setup::unbindMessage(N), "unbind3|" + N);
+  EXPECT_EQ(ble_setup::mac(SECRET, ble_setup::syncMessage(N, 0, -1, 0, false)).size(), 64u);
+}
+
 TEST(BleSetupProtocol, AuthorityValidation) {
   EXPECT_TRUE(ble_setup::validAuthority(SECRET, 1));
   EXPECT_TRUE(ble_setup::validAuthority(SECRET, 4294967295LL));

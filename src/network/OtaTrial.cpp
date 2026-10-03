@@ -26,6 +26,7 @@ constexpr const char* NS = "stick_ota";
 portMUX_TYPE healthMux = portMUX_INITIALIZER_UNLOCKED;
 bool trialActive = false;
 bool apiResponded = false;
+bool phoneSynced = false;
 bool everOnline = false;
 uint8_t transportFailures = 0;
 uint32_t firstFailureMs = 0;
@@ -215,6 +216,12 @@ void noteApiResult(int httpStatus, bool wifiConnected) {
   taskEXIT_CRITICAL(&healthMux);
 }
 
+void notePhoneSync() {
+  taskENTER_CRITICAL(&healthMux);
+  if (trialActive) phoneSynced = true;
+  taskEXIT_CRITICAL(&healthMux);
+}
+
 void tick(bool wifiConnected) {
   stick_fw::HealthInputs inputs;
   taskENTER_CRITICAL(&healthMux);
@@ -222,8 +229,9 @@ void tick(bool wifiConnected) {
   // points at the network, not at the image.
   if (!wifiConnected) transportFailures = 0;
   const bool running = trialActive;
+  const bool viaPhone = phoneSynced && !apiResponded;
   inputs.uptimeMs = millis();
-  inputs.apiResponded = apiResponded;
+  inputs.apiResponded = apiResponded || phoneSynced;
   inputs.everOnline = everOnline;
   inputs.transportFailures = transportFailures;
   inputs.failureSpanMs = transportFailures ? lastFailureMs - firstFailureMs : 0;
@@ -239,7 +247,7 @@ void tick(bool wifiConnected) {
   }
   Preferences prefs;
   if (prefs.begin(NS, false)) {
-    saveOutcome(prefs, false, inputs.apiResponded ? "api_ok" : "offline_uptime");
+    saveOutcome(prefs, false, viaPhone ? "phone_ok" : inputs.apiResponded ? "api_ok" : "offline_uptime");
     finishTrial(prefs);
     prefs.end();
   }
@@ -247,7 +255,8 @@ void tick(bool wifiConnected) {
   taskENTER_CRITICAL(&healthMux);
   trialActive = false;
   taskEXIT_CRITICAL(&healthMux);
-  LOG_INF("OTA", "Firmware %s confirmed (%s)", trialVersion, inputs.apiResponded ? "API reachable" : "offline");
+  LOG_INF("OTA", "Firmware %s confirmed (%s)", trialVersion,
+          viaPhone ? "phone sync" : inputs.apiResponded ? "API reachable" : "offline");
 }
 
 void onCleanShutdown() {
