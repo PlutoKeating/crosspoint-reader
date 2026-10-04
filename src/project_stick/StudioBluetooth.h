@@ -7,7 +7,8 @@
 
 // Studio BLE service, the only content channel (Project.StockStick
 // docs/product/BLE-ONLY-DELIVERY.md). Bound devices use the secret delivered
-// at bind time: protocol 2 frames/programs, Wi-Fi setup and OTA triggers.
+// at bind time: protocol 4 frame/program transfers (docs/product/BLE-TRANSFER-V4.md),
+// Wi-Fi setup and OTA triggers.
 // Unbound devices run setup mode (protocol 3, docs/product/BLE-SETUP.md): the
 // phone scans the setup QR (device id + one-time key K), binds the device to
 // its account and pushes Wi-Fi credentials. The device cloud bearer is never
@@ -28,6 +29,10 @@ bool adoptAuthority(const std::string& deviceId, const std::string& secret, uint
 bool releaseRadio();
 void restoreRadio();
 void begin();
+// Starts the transfer writer task (static stack); call once from setup().
+void startWriter();
+// Unused stack of the writer task in bytes (0 when not running).
+uint32_t writerStackFree();
 void tick();
 bool connected();
 

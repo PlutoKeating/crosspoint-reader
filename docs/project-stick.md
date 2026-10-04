@@ -87,14 +87,17 @@ and `ProjectStickActivity::tickBleSetup` (applies queued work).
   progress bar, verifying, done/failed, Wi-Fi join and scan, cloud heartbeat.
   Busy notices animate once per `NOTICE_FRAME_MS`.
 - Unbound: setup mode keyed with K; bound: the secret delivered
-  by `bind` (protocol 2 `begin`/`commit`, plus `scan`/`wifi`/`ota`).
+  by `bind` (transfer protocol 4 `begin4`/DATA/`commit`, see studio-protocol.md,
+  plus `scan`/`wifi`/`ota`).
 - Each connection pins its key. After `bind` the live setup session keeps K
   until the phone disconnects, so the phone can bind and then push Wi-Fi in one
   connection; the next connection is in bound mode.
-- Content transfers: the callbacks decrypt into a static chunk queue and
-  `studio_ble::pump()` (called from `studio_ble::tick()` in the main loop, so
-  it runs on every page) writes to the card; see memory-budget.md for the
-  2.4.3 host-task stack overflow this removed.
+- Content transfers (protocol 4, 2.7.0): the callbacks decrypt into a static
+  chunk queue and `studio_ble::pump()` on the `StudioWriter` task (static
+  stack, created in `setup()`) rebuilds the program through `StudioReceiver`:
+  only frames the device lacks arrive, deflate-compressed; held frames are
+  copied from the kept program files. See memory-budget.md for the 2.4.3
+  host-task stack overflow that keeps SD I/O out of the callbacks.
 - NimBLE callbacks only verify and queue. The activity loop applies a bind
   (`ProjectStickService::applyBleBinding`: token, owner, `bound=true`; then the
   BLE credential is persisted by `studio_ble::finishBinding`), a Wi-Fi join (saved to `WifiCredentialStore` and marked last
@@ -238,7 +241,10 @@ no BLE radio, so content is provisioned by the host before `setup()`
   token, so the simulator shows content and makes no cloud requests at all.
 - `program` (base64 SSP1; natively also `program_path`, a raw file): written
   to `/.crosspoint/studio/import.ssp`. A SIMULATOR firmware build installs it
-  at startup through the same `StudioFrame` path BLE uses, then deletes it.
+  at startup through `StudioFrame` (the same install and verification BLE
+  ends in), then deletes it. `import.v4` + `import.v4.json` instead feed a
+  decrypted protocol 4 stream through `StudioReceiver` (test hook, see
+  studio-protocol.md).
 
 `CROSSPOINT_SIM_FORCE_ALERT_WINDOW=1` lets alert polling run outside trading
 hours, `CROSSPOINT_SIM_POLL_ALERT_ONCE=1` polls alerts once after the first

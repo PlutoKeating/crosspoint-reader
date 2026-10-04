@@ -79,6 +79,35 @@ esp_timer 4 KB, FreeRTOS timers 2.5 KB. None of the app tasks does recursion;
 the largest stack objects are SdFat long-name paths and the 512-byte resume
 buffer in `StudioFrame::start()`.
 
+## 2.7.0: BLE transfer protocol 4
+
+Static RAM, release ELF (`riscv32-esp-elf-size -A`), 2.6.5 → 2.7.0:
+
+| Section | 2.6.5 | 2.7.0 |
+|---|---|---|
+| `.iram0.text` | 86,936 | 86,936 |
+| `.dram0.data` | 17,601 | 17,625 |
+| `.dram0.bss` | 51,040 | 66,424 (+15,384) |
+
+| New static object | Bytes | Why static |
+|---|---|---|
+| `StudioWriter` task stack + TCB | 6,144 + 348 | created in `setup()` like the sync worker, so it cannot fail on a fragmented heap; deepest path is a commit (verify block, program JSON, state write) |
+| Chunk queue, 16 × 510-byte slots | 8,256 (was ~3,900) | one MTU-517 write per slot, matching the phone's 8 KB window; the host callback never allocates |
+| `FrameInflater` (uzlib state, 1 KB dictionary, 512 B out, 256 B in) | 3,084 | one per receiver; the phone's deflate window is ≤ 1 KB, so the 32 KB streaming dictionary `InflateReader` would allocate is not needed |
+| Receiver copy block, `StudioFrame::start` rehash block | 512 + 512 | moved off the task stacks |
+
+Transient heap per transfer: the incoming header JSON while resolving frames
+(the SSP1 header, ~3.5 KB for 17 frames, `makeUniqueNoThrow`, checked against
+the largest free block) and 32 bytes per frame for the digests; each kept
+program header is parsed the same way, one at a time. While NimBLE is up its
+host now has 20 mbufs and 20 controller ACL buffers (library default 12/12,
+about +4 KB) so ~6 MTU-sized writes can be in flight; NimBLE is still released
+for TLS, so the cloud-request heap only loses the static +15 KB.
+
+Verify on the device: the log line `Transfer installed (… writes dropped,
+writer stack free N)` after a push (N should stay above ~1 KB), and
+`[MEM] Free/MaxAlloc` with NimBLE up and with it released before a request.
+
 ## Where the RAM goes
 
 Static, from `riscv32-esp-elf-size -A` on the release ELF (2.4.2 → 2.4.3):

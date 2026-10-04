@@ -6,6 +6,7 @@
 #include "FirmwareUpdateState.h"
 #include "StudioBluetooth.h"
 #include "StudioFrame.h"
+#include "StudioReceiver.h"
 #include "network/FirmwareFlasher.h"
 #include "network/OtaTrial.h"
 // WiFi.h also has a simulator shim; the trial health signal needs link state on both.
@@ -205,6 +206,7 @@ void ProjectStickService::begin() {
   StudioFrame::instance().load();
 #ifdef SIMULATOR
   importSimulatorProgram();
+  importSimulatorStream();
 #endif
   currentDisplay.alertUntil = PROJECT_STICK_STORE.alertUntil;
 }
@@ -1079,6 +1081,77 @@ void ProjectStickService::importSimulatorProgram() {
   }
   Storage.remove(IMPORT);
   LOG_INF("STICK", "Simulator program import %s (%u bytes)", installed ? "installed" : "failed", (unsigned)size);
+}
+
+// Test hook for the BLE transfer protocol 4 receiver (no radio in the
+// simulator): /.crosspoint/studio/import.v4 holds a decrypted stream and
+// import.v4.json its begin4 fields {task, hash, size, header[, stop_at]}.
+// The stream goes through the same StudioReceiver/StudioFrame path as BLE.
+// With stop_at, the first pass stops there (link lost), then resumes from
+// the receiver's resume point with the stream's remaining records.
+void ProjectStickService::importSimulatorStream() {
+  constexpr char STREAM[] = "/.crosspoint/studio/import.v4";
+  constexpr char META[] = "/.crosspoint/studio/import.v4.json";
+  HalFile metaFile;
+  if (!Storage.exists(META) || !Storage.openFileForRead("STUDIO", META, metaFile)) return;
+  JsonDocument meta;
+  const bool parsed = !deserializeJson(meta, metaFile);
+  metaFile.close();
+  HalFile file;
+  if (!parsed || !Storage.openFileForRead("STUDIO", STREAM, file)) return;
+  const size_t length = file.size();
+  auto stream = makeUniqueNoThrow<uint8_t[]>(length);
+  const bool loaded = stream && file.read(stream.get(), length) == static_cast<int>(length);
+  file.close();
+  Storage.remove(STREAM);
+  Storage.remove(META);
+  if (!loaded) return;
+  const std::string task = meta["task"] | "", hash = meta["hash"] | "";
+  const size_t size = meta["size"] | size_t(0), header = meta["header"] | size_t(0);
+  const size_t stopAt = meta["stop_at"] | size_t(0);
+  auto& receiver = StudioReceiver::instance();
+  auto feed = [&](size_t from, size_t to) {
+    for (size_t at = from; at < to;) {
+      const size_t n = std::min<size_t>(509, to - at);
+      if (!receiver.feed(stream.get() + at, n)) return false;
+      at += n;
+    }
+    return true;
+  };
+  // Stream offset of frame `index`'s record (or the end) in the full stream.
+  auto recordStart = [&](size_t index) {
+    size_t at = header;
+    while (at + 6 <= length) {
+      const size_t frame = size_t(stream[at]) | size_t(stream[at + 1]) << 8;
+      if (frame >= index) return at;
+      at += 6 + (size_t(stream[at + 2]) | size_t(stream[at + 3]) << 8 | size_t(stream[at + 4]) << 16 |
+                 size_t(stream[at + 5]) << 24);
+    }
+    return length;
+  };
+  auto resume = StudioReceiver::resumeFor(header, size, StudioFrame::instance().resumeOffset(task, hash, size));
+  bool ok = receiver.start(task, hash, 0, size, header, resume);
+  LOG_INF("STICK", "v4 import: start %s, resume offset %u frames %u, need %s (%u)", ok ? "ok" : "failed",
+          (unsigned)resume.offset, (unsigned)resume.framesDone, receiver.needHex().c_str(),
+          (unsigned)receiver.needCount());
+  const size_t first = resume.framesDone ? recordStart(resume.framesDone) : resume.offset;
+  if (ok && stopAt && stopAt < length) {
+    ok = feed(first, stopAt);
+    receiver.abort(false);  // the link dropped: keep the partial
+    resume = StudioReceiver::resumeFor(header, size, StudioFrame::instance().resumeOffset(task, hash, size));
+    LOG_INF("STICK", "v4 import: stopped at %u, partial %u bytes -> resume offset %u frames %u", (unsigned)stopAt,
+            (unsigned)StudioFrame::instance().resumeOffset(task, hash, size), (unsigned)resume.offset,
+            (unsigned)resume.framesDone);
+    ok = ok && receiver.start(task, hash, 0, size, header, resume);
+    LOG_INF("STICK", "v4 import: resumed, need %s (%u)", receiver.needHex().c_str(), (unsigned)receiver.needCount());
+    ok = ok && feed(resume.headerDone ? recordStart(resume.framesDone) : 0, length);
+  } else if (ok) {
+    ok = feed(first, length);
+  }
+  ok = ok && receiver.commit();
+  if (!ok) receiver.abort(true);
+  LOG_INF("STICK", "v4 import %s: %u stream bytes for %u bytes (%s)", ok ? "installed" : "failed", (unsigned)length,
+          (unsigned)size, studio_v4::errorName(receiver.error()));
 }
 #endif
 

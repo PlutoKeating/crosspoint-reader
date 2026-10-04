@@ -11,6 +11,9 @@
 #include "FirmwareUpdateState.h"
 #include "StudioFrame.h"
 #ifndef SIMULATOR
+#include <StudioTransfer.h>
+
+#include "StudioReceiver.h"
 #include <optional>
 
 #include <Arduino.h>
@@ -31,6 +34,10 @@ constexpr const char* CONTROL = "9fe10001-6bc2-4ce7-8e62-77262df32ef1";
 constexpr const char* DATA = "9fe10002-6bc2-4ce7-8e62-77262df32ef1";
 constexpr const char* STATUS = "9fe10003-6bc2-4ce7-8e62-77262df32ef1";
 constexpr const char* STATE = "9fe10004-6bc2-4ce7-8e62-77262df32ef1";
+constexpr const char* PROGRESS = "9fe10005-6bc2-4ce7-8e62-77262df32ef1";
+// ATT MTU the phone asks for (protocol 4); DATA carries MTU - 3 bytes.
+constexpr uint16_t ATT_MTU = 517;
+constexpr size_t MAX_PAYLOAD = ATT_MTU - 3 - 4;
 constexpr const char* CREDENTIALS = "/.crosspoint/studio/ble.json";
 // Lock rules (a violation can freeze the NimBLE host and with it every cloud
 // request): `mutex` guards this file's state and is taken by the NimBLE host
@@ -67,28 +74,53 @@ bool everConnected = false, everDisconnected = false;
 size_t transferTotal = 0;
 // NimBLE host callbacks run on a small stack and must never touch the SD card
 // (the 2.4.3 crash: a FAT long-name open from onWrite overflowed it). They
-// verify, decrypt and queue; pump(), on the UI loop, does the StudioFrame I/O.
+// verify, decrypt and queue; pump(), on the dedicated writer task, runs the
+// protocol 4 receiver (inflate, frame copies, SD writes), so an e-paper
+// refresh on the UI loop never stalls reception.
 struct Chunk {
   uint32_t offset;
   uint16_t length;
-  uint8_t bytes[240];
+  uint8_t bytes[MAX_PAYLOAD];
 };
-// 16 slots (~4 KB static) ride out a main-loop stall of a few seconds (an
-// e-paper refresh plus an SD read); the wait stays under the phone's 8 s
-// write deadline so a real stall fails the transfer, not the link.
+// 16 slots of one MTU-sized write (~8 KB static), matching the phone's 8 KB
+// window (BLE-TRANSFER-V4 §7). DATA arrives as Write Without Response, so the
+// host task never waits for a slot: a write that finds the queue full is
+// dropped and the phone resends from the last PROGRESS `received`. PROGRESS
+// notifications are held back while the queue is over half full, which is
+// what paces the phone.
 constexpr size_t QUEUE_SLOTS = 16;
-constexpr uint32_t QUEUE_WAIT_MS = 6000;
 Chunk chunkQueue[QUEUE_SLOTS];
-size_t queueHead = 0, queueCount = 0;    // under `mutex`
-size_t queuedEnd = 0, announcedOffset = 0;  // bytes accepted from the phone; offset promised at `begin`
-SemaphoreHandle_t queueSpace = nullptr;  // free slots: taken by the host task, given by pump() or a drop
-uint32_t sessionId = 0;                  // bumps on every resetSession; pump() drops stale results
+size_t queueHead = 0, queueCount = 0;       // under `mutex`
+size_t queuedEnd = 0, announcedOffset = 0;  // bytes accepted from the phone; offset promised at `begin4`
+uint32_t sessionId = 0;                     // bumps on every resetSession; pump() drops stale results
 enum class PendingOp : uint8_t { None, Start, Commit };
 PendingOp pendingOp = PendingOp::None;
 std::string pendingTask, pendingHash;
 int64_t pendingExpires = 0;
-size_t pendingSize = 0;
+size_t pendingSize = 0, pendingHeader = 0;
+StudioReceiver::Resume pendingResume;
 bool pendingAbort = false, pendingDiscard = false;
+// Protocol 4 progress (PROGRESS characteristic and STATUS `need`).
+NimBLECharacteristic* progressChar = nullptr;  // under `mutex`; null while the stack is down
+uint32_t progressSeq = 0;
+size_t lastNotified = 0, transferHeader = 0;
+uint32_t packetsSinceNotify = 0, droppedWrites = 0, lastGapNotifyMs = 0;
+bool progressPending = false;  // progress the phone has not been told about yet
+// offset_mismatch is reported once, on the notification right after a dropped
+// out-of-order write (BLE-TRANSFER-V4 §7), never as a sticky STATUS error.
+bool gapReported = false;
+// Nonce rotation for link reuse: after a transfer ends (displayed, scheduled,
+// failed) and the phone has read that outcome once, the next STATUS read at
+// least ROTATE_AFTER_MS later starts a fresh session (new N, new hello) on
+// the same connection; the phone reuses a link only when N changed.
+constexpr uint32_t ROTATE_AFTER_MS = 2000;
+uint32_t outcomeAtMs = 0;
+bool outcomeRead = false;
+bool framesPhase = false;      // header resolved: `need` is known
+std::string needValue;
+uint16_t needCount = 0;
+size_t rebuiltBytes = 0;  // bytes of the rebuilt file on the card (device progress bar)
+TaskHandle_t writerTask = nullptr;
 // Bumped on every radio/session change the UI should repaint for.
 std::atomic<uint32_t> linkGeneration{0};
 void changed() { linkGeneration.fetch_add(1); }
@@ -149,7 +181,7 @@ bool equalProof(const std::string& a, const std::string& b) {
 }
 // Caller holds `mutex`. Returns every queued chunk's slot and forgets queued ops.
 void dropQueueLocked() {
-  for (; queueCount; --queueCount) xSemaphoreGive(queueSpace);
+  queueCount = 0;
   queueHead = 0;
   pendingOp = PendingOp::None;
 }
@@ -162,7 +194,14 @@ void resetSession() {
   if (authenticated && state == "receiving") awaitResume();  // the phone left mid-transfer; it reconnects and resumes
   if (authenticated) requestAbortLocked(false);              // keep the partial for a resume
   dropQueueLocked();
-  queuedEnd = announcedOffset = 0;
+  queuedEnd = announcedOffset = lastNotified = 0;
+  packetsSinceNotify = 0;
+  progressPending = framesPhase = gapReported = outcomeRead = false;
+  outcomeAtMs = 0;
+  needValue.clear();
+  needCount = 0;
+  rebuiltBytes = 0;
+  transferHeader = 0;
   ++sessionId;
   transferTotal = 0;
   changed();
@@ -201,6 +240,8 @@ void fail(const char* reason, const bool discard = true) {
   }
   error = reason;
   state = "failed";
+  outcomeAtMs = millis() ? millis() : 1;
+  outcomeRead = false;
   if (authenticated) {
     dropQueueLocked();
     requestAbortLocked(discard);
@@ -256,6 +297,92 @@ std::string finishStatus(JsonDocument& doc) {
   serializeJson(doc, result);
   return scanState == "done" ? ble_setup::withNetworks(result, networks) : result;
 }
+// A finished transfer's outcome, from the installed content: `displayed` once
+// the frame is on the panel, `scheduled` for a program with no current card.
+StudioFrame::Snapshot refreshOutcomeLocked() {
+  auto snapshot = StudioFrame::instance().snapshot();
+  if (authenticated && snapshot.task == task && state != "receiving" && state != "failed") {
+    const char* outcome = snapshot.displayed ? "displayed"
+                          : snapshot.size > StudioFrame::BYTES && snapshot.card.empty() ? "scheduled"
+                                                                                          : nullptr;
+    if (outcome && state != outcome) {
+      state = outcome;
+      outcomeAtMs = millis() ? millis() : 1;
+      outcomeRead = false;
+    }
+  }
+  return snapshot;
+}
+studio_v4::State progressStateLocked() {
+  if (state == "failed") return studio_v4::State::Failed;
+  if (state == "paused") return studio_v4::State::Paused;
+  if (!authenticated) return studio_v4::State::Idle;
+  if (state == "receiving") return framesPhase ? studio_v4::State::ReceivingFrames : studio_v4::State::ReceivingHeader;
+  if (state == "refreshing") return studio_v4::State::Committing;
+  if (state == "displayed") return studio_v4::State::Displayed;
+  if (state == "scheduled") return studio_v4::State::Scheduled;
+  return studio_v4::State::Idle;
+}
+// PROGRESS value (16 bytes, BLE-TRANSFER-V4 §5); marks it as reported.
+void buildProgressLocked(uint8_t out[studio_v4::PROGRESS_BYTES]) {
+  if (authenticated && state == "refreshing") refreshOutcomeLocked();
+  studio_v4::encodeProgress(out, static_cast<uint32_t>(queuedEnd), progressStateLocked(),
+                            studio_v4::errorFromName(error), needCount, ++progressSeq);
+  if (gapReported) {
+    out[5] = static_cast<uint8_t>(studio_v4::Error::OffsetMismatch);
+    gapReported = false;
+  }
+  lastNotified = queuedEnd;
+  packetsSinceNotify = 0;
+  progressPending = false;
+}
+// Notifies PROGRESS. From a NimBLE host callback the stack is up by
+// definition; app tasks go through notifyProgress(), which holds radioMutex so
+// the stack cannot be torn down underneath the call. `mutex` is never held
+// across the NimBLE call (lock rules above).
+void notifyProgressUnguarded() {
+  uint8_t value[studio_v4::PROGRESS_BYTES];
+  NimBLECharacteristic* characteristic = nullptr;
+  uint16_t handle = 0xffff;
+  {
+    std::lock_guard<std::recursive_mutex> lock(mutex);
+    if (!isConnected || !progressChar || released) return;
+    buildProgressLocked(value);
+    characteristic = progressChar;
+    handle = connectionHandle;
+  }
+  characteristic->notify(value, sizeof(value), handle);
+}
+void notifyProgress() {
+  std::unique_lock<std::mutex> radio(radioMutex, std::try_to_lock);
+  if (!radio.owns_lock()) {
+    std::lock_guard<std::recursive_mutex> lock(mutex);
+    progressPending = true;  // the next drain or tick reports it
+    return;
+  }
+  notifyProgressUnguarded();
+}
+// Link parameters for a transfer (BLE-TRANSFER-V4 §3): 2M PHY, 251-byte link
+// layer packets and a 7.5-15 ms interval; relaxed to 30-50 ms afterwards.
+// Phones that refuse keep their own values. Host-callback or radioMutex context.
+void fastLink(uint16_t handle) {
+  auto* server = NimBLEDevice::getServer();
+  if (!server || handle == 0xffff) return;
+  server->updatePhy(handle, BLE_GAP_LE_PHY_2M_MASK, BLE_GAP_LE_PHY_2M_MASK, 0);
+  server->setDataLen(handle, 251);
+  server->updateConnParams(handle, 6, 12, 0, 400);
+}
+void relaxLink() {
+  std::unique_lock<std::mutex> radio(radioMutex, std::try_to_lock);
+  if (!radio.owns_lock()) return;
+  uint16_t handle = 0xffff;
+  {
+    std::lock_guard<std::recursive_mutex> lock(mutex);
+    if (!isConnected || released || !started) return;
+    handle = connectionHandle;
+  }
+  if (auto* server = NimBLEDevice::getServer()) server->updateConnParams(handle, 24, 40, 0, 400);
+}
 std::string statusJson() {
   if (sessionSetup) {
     JsonDocument doc;
@@ -269,20 +396,14 @@ std::string statusJson() {
     doc["proof"] = mac(ble_setup::setupProofMessage(nonce, identity));
     return finishStatus(doc);
   }
-  const auto snapshot = StudioFrame::instance().snapshot();
-  if (authenticated && snapshot.task == task) {
-    if (snapshot.displayed)
-      state = "displayed";
-    else if (snapshot.size > StudioFrame::BYTES && snapshot.card.empty())
-      state = "scheduled";
-  }
+  const auto snapshot = refreshOutcomeLocked();
   JsonDocument doc;
   doc["device_id"] = identity;
   doc["fw"] = CROSSPOINT_VERSION;
   doc["nonce"] = nonce;
   doc["epoch"] = epoch;
   doc["boundary"] = planBoundary;
-  doc["protocol"] = 2;
+  doc["protocol"] = 4;
   doc["base_task"] = baseTask;
   doc["expires"] = taskExpires;
   doc["state"] = state;
@@ -290,6 +411,7 @@ std::string statusJson() {
   // which is what its progress check compares against.
   doc["received"] = authenticated && state == "receiving" ? queuedEnd : StudioFrame::instance().received();
   if (!error.empty()) doc["error"] = error;
+  if (framesPhase) doc["need"] = needValue;
   if (state == "displayed" || state == "scheduled") {
     doc["task"] = task;
     doc["hash"] = hash;
@@ -416,7 +538,12 @@ class ServerCallbacks final : public NimBLEServerCallbacks {
         resetSession();
       }
     }
-    if (reject) server->disconnect(info.getConnHandle());
+    if (reject) {
+      server->disconnect(info.getConnHandle());
+      return;
+    }
+    // Most sessions are content pushes: ask for the fast link right away.
+    fastLink(info.getConnHandle());
   }
   void onDisconnect(NimBLEServer*, NimBLEConnInfo& info, int) override {
     bool advertise = false;
@@ -442,159 +569,217 @@ class Callbacks final : public NimBLECharacteristicCallbacks {
       characteristic->setValue(stateJson);
       return;
     }
+    if (characteristic->getUUID() == NimBLEUUID(PROGRESS)) {
+      uint8_t value[studio_v4::PROGRESS_BYTES];
+      buildProgressLocked(value);
+      characteristic->setValue(value, sizeof(value));
+      return;
+    }
+    const bool ended = state == "displayed" || state == "scheduled" || state == "failed";
+    if (ended && outcomeRead && outcomeAtMs && millis() - outcomeAtMs >= ROTATE_AFTER_MS) {
+      resetSession();  // fresh N: the next push may reuse this connection
+    }
     characteristic->setValue(statusJson());
+    if (state == "displayed" || state == "scheduled" || state == "failed") outcomeRead = true;
   }
-  // DATA: one encrypted chunk. Waits for a queue slot without holding `mutex`
-  // (the UI loop needs it to drain the queue); a full queue for QUEUE_WAIT_MS
-  // means the UI task is stuck, and the transfer fails rather than the link.
+  // DATA: one encrypted chunk of the protocol 4 stream (Write Without
+  // Response). Never blocks the host task: a duplicate or out-of-order write
+  // (the phone rewinding its window) and a write that finds the queue full are
+  // dropped, and the phone resends from the last PROGRESS `received`.
   void onData(NimBLECharacteristic* characteristic, NimBLEConnInfo& info) {
     const auto value = characteristic->getValue();
-    uint32_t session = 0;
+    bool notify = false;
     {
       std::lock_guard<std::recursive_mutex> lock(mutex);
       if (info.getConnHandle() != connectionHandle) return;
       lastActivity = millis();
-      if (state == "failed") return;  // in-flight chunks after a failure: drop, keep the recorded cause
-      if (!authenticated || state != "receiving" || value.size() <= 4 || value.size() > 244) {
+      if (state == "failed" || state == "paused") return;  // in-flight writes after a stop: drop, keep the cause
+      if (!authenticated || state != "receiving" || value.size() <= 4 || value.size() > 4 + MAX_PAYLOAD) {
         fail("unauthorized_or_invalid_chunk");
-        return;
+        notify = true;
+      } else {
+        const auto* bytes = reinterpret_cast<const uint8_t*>(value.data());
+        const uint32_t offset =
+            uint32_t(bytes[0]) | uint32_t(bytes[1]) << 8 | uint32_t(bytes[2]) << 16 | uint32_t(bytes[3]) << 24;
+        const uint32_t now = millis();
+        if (offset != queuedEnd) {
+          ++droppedWrites;
+          // A gap means writes were lost: tell the phone where to resume (rate-limited).
+          if (offset > queuedEnd && now - lastGapNotifyMs >= 200) {
+            lastGapNotifyMs = now;
+            gapReported = true;
+            notify = true;
+          }
+        } else if (queueCount == QUEUE_SLOTS) {
+          ++droppedWrites;
+          progressPending = true;
+        } else {
+          Chunk& slot = chunkQueue[(queueHead + queueCount) % QUEUE_SLOTS];
+          slot.offset = offset;
+          slot.length = static_cast<uint16_t>(value.size() - 4);
+          if (mbedtls_aes_crypt_ctr(&aes, slot.length, &counterOffset, counter, stream, bytes + 4, slot.bytes) !=
+              0) {
+            fail("storage_or_cipher_error");
+            notify = true;
+          } else {
+            ++queueCount;
+            queuedEnd += slot.length;
+            ++packetsSinceNotify;
+            if (packetsSinceNotify >= 4 || queuedEnd - lastNotified >= 4096) {
+              if (queueCount <= QUEUE_SLOTS / 2)
+                notify = true;
+              else
+                progressPending = true;  // reported once the writer drains the queue
+            }
+          }
+        }
       }
-      session = sessionId;
     }
-    if (xSemaphoreTake(queueSpace, pdMS_TO_TICKS(QUEUE_WAIT_MS)) != pdTRUE) {
-      std::lock_guard<std::recursive_mutex> lock(mutex);
-      if (session == sessionId && state == "receiving") fail("device_busy", false);
-      return;
+    if (writerTask) xTaskNotifyGive(writerTask);
+    if (notify) notifyProgressUnguarded();
+  }
+  // begin4 (BLE-TRANSFER-V4 §4.2). Caller holds `mutex`. Returns whether the
+  // phone should get a PROGRESS notification now (fresh header phase or a
+  // failure); a resume or a single frame is announced once the writer task
+  // has resolved `need`.
+  bool beginTransferLocked(JsonDocument& doc) {
+    const std::string incomingTask = doc["task"] | "", incomingHash = doc["hash"] | "", proof = doc["proof"] | "";
+    const int64_t expires = doc["expires"] | int64_t(0);
+    const size_t size = doc["size"] | size_t(0), header = doc["header"] | size_t(0);
+    const int64_t phoneTime = doc["time"] | int64_t(0);
+    if (!equalProof(proof, mac(studio_v4::beginMessage(identity, nonce, epoch, incomingTask, incomingHash, expires,
+                                                       size, header, phoneTime)))) {
+      fail("authorization_failed");
+      return true;
     }
-    std::lock_guard<std::recursive_mutex> lock(mutex);
-    if (session != sessionId || state != "receiving") {
-      xSemaphoreGive(queueSpace);
-      return;
+    // Geometry: a single frame, or an SSP1 header plus whole frames (§4.6).
+    const bool single = header == 0;
+    const size_t frames = single ? 1 : (size > header ? (size - header) / studio_v4::FRAME_BYTES : 0);
+    if (single ? size != StudioFrame::BYTES
+               : header < 10 || header > 8 + 32768 || size < header + studio_v4::FRAME_BYTES ||
+                     (size - header) % studio_v4::FRAME_BYTES != 0 || size > StudioFrame::MAX_BYTES) {
+      fail("frame_validation_failed");
+      return true;
     }
-    const auto* bytes = reinterpret_cast<const uint8_t*>(value.data());
-    const uint32_t offset =
-        uint32_t(bytes[0]) | uint32_t(bytes[1]) << 8 | uint32_t(bytes[2]) << 16 | uint32_t(bytes[3]) << 24;
-    if (offset != queuedEnd) {
-      xSemaphoreGive(queueSpace);
-      fail("offset_mismatch", false);  // the card's partial is intact; the retry resumes from it
-      return;
+    if (frames > studio_v4::MAX_FRAMES) {
+      fail("too_many_frames");
+      return true;
     }
-    Chunk& slot = chunkQueue[(queueHead + queueCount) % QUEUE_SLOTS];
-    slot.offset = offset;
-    slot.length = static_cast<uint16_t>(value.size() - 4);
-    if (mbedtls_aes_crypt_ctr(&aes, slot.length, &counterOffset, counter, stream, bytes + 4, slot.bytes) != 0) {
-      xSemaphoreGive(queueSpace);
-      fail("storage_or_cipher_error");
-      return;
+    if (phoneTime >= 1735689600 && phoneTime < 4102444800 && time(nullptr) < 1735689600) {
+      timeval tv{static_cast<time_t>(phoneTime), 0};
+      settimeofday(&tv, nullptr);
     }
-    ++queueCount;
-    queuedEnd += slot.length;
+    const auto active = StudioFrame::instance().snapshot();
+    const bool completed = active.task == incomingTask && active.hash == incomingHash;
+    StudioReceiver::Resume resume;
+    if (!completed) {
+      if (StudioFrame::instance().busy() || pendingOp != PendingOp::None || pendingAbort ||
+          incomingTask.size() != 36) {
+        fail("device_busy");
+        return true;
+      }
+      // The RAM copy of the partial record: no SD access in the host task.
+      resume = StudioReceiver::resumeFor(header, size,
+                                         StudioFrame::instance().resumeOffset(incomingTask, incomingHash, size));
+    }
+    uint8_t encryptionKey[32];
+    if (!unhex(mac("enc|" + nonce), encryptionKey, sizeof(encryptionKey)) ||
+        !unhex(nonce, counter, sizeof(counter))) {
+      fail("authorization_failed");
+      return true;
+    }
+    announcedOffset = queuedEnd = lastNotified = completed ? 0 : resume.offset;
+    if (!completed) {
+      pendingTask = incomingTask;
+      pendingHash = incomingHash;
+      pendingExpires = expires;
+      pendingSize = size;
+      pendingHeader = header;
+      pendingResume = resume;
+      pendingOp = PendingOp::Start;
+    }
+    mbedtls_aes_init(&aes);
+    mbedtls_aes_setkey_enc(&aes, encryptionKey, 256);
+    authenticated = true;
+    resumeWaitSinceMs = 0;  // the phone is back (same task resumes, or a new one starts)
+    task = incomingTask;
+    hash = incomingHash;
+    taskExpires = expires;
+    transferTotal = size;
+    transferHeader = header;
+    framesPhase = false;
+    needValue.clear();
+    needCount = 0;
+    packetsSinceNotify = 0;
+    state = completed ? (active.displayed ? "displayed" : "refreshing") : "receiving";
+    if (state == "displayed") {
+      outcomeAtMs = millis() ? millis() : 1;
+      outcomeRead = false;
+    }
+    changed();
+    // Seek the cipher stream to the resume point.
+    const size_t skip = queuedEnd;
+    uint64_t blocks = skip / 16;
+    for (int i = 15; i >= 0 && blocks; --i) {
+      const uint64_t sum = counter[i] + (blocks & 255);
+      counter[i] = sum & 255;
+      blocks = (blocks >> 8) + (sum >> 8);
+    }
+    if (skip % 16) {
+      uint8_t zero[16]{}, discard[16];
+      mbedtls_aes_crypt_ctr(&aes, skip % 16, &counterOffset, counter, stream, zero, discard);
+    }
+    // A fresh program starts with the header; everything else waits for `need`.
+    return completed || (!single && !resume.headerDone);
   }
   void onWrite(NimBLECharacteristic* characteristic, NimBLEConnInfo& info) override {
     if (characteristic->getUUID() == NimBLEUUID(DATA)) {
       onData(characteristic, info);
       return;
     }
-    std::lock_guard<std::recursive_mutex> lock(mutex);
-    if (info.getConnHandle() != connectionHandle) return;
-    lastActivity = millis();
-    const auto value = characteristic->getValue();
-    if (value.size() + control.size() > 512) {
+    bool notify = false, fast = false;
+    uint16_t handle = 0xffff;
+    {
+      std::lock_guard<std::recursive_mutex> lock(mutex);
+      if (info.getConnHandle() != connectionHandle) return;
+      lastActivity = millis();
+      const auto value = characteristic->getValue();
+      if (value.size() + control.size() > 512) {
+        control.clear();
+        fail("control_too_large");
+        return;
+      }
+      control.append(reinterpret_cast<const char*>(value.data()), value.size());
+      if (control.empty() || control.back() != '\n') return;
+      JsonDocument doc;
+      const auto parseError = deserializeJson(doc, control);
       control.clear();
-      fail("control_too_large");
-      return;
-    }
-    control.append(reinterpret_cast<const char*>(value.data()), value.size());
-    if (control.empty() || control.back() != '\n') return;
-    JsonDocument doc;
-    const auto parseError = deserializeJson(doc, control);
-    control.clear();
-    if (parseError) {
-      fail("invalid_control");
-      return;
-    }
-    const std::string op = doc["op"] | "";
-    if (handleSetupOp(op, doc)) return;
-    if (sessionSetup) {
-      reject("unexpected_control");
-      return;
-    }
-    if (op == "begin" && !authenticated) {
-      const std::string incomingTask = doc["task"] | "", incomingHash = doc["hash"] | "", proof = doc["proof"] | "";
-      const int64_t expires = doc["expires"] | int64_t(0);
-      const size_t size = doc["size"] | StudioFrame::BYTES;
-      const int64_t phoneTime = doc["time"] | int64_t(0);
-      const std::string expected =
-          mac(std::string(doc["size"].isNull() ? "studio1|" : "studio2|") + identity + "|" + nonce + "|" +
-              std::to_string(epoch) + "|" + incomingTask + "|" + incomingHash + "|" + std::to_string(expires) +
-              (doc["size"].isNull() ? "" : "|" + std::to_string(size) + "|" + std::to_string(phoneTime)));
-      if (!equalProof(proof, expected)) {
-        fail("authorization_failed");
+      if (parseError) {
+        fail("invalid_control");
         return;
       }
-      if (phoneTime >= 1735689600 && phoneTime < 4102444800 && time(nullptr) < 1735689600) {
-        timeval tv{static_cast<time_t>(phoneTime), 0};
-        settimeofday(&tv, nullptr);
+      const std::string op = doc["op"] | "";
+      if (handleSetupOp(op, doc)) return;
+      if (sessionSetup) {
+        reject("unexpected_control");
+        return;
       }
-      const auto active = StudioFrame::instance().snapshot();
-      const bool completed = active.task == incomingTask && active.hash == incomingHash;
-      if (!completed) {
-        // The same checks StudioFrame::start() makes without the card; the
-        // start itself runs on the UI loop (pump()).
-        if (StudioFrame::instance().busy() || pendingOp != PendingOp::None || pendingAbort || incomingTask.size() != 36 ||
-            size < StudioFrame::BYTES || size > StudioFrame::MAX_BYTES) {
-          fail("device_busy_or_invalid_frame");
-          return;
-        }
-        announcedOffset = queuedEnd = StudioFrame::instance().resumeOffset(incomingTask, incomingHash, size);
+      if (op == "begin4" && !authenticated) {
+        notify = beginTransferLocked(doc);
+        fast = state == "receiving";
+      } else if (op == "commit" && authenticated && state == "receiving" && pendingOp == PendingOp::None) {
+        // The writer task checks, once every queued chunk is applied, that the
+        // stream delivered every needed frame; STATUS stays "receiving" until then.
+        pendingOp = PendingOp::Commit;
       } else {
-        announcedOffset = queuedEnd = 0;
+        fail("unexpected_control");
+        notify = true;
       }
-      uint8_t encryptionKey[32];
-      if (!unhex(mac("enc|" + nonce), encryptionKey, sizeof(encryptionKey)) ||
-          !unhex(nonce, counter, sizeof(counter))) {
-        fail("invalid_key");
-        return;
-      }
-      if (!completed) {
-        pendingTask = incomingTask;
-        pendingHash = incomingHash;
-        pendingExpires = expires;
-        pendingSize = size;
-        pendingOp = PendingOp::Start;
-      }
-      mbedtls_aes_init(&aes);
-      mbedtls_aes_setkey_enc(&aes, encryptionKey, 256);
-      authenticated = true;
-      resumeWaitSinceMs = 0;  // the phone is back (same task resumes, or a new one starts)
-      task = incomingTask;
-      hash = incomingHash;
-      taskExpires = expires;
-      transferTotal = size;
-      state = completed ? (active.displayed ? "displayed" : "refreshing") : "receiving";
-      changed();
-      size_t skip = completed ? 0 : queuedEnd;
-      uint64_t blocks = skip / 16;
-      for (int i = 15; i >= 0 && blocks; --i) {
-        const uint64_t sum = counter[i] + (blocks & 255);
-        counter[i] = sum & 255;
-        blocks = (blocks >> 8) + (sum >> 8);
-      }
-      if (skip % 16) {
-        uint8_t zero[16]{}, discard[16];
-        mbedtls_aes_crypt_ctr(&aes, skip % 16, &counterOffset, counter, stream, zero, discard);
-      }
-    } else if (op == "commit" && authenticated && state == "receiving") {
-      // Runs on the UI loop once every queued chunk is on the card; STATUS
-      // stays "receiving" until then.
-      if (queuedEnd != transferTotal || pendingOp != PendingOp::None) {
-        fail("frame_validation_failed");
-        return;
-      }
-      pendingOp = PendingOp::Commit;
-    } else {
-      fail("unexpected_control");
+      handle = connectionHandle;
     }
+    if (writerTask) xTaskNotifyGive(writerTask);
+    if (fast) fastLink(handle);
+    if (notify) notifyProgressUnguarded();
   }
 };
 ServerCallbacks serverCallbacks;
@@ -621,6 +806,10 @@ bool validSecret() {
 // Records a failed start and leaves the stack fully torn down, so the next
 // tick() retry starts from scratch. Caller holds radioMutex.
 void failStartLocked(const char* stage, int code) {
+  {
+    std::lock_guard<std::recursive_mutex> lock(mutex);
+    progressChar = nullptr;
+  }
   NimBLEDevice::deinit(true);
   // A start that died between controller init and host sync leaves the
   // controller up; the next attempt needs it idle again.
@@ -677,7 +866,6 @@ bool startRadioLocked() {
     name = ble_setup::advertisedName(identity);
     ++starts;
   }
-  if (!queueSpace) queueSpace = xSemaphoreCreateCounting(QUEUE_SLOTS, QUEUE_SLOTS);
   const uint32_t freeHeap = ESP.getFreeHeap(), maxAlloc = ESP.getMaxAllocHeap();
   if (freeHeap < START_MIN_FREE_HEAP || maxAlloc < START_MIN_MAX_ALLOC) {
     failStartLocked("low_memory", static_cast<int>(freeHeap / 1024));
@@ -687,14 +875,20 @@ bool startRadioLocked() {
     failStartLocked("init", static_cast<int>(esp_bt_controller_get_status()));
     return false;
   }
-  NimBLEDevice::setMTU(247);
+  NimBLEDevice::setMTU(ATT_MTU);
+  // Prefer 2M PHY for every connection (BLE-TRANSFER-V4 §3); fastLink() asks again per link.
+  NimBLEDevice::setDefaultPhy(BLE_GAP_LE_PHY_2M_MASK, BLE_GAP_LE_PHY_2M_MASK);
   auto* server = NimBLEDevice::createServer();
   server->setCallbacks(&serverCallbacks, false);
   auto* service = server->createService(SERVICE);
   service->createCharacteristic(CONTROL, NIMBLE_PROPERTY::WRITE, 512)->setCallbacks(&callbacks);
-  service->createCharacteristic(DATA, NIMBLE_PROPERTY::WRITE, 244)->setCallbacks(&callbacks);
+  service->createCharacteristic(DATA, NIMBLE_PROPERTY::WRITE | NIMBLE_PROPERTY::WRITE_NR, 4 + MAX_PAYLOAD)
+      ->setCallbacks(&callbacks);
   service->createCharacteristic(STATUS, NIMBLE_PROPERTY::READ, 512)->setCallbacks(&callbacks);
   service->createCharacteristic(STATE, NIMBLE_PROPERTY::READ, 512)->setCallbacks(&callbacks);
+  auto* progress =
+      service->createCharacteristic(PROGRESS, NIMBLE_PROPERTY::READ | NIMBLE_PROPERTY::NOTIFY, studio_v4::PROGRESS_BYTES);
+  progress->setCallbacks(&callbacks);
   if (!server->start()) {
     failStartLocked("gatt", 0);
     return false;
@@ -709,6 +903,7 @@ bool startRadioLocked() {
   }
   const std::string mac = NimBLEDevice::getAddress().toString();
   std::lock_guard<std::recursive_mutex> lock(mutex);
+  progressChar = progress;
   started = true;
   advertisedAs = name;
   address = mac;
@@ -725,6 +920,7 @@ void stopRadioLocked() {
     std::lock_guard<std::recursive_mutex> lock(mutex);
     if (!started) return;
     started = false;
+    progressChar = nullptr;
   }
   NimBLEDevice::deinit(true);
   std::lock_guard<std::recursive_mutex> lock(mutex);
@@ -755,6 +951,7 @@ bool releaseRadio() {
     if (!started || released || isConnected) return false;
     released = true;
     started = false;
+    progressChar = nullptr;
   }
   const uint32_t before = ESP.getFreeHeap();
   NimBLEDevice::deinit(true);
@@ -829,6 +1026,24 @@ void begin() {
   std::lock_guard<std::mutex> radio(radioMutex);
   startRadioLocked();
 }
+void writerLoop(void*);
+// Created once from setup() with a static stack and TCB (like the sync
+// worker), so it exists before Wi-Fi and NimBLE allocate and can never fail.
+// 6 KB: the deepest path is a commit (StudioFrame verify with a 512-byte
+// block, program JSON parse, state write); every receiver buffer is static.
+// The high-water mark is logged after each transfer.
+void startWriter() {
+  constexpr uint32_t STACK_BYTES = 6144;
+  static StackType_t stack[STACK_BYTES];
+  static StaticTask_t taskBuffer;
+  if (writerTask) return;
+  // Priority 2: above the UI loop and the render task (1), so an e-paper
+  // refresh never stalls the chunk queue; below the NimBLE host.
+  TaskHandle_t handle = xTaskCreateStatic(&writerLoop, "StudioWriter", STACK_BYTES, nullptr, 2, stack, &taskBuffer);
+  std::lock_guard<std::recursive_mutex> lock(mutex);
+  writerTask = handle;
+}
+uint32_t writerStackFree() { return writerTask ? uxTaskGetStackHighWaterMark(writerTask) : 0; }
 Link link() {
   std::lock_guard<std::recursive_mutex> lock(mutex);
   Link result;
@@ -841,7 +1056,8 @@ Link link() {
   result.setupMode = secret.empty();
   if (isConnected && authenticated && state == "receiving") {
     result.transfer = Transfer::Receiving;
-    result.received = queuedEnd;
+    // Progress of the rebuilt file: held frames count as soon as they are copied.
+    result.received = rebuiltBytes;
     result.total = transferTotal;
   } else if (isConnected && authenticated && state == "refreshing") {
     result.transfer = Transfer::Refreshing;
@@ -903,17 +1119,20 @@ void restart() {
   stopRadioLocked();
   startRadioLocked();
 }
-// UI loop: applies the StudioFrame work the host callbacks queued, in order
-// (abort, start, chunks, commit). The SD card is never touched with `mutex`
-// held, so the callbacks keep answering the phone meanwhile.
+// Writer task: applies the transfer work the host callbacks queued, in order
+// (abort, start, chunks, commit), through the protocol 4 receiver. The SD card
+// is never touched with `mutex` held, so the callbacks keep answering the
+// phone meanwhile.
 void pump() {
-  static Chunk chunk;  // off the UI task's stack
-  auto& frame = StudioFrame::instance();
+  static Chunk chunk;  // off the writer task's stack
+  auto& receiver = StudioReceiver::instance();
+  bool notify = false, relax = false;
   for (size_t guard = 0; guard < QUEUE_SLOTS + 2; ++guard) {
     enum class Job : uint8_t { None, Abort, Start, Chunk, Commit } job = Job::None;
     std::string startTask, startHash;
     int64_t startExpires = 0;
-    size_t startSize = 0;
+    size_t startSize = 0, startHeader = 0;
+    StudioReceiver::Resume startResume;
     bool discard = false;
     uint32_t session = 0;
     {
@@ -929,54 +1148,93 @@ void pump() {
         startHash = pendingHash;
         startExpires = pendingExpires;
         startSize = pendingSize;
+        startHeader = pendingHeader;
+        startResume = pendingResume;
         pendingOp = PendingOp::None;
       } else if (queueCount) {
         job = Job::Chunk;
         chunk = chunkQueue[queueHead];
         queueHead = (queueHead + 1) % QUEUE_SLOTS;
         --queueCount;
-        xSemaphoreGive(queueSpace);
       } else if (pendingOp == PendingOp::Commit) {
         job = Job::Commit;
         pendingOp = PendingOp::None;
       }
     }
-    if (job == Job::None) return;
+    if (job == Job::None) break;
     if (job == Job::Abort) {
-      frame.abort(discard);
+      receiver.abort(discard);
       continue;
     }
+    // Moves to the frames phase once the receiver knows `need` (and tells the phone).
+    auto publishNeedLocked = [&]() {
+      const auto phase = receiver.phase();
+      if (framesPhase || (phase != studio_v4::Assembler::Phase::Frames &&
+                          phase != studio_v4::Assembler::Phase::Complete))
+        return;
+      framesPhase = true;
+      needValue = receiver.needHex();
+      needCount = static_cast<uint16_t>(receiver.needCount());
+      notify = true;
+    };
+    auto receiverFailureLocked = [&]() {
+      const auto error = receiver.error();
+      // A resume point that moved or a short heap keeps the partial for the retry.
+      const bool keep = error == studio_v4::Error::OffsetMismatch || error == studio_v4::Error::DeviceBusy;
+      fail(error == studio_v4::Error::None ? "storage_or_cipher_error" : studio_v4::errorName(error), !keep);
+      notify = relax = true;
+    };
     if (job == Job::Start) {
-      const bool ok = frame.start(startTask, startHash, startExpires, startSize);
+      const bool ok = receiver.start(startTask, startHash, startExpires, startSize, startHeader, startResume);
       std::lock_guard<std::recursive_mutex> lock(mutex);
       if (session != sessionId) {
         if (ok) requestAbortLocked(false);  // the phone left during the start
       } else if (!ok) {
-        fail("device_busy_or_invalid_frame");
-      } else if (frame.received() != announcedOffset) {
-        fail("offset_mismatch", false);  // start() corrected the partial record; the retry resumes from it
+        receiverFailureLocked();
+      } else {
+        rebuiltBytes = receiver.rebuiltBytes();
+        publishNeedLocked();
       }
       continue;
     }
     if (job == Job::Chunk) {
-      if (!frame.append(chunk.offset, chunk.bytes, chunk.length)) {
-        std::lock_guard<std::recursive_mutex> lock(mutex);
-        if (session == sessionId) fail("storage_or_cipher_error");
+      const bool ok = receiver.feed(chunk.bytes, chunk.length);
+      std::lock_guard<std::recursive_mutex> lock(mutex);
+      if (session != sessionId) continue;
+      if (!ok) {
+        receiverFailureLocked();
+        continue;
       }
+      rebuiltBytes = receiver.rebuiltBytes();
+      publishNeedLocked();
+      if (progressPending && queueCount <= QUEUE_SLOTS / 2) notify = true;
       continue;
     }
-    const bool ok = frame.commit();
-    if (ok) frame.tick(time(nullptr));
+    const bool ok = receiver.commit();
+    if (ok) StudioFrame::instance().tick(time(nullptr));
     std::lock_guard<std::recursive_mutex> lock(mutex);
     if (session != sessionId) continue;
+    relax = true;
+    notify = true;
     if (!ok) {
-      fail("frame_validation_failed");
+      receiverFailureLocked();
       continue;
     }
     state = "refreshing";
     resumeWaitSinceMs = 0;
     ++completedTransfers;
     changed();
+    LOG_INF("BLE", "Transfer installed (%u bytes received, %u writes dropped, writer stack free %u)",
+            (unsigned)queuedEnd, (unsigned)droppedWrites, (unsigned)uxTaskGetStackHighWaterMark(nullptr));
+  }
+  if (notify) notifyProgress();
+  if (relax) relaxLink();
+}
+void writerLoop(void*) {
+  for (;;) {
+    // Woken by every queued chunk or op; the timeout only bounds a missed wake-up.
+    ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(200));
+    pump();
   }
 }
 // Main loop. Applies queued transfer work, starts the radio (retrying a
@@ -986,8 +1244,22 @@ void pump() {
 void tick() {
   static uint32_t nextStartMs = 0, lastWatchMs = 0, retryDelayMs = 5000;
   static uint8_t advertisingFaults = 0;
-  pump();
   const uint32_t now = millis();
+  {
+    // The render task marks the frame displayed; report the outcome (and any
+    // progress the writer could not notify) to the phone.
+    bool notify = false, relax = false;
+    {
+      std::lock_guard<std::recursive_mutex> lock(mutex);
+      if (isConnected && authenticated && state == "refreshing") {
+        refreshOutcomeLocked();
+        notify = relax = state != "refreshing";
+      }
+      notify = notify || (isConnected && progressPending && queueCount <= QUEUE_SLOTS / 2);
+    }
+    if (notify) notifyProgress();
+    if (relax) relaxLink();
+  }
   bool start = false, watch = false;
   uint16_t stalled = 0xffff;
   {
@@ -1164,6 +1436,8 @@ bool adoptAuthority(const std::string&, const std::string&, uint32_t, const std:
 bool releaseRadio() { return false; }
 void restoreRadio() {}
 void begin() {}
+void startWriter() {}
+uint32_t writerStackFree() { return 0; }
 void tick() {}
 namespace {
 bool simEnabled = true;

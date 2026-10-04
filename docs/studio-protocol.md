@@ -143,57 +143,81 @@ pinned because Cloudflare may issue from Google Trust Services. Another deployme
 maintain its actual trust chain; never disable verification to transmit authorization
 material.
 
-## BLE protocol 2
+## BLE transfer protocol 4 (since 2.7.0)
 
-Service `9fe10000-6bc2-4ce7-8e62-77262df32ef1`; CONTROL/DATA/STATUS use 0001/0002/0003.
-CONTROL is newline-terminated ASCII JSON, max512 bytes; DATA is uint32LE offset plus
-up to240 cipher bytes; STATUS is readable JSON max512 bytes. Control is sent in20-byte
-chunks and data respects negotiated ATT MTU. One authenticated transfer at a time.
+Defined in Project.StockStick `docs/product/BLE-TRANSFER-V4.md`; protocol 2's
+`begin`/DATA/`commit` transfer is gone (no compatibility). Service
+`9fe10000-6bc2-4ce7-8e62-77262df32ef1`: CONTROL 0001 (write, JSON line ≤ 512
+bytes, any chunking), DATA 0002 (write and write-without-response, uint32LE
+stream offset + up to MTU − 3 − 4 cipher bytes, MTU 517 accepted), STATUS 0003
+(read, `protocol: 4`, plus `need` once known), STATE 0004 (unchanged),
+PROGRESS 0005 (read + notify, 16 bytes: u32 `received`, u8 state, u8 error,
+u16 need count, u32 0, u32 seq).
 
-K is the independent 32-byte authority key delivered by the BLE setup `bind`, N a fresh16-byte random connection nonce.
-HMAC-SHA256 input strings are ASCII with literal separators; output is lowercase hex:
+K is the 32-byte authority from `bind`, N a fresh 16-byte nonce per session:
 
 ```
 hello|device_id|N|epoch|base_task|boundary
-studio2|device_id|N|epoch|task|sha256|expires|size|phoneTime
-enc|N
-<displayed or scheduled>2|task|sha256|N|base_task|expires|card_id
+studio4|device_id|N|epoch|task|sha256|expires|size|header|phoneTime   (begin4)
+enc|N                                                                 (AES-256-CTR key; IV = N)
+<displayed or scheduled>2|task|sha256|N|base_task|expires|card_id     (receipt, unchanged)
 ```
 
-The raw HMAC of `enc|N` is the AES256-CTR key; decoded N is its initial counter.
-Resumption uses a new N and seeks that connection's cipher stream to the stored
-plaintext offset. BEGIN retries for an already installed task return its current
-state instead of reinstalling. Invalid-time devices may adopt an authenticated
-phoneTime; valid clocks are not blindly reset by a phone.
+The stream (encrypted as one CTR stream from offset 0) is the SSP1 header
+(`header` bytes), then, for every frame the device lacks (`need`, ascending),
+`u16 index | u32 comp_len | raw deflate` (window ≤ 1024 bytes). A single frame
+is `header = 0`, `size = 52272`, `hash` = its digest, and only that record.
 
-Commit ticks the installed plan. STATUS signs `scheduled2` with empty card ID
-if no current frame, or `displayed2` with the actual frame after display completion.
-The phone persists the frozen package/source/receipt and uploads the signed receipt
-to the cloud history; receipt authentication checks current owner/grant and epoch.
+- **Device side** (`lib/ProjectStick/StudioTransfer`, `src/project_stick/StudioReceiver`):
+  the Assembler writes the header to `incoming.bin`, resolves the frame
+  digests (`frames[].sha256`), looks each up in the kept program files
+  (active, saved program, last visual: those are the frame library, so a held
+  frame is copied, never written twice) and announces `need` (PROGRESS state
+  2, STATUS `need`, frame i = bit i % 8 of byte i / 8). Records are staged in
+  `record.z` and inflated with uzlib (1 KB dictionary, static); each frame
+  must be exactly 52,272 bytes with the header's digest (`frame_mismatch`).
+  Held frames are copied in order between records. `commit` hands the rebuilt
+  file to `StudioFrame::commit()` (full SHA-256 check, install, receipts as
+  before).
+- **Flow control:** the host callback never blocks. In-order writes are
+  decrypted into 16 static 510-byte slots; a duplicate or out-of-order write
+  is dropped (a gap triggers an immediate notification with error 2,
+  `offset_mismatch`, once), as is a write that finds the queue full. PROGRESS
+  is notified every 4 writes or 4 KB, but held back while the queue is over
+  half full, which paces the phone's 8 KB window; the writer task notifies
+  once it drained.
+- **Writer task** (`StudioWriter`, 6 KB static stack, priority 2, created in
+  `setup()`): runs `pump()` (start, chunks, commit, abort), so an e-paper
+  refresh on the UI loop or render task never stalls reception. The UI loop's
+  `tick()` only reports the outcome (`displayed`/`scheduled`) and pending
+  progress.
+- **Link:** on connect and on `begin4` the device asks for 2M PHY, 251-byte
+  link-layer packets and a 7.5–15 ms interval; 30–50 ms after the transfer.
+- **Resume:** the partial (`incoming.json` + `incoming.bin`) resumes at frame
+  boundaries: once the header is complete the phone continues at offset
+  `header` with the remaining `need` (frames already in `incoming.bin` are
+  dropped from it); a single frame either is complete (commit without data)
+  or restarts. `StudioFrame::start(..., resumeLimit)` rehashes the prefix and
+  overwrites anything past it.
+- **Link reuse:** after a transfer ends and the phone has read the outcome,
+  the next STATUS read at least 2 s later starts a fresh session (new N) on
+  the same connection.
+- Errors (PROGRESS code / STATUS `error`): 1 unauthorized_or_invalid_chunk,
+  2 offset_mismatch, 3 device_busy, 4 storage_or_cipher_error,
+  5 frame_validation_failed, 6 frame_mismatch, 7 too_many_frames,
+  8 transfer_timeout, 9 insufficient_storage, 10 authorization_failed.
 
-Since 2.5.1 the GATT callbacks only verify, decrypt and queue (the NimBLE host
-task must not touch the SD card, see memory-budget.md); `studio_ble::pump()` on
-the main loop performs `start`/`append`/`commit`. The queue is 16 static slots
-of 240 bytes (~4 KB, 2.6.2; 8 before) and every chunk goes straight to the
-card's `incoming.bin`, so a program of any size costs no heap. A chunk waits
-up to 6 s for a slot (the phone's write deadline is 8 s); longer main-loop
-stalls fail the transfer as `device_busy`. Since 2.6.2 the first failure is
-what STATUS keeps: chunks still in flight after it are dropped instead of
-overwriting the cause with `unauthorized_or_invalid_chunk`. Since 2.6.5 the
-card usage scan (`freeClusterCount`, seconds on a large card) runs only on the
-background worker (20 s after boot, then every 10 min, never while a phone is
-connected); `StudioFrame::start()` and the STATE metrics read its last value
-and never scan, so `begin` no longer stalls the main loop while the first
-chunks arrive (that scan was the "fails at 2 %" report). A stop the phone
-resumes on its own — `device_busy`, `offset_mismatch`, `transfer_timeout`, a
-dropped link — is shown on the device as 「传输暂停，正在等待手机续传」 and
-only becomes 「传输中断」 after 45 s without a new `begin`; the mini program
-reconnects and resumes the same task up to five times (1.5 s apart) before it
-tells the user anything. STATUS `received` while
-`receiving` is the number of bytes accepted from the phone (queued chunks
-included), so the phone's progress check after each burst still matches; a
-later storage failure shows up as `failed` on the next read, and a retry
-resumes from what actually reached the card.
+Measured with the official 17-frame plan (892,146 bytes): the full stream is
+41,919 bytes; with one changed card it is 6,054 bytes (the other 16 frames are
+copied on the device). Host tests drive the receiver with the mini program's
+vectors (`test/project_stick_core/BleV4Vectors.h`, from
+`gen_ble_v4_vectors.py`) and, with `STUDIO_V4_DEMO_SSP`/`STUDIO_V4_DEMO_DIR`,
+with that full-size plan.
+
+The simulator has no radio; `/.crosspoint/studio/import.v4` +
+`import.v4.json` (`{task, hash, size, header[, stop_at]}`) feed a decrypted
+stream through the same StudioReceiver/StudioFrame path at boot (test hook;
+`stop_at` interrupts and resumes).
 
 ## Phone-relayed sync (since 2.6.0, BLE-first)
 

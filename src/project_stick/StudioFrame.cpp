@@ -16,6 +16,7 @@ constexpr const char* PARTIAL = "/.crosspoint/studio/incoming.json";
 constexpr const char* STATE = "/.crosspoint/studio/state.json";
 constexpr const char* BACKUP = "/.crosspoint/studio/state.bak";
 constexpr const char* STATE_TEMP = "/.crosspoint/studio/state.tmp";
+constexpr const char* RECORD_STAGE = "/.crosspoint/studio/record.z";
 std::string fileFor(const std::string& hash) { return std::string(ROOT) + "/" + hash + ".bin"; }
 bool validHash(const std::string& hash) {
   return hash.size() == 64 &&
@@ -52,6 +53,7 @@ bool verifyFile(const std::string& path, const std::string& expected) {
 }
 }  // namespace
 
+std::string StudioFrame::fileFor(const std::string& hash) { return ::fileFor(hash); }
 StudioFrame& StudioFrame::instance() {
   static StudioFrame frame;
   return frame;
@@ -148,7 +150,8 @@ void StudioFrame::refreshStorageUsage() {
   usageUsed.store(used, std::memory_order_relaxed);
   usageValid.store(total > 0, std::memory_order_release);
 }
-bool StudioFrame::start(const std::string& task, const std::string& hash, int64_t expires, size_t size) {
+bool StudioFrame::start(const std::string& task, const std::string& hash, int64_t expires, size_t size,
+                        size_t resumeLimit) {
   std::lock_guard<std::recursive_mutex> lock(mutex);
   if (receiving || task.size() != 36 || !validHash(hash) || size < BYTES || size > MAX_BYTES) return false;
   Storage.mkdir(ROOT, true);
@@ -168,9 +171,10 @@ bool StudioFrame::start(const std::string& task, const std::string& hash, int64_
   if (resume) {
     HalFile file;
     if (Storage.openFileForRead("STUDIO", TEMP, file) && file.size() <= size) {
-      uint8_t chunk[512];
-      while (file.available()) {
-        const int count = file.read(chunk, sizeof(chunk));
+      const size_t limit = std::min<size_t>(file.size(), resumeLimit);
+      static uint8_t chunk[512];  // off the caller's stack (writer task / UI loop)
+      while (offset < limit) {
+        const int count = file.read(chunk, std::min(sizeof(chunk), limit - offset));
         if (count <= 0) {
           resume = false;
           break;
@@ -196,8 +200,11 @@ bool StudioFrame::start(const std::string& task, const std::string& hash, int64_
     mbedtls_sha256_free(&sha);
     return false;
   }
-  output = Storage.open(TEMP, O_WRONLY | O_CREAT | O_APPEND);
-  if (!output) {
+  // Not O_APPEND: a resume limited below the partial's length overwrites the
+  // tail (the same task and hash always produce the same bytes there).
+  output = Storage.open(TEMP, O_WRONLY | O_CREAT);
+  if (!output || !output.seek(offset)) {
+    output.close();
     mbedtls_sha256_free(&sha);
     return false;
   }
@@ -259,6 +266,7 @@ bool StudioFrame::commit() {
     return false;
   }
   Storage.remove(PARTIAL);
+  Storage.remove(RECORD_STAGE);
   const std::string path = fileFor(incoming.hash);
   if (Storage.exists(path.c_str()) && verifyFile(path, incoming.hash))
     Storage.remove(TEMP);
@@ -325,6 +333,7 @@ void StudioFrame::abort(bool discard) {
   if (discard) {
     Storage.remove(TEMP);
     Storage.remove(PARTIAL);
+    Storage.remove(RECORD_STAGE);
     offset = 0;
     partial = {};
   }
@@ -460,6 +469,24 @@ bool StudioFrame::busy() const {
 size_t StudioFrame::received() const {
   std::lock_guard<std::recursive_mutex> lock(mutex);
   return offset;
+}
+bool StudioFrame::flushOutput() {
+  std::lock_guard<std::recursive_mutex> lock(mutex);
+  if (!receiving) return false;
+  output.flush();
+  return true;
+}
+std::vector<StudioFrame::Kept> StudioFrame::keptFiles() const {
+  std::lock_guard<std::recursive_mutex> lock(mutex);
+  std::vector<Kept> out;
+  out.reserve(3);
+  for (const Snapshot* s : {&active, &savedProgram, &lastVisual}) {
+    if (s->hash.empty()) continue;
+    bool seen = false;
+    for (const auto& k : out) seen = seen || k.hash == s->hash;
+    if (!seen) out.push_back({s->hash, s->size});
+  }
+  return out;
 }
 
 bool StudioFrame::readProgram(const Snapshot& source, studio::Program& result, size_t& start) {

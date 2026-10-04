@@ -147,6 +147,7 @@ class ProjectStickService {
   // Installs /.crosspoint/studio/import.ssp (written by the web simulator
   // loader) through the same StudioFrame path BLE uses.
   void importSimulatorProgram();
+  void importSimulatorStream();
 #endif
   static std::string makeUuid();
 };

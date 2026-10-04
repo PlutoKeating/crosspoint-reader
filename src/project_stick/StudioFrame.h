@@ -6,6 +6,7 @@
 #include <atomic>
 #include <mutex>
 #include <string>
+#include <vector>
 
 class GfxRenderer;
 
@@ -22,8 +23,13 @@ class StudioFrame {
     std::string card;
   };
   static StudioFrame& instance();
+  static std::string fileFor(const std::string& hash);
   void load();
-  bool start(const std::string& task, const std::string& hash, int64_t expires, size_t size = BYTES);
+  // Opens incoming.bin for `task`/`hash`. A matching partial resumes from
+  // min(its length, resumeLimit): the BLE receiver (protocol 4) resumes only
+  // at frame boundaries and overwrites whatever lies past the limit.
+  bool start(const std::string& task, const std::string& hash, int64_t expires, size_t size = BYTES,
+             size_t resumeLimit = MAX_BYTES);
   bool append(size_t offset, const uint8_t* data, size_t length);
   bool commit();
   void abort(bool discard = false);
@@ -47,6 +53,17 @@ class StudioFrame {
   static bool storageUsage(uint64_t& total, uint64_t& used);
   static void refreshStorageUsage();
   size_t received() const;
+  // Makes appended bytes readable through a second handle (the receiver reads
+  // the SSP1 header back to resolve its frames).
+  bool flushOutput();
+  // Program and frame files the device keeps (active, saved program, last
+  // visual and the backup state's): the protocol 4 receiver copies frames it
+  // already holds from these instead of receiving them again.
+  struct Kept {
+    std::string hash;
+    size_t size = 0;
+  };
+  std::vector<Kept> keptFiles() const;
   // Bytes of this exact transfer already on the SD card, from the RAM copy of
   // the partial-transfer record, so a BLE callback can answer `begin` without
   // touching the card. start() recomputes it from the file.
