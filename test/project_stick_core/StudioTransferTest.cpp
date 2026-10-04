@@ -356,7 +356,7 @@ TEST(StudioTransfer, RejectsMalformedRecords) {
 
 // Full-size check with the real 17-frame official plan (892 KB). Run with
 //   STUDIO_V4_DEMO_SSP=<demo.ssp> STUDIO_V4_DEMO_DIR=<dir with demo-*.stream>
-// (streams from the independent generator, /tmp/claude-1000/ble-v4/gen.py).
+// (streams from the independent reference generator, test/project_stick_core/ble_v4_reference.py).
 TEST(StudioTransfer, DemoPlanFullSize) {
   const char* sspPath = std::getenv("STUDIO_V4_DEMO_SSP");
   const char* dir = std::getenv("STUDIO_V4_DEMO_DIR");
