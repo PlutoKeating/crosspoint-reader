@@ -21,4 +21,5 @@ class FullScreenMessageActivity final : public Activity {
         style(style),
         refreshMode(refreshMode) {}
   void onEnter() override;
+  StickTakeover stickTakeover() const override { return StickTakeover::Never; }
 };

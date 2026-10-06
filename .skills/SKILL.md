@@ -236,6 +236,11 @@ static DRAM_ATTR uint32_t isrEventFlags = 0;
 **NimBLE callbacks never touch the SD card.** `onRead`/`onWrite`/`onConnect` run on the `nimble_host` task; keep them to
 verification, crypto and queueing (`studio_ble` chunk queue, drained by `pump()` on the `StudioWriter` task). A FAT long-name open
 from a callback overflowed that task's stack in 2.4.3 (`docs/memory-budget.md`).
+
+**Phone- and cloud-driven work never lives in an activity.** Requests a phone queues over BLE (bind, sync, unbind, Wi-Fi,
+OTA), the STATE refresh, Wi-Fi auto-connect and the cloud heartbeat belong to `ProjectStickHost`, ticked from the main loop
+on every page (`docs/project-stick.md` "Page-independent host"). Until 2.7.1 they ran inside `ProjectStickActivity`, so a
+phone could connect while the device sat in Settings and nothing it asked for was executed. Activities only render.
 | Simple flag (single writer ISR) | `volatile bool` + `portENTER_CRITICAL_ISR()` |
 
 #### RISC-V Alignment

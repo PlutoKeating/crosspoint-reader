@@ -19,6 +19,10 @@ class FirmwareUpdateActivity final : public Activity {
   void loop() override;
   void render(RenderLock&&) override;
   bool preventAutoSleep() override { return state == State::Checking || state == State::Installing; }
+  // Shows update progress itself; a check, a confirmation or an install is not interrupted.
+  StickTakeover stickTakeover() const override {
+    return state == State::Idle || state == State::Result ? StickTakeover::FirmwarePage : StickTakeover::Never;
+  }
 
  private:
   enum class State : uint8_t { Idle, Checking, Result, Confirming, Installing };

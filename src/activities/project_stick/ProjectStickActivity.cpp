@@ -12,11 +12,11 @@
 
 #include "MappedInputManager.h"
 #include "ProjectStickCore.h"
-#include "WifiCredentialStore.h"
 #include "activities/network/WifiSelectionActivity.h"
 #include "components/UITheme.h"
 #include "fontIds.h"
 #include "project_stick/FirmwareUpdateState.h"
+#include "project_stick/ProjectStickBackgroundSync.h"
 #include "project_stick/StudioBluetooth.h"
 #include "project_stick/StudioFrame.h"
 #include "util/QrUtils.h"
@@ -77,67 +77,14 @@ int64_t epochSeconds(const project_stick::ShanghaiTime& time) {
 void ProjectStickActivity::onEnter() {
   Activity::onEnter();
   renderer.setOrientation(GfxRenderer::Portrait);
-  service.begin();
-  // Bring the radio up before Wi-Fi and TLS take their share of the heap; an
-  // unbound device starts it from tickBleSetup() once it has a setup key.
-  studio_ble::begin();
+  // Normally started in setup(); recovery mode skips it until this page opens.
+  PROJECT_STICK_HOST.begin();
   const auto link = studio_ble::link();
   seenFailedTransfers = link.failed;
   lastRadio = link.radio;
-  backgroundResultSequence = PROJECT_STICK_BACKGROUND_SYNC.latestSequence();
-  requestCloudSync();
-  requestUpdate();
-}
-
-// Register heartbeat (plus events and an OTA outcome) of a bound device.
-// Content never comes from the cloud; unbound devices make no requests. Since
-// 2.6.0 the phone relays the same data over BLE (STATE + op `sync`), so the
-// heartbeat only runs when no phone has synced within the heartbeat interval.
-bool ProjectStickActivity::requestCloudSync(bool manual) {
-  if (WiFi.status() != WL_CONNECTED || ProjectStickService::apiBlocked() || !service.hasCredential()) return false;
-  if (!manual && service.phoneSyncFresh()) return false;
-  const bool queued = PROJECT_STICK_BACKGROUND_SYNC.requestSync();
-  if (queued) lastSyncAttemptMs = millis();
-  return queued;
-}
-
-void ProjectStickActivity::applyBackgroundResult() {
-  ProjectStickBackgroundSync::Result result;
-  if (!PROJECT_STICK_BACKGROUND_SYNC.takeResult(backgroundResultSequence, result)) return;
-
-  if (result.kind == ProjectStickBackgroundSync::WorkKind::AlertPoll) {
-    if (result.alertReceived) {
-      service.adoptDisplay(std::move(result.alertDisplay));
-      requestUpdate();
-    }
-    return;
-  }
-  if (result.kind != ProjectStickBackgroundSync::WorkKind::Sync) return;
-
-  const auto& report = result.syncReport;
-  if (syncNoticeShown) {
-    syncNoticeShown = false;
-    if (report.registerSucceeded)
-      showTransientNotice(stick_overlay::Notice::Synced, NOTICE_RESULT_MS);
-    else if (report.registerAttempted)
-      showTransientNotice(stick_overlay::Notice::SyncFailed, NOTICE_FAILURE_MS);
-  }
-  service.adoptServerTime(report.synchronizedAt);
-  if (project_stick::shouldRecordRegisterSuccess(report)) lastRegisterMs = millis();
-  lastAlertPollMs = millis();
-  updateState(report);
-#ifdef SIMULATOR
-  simulatorAlertPollPending = report.result == ProjectStickService::SyncResult::Synced &&
-                              std::getenv("CROSSPOINT_SIM_POLL_ALERT_ONCE") != nullptr;
-#endif
-}
-
-// A failed heartbeat changes nothing on screen: content plays locally and the
-// shared backoff schedules the next attempt. Only a deactivated device says so.
-void ProjectStickActivity::updateState(const project_stick::SyncReport& report) {
-  const bool deactivated = report.result == ProjectStickService::SyncResult::Inactive;
-  if (report.result == ProjectStickService::SyncResult::Failed || deactivated == inactive) return;
-  inactive = deactivated;
+  hostGeneration = PROJECT_STICK_HOST.generation();
+  hostEventSequence = PROJECT_STICK_HOST.lastEvent().sequence;
+  PROJECT_STICK_HOST.requestCloudSync();
   requestUpdate();
 }
 
@@ -220,6 +167,24 @@ void ProjectStickActivity::updateNotice(const uint32_t nowMs) {
     showTransientNotice(Notice::Done, NOTICE_RESULT_MS);
   }
   lastTransfer = link.transfer;
+  // One-shot outcomes of work ProjectStickHost ran (a Wi-Fi join asked over
+  // BLE, the cloud heartbeat this page showed as "syncing").
+  const auto hostEvent = PROJECT_STICK_HOST.lastEvent();
+  if (hostEvent.sequence != hostEventSequence) {
+    hostEventSequence = hostEvent.sequence;
+    using Event = ProjectStickHost::Event;
+    if (hostEvent.event == Event::WifiConnected) {
+      showTransientNotice(Notice::WifiConnected, NOTICE_RESULT_MS);
+    } else if (hostEvent.event == Event::WifiFailed) {
+      showTransientNotice(Notice::WifiFailed, NOTICE_FAILURE_MS);
+    } else if (syncNoticeShown && (hostEvent.event == Event::Synced || hostEvent.event == Event::SyncFailed)) {
+      syncNoticeShown = false;
+      if (hostEvent.event == Event::Synced)
+        showTransientNotice(Notice::Synced, NOTICE_RESULT_MS);
+      else
+        showTransientNotice(Notice::SyncFailed, NOTICE_FAILURE_MS);
+    }
+  }
   if (transientNotice != Notice::None && static_cast<int32_t>(nowMs - transientNoticeUntilMs) >= 0)
     transientNotice = Notice::None;
 
@@ -232,9 +197,9 @@ void ProjectStickActivity::updateNotice(const uint32_t nowMs) {
     next = Notice::Refreshing;
   } else if (link.resuming) {
     next = Notice::Resuming;
-  } else if (bleWifiActive) {
+  } else if (PROJECT_STICK_HOST.wifiJoinActive()) {
     next = Notice::WifiConnecting;
-  } else if (bleScanActive) {
+  } else if (PROJECT_STICK_HOST.wifiScanActive()) {
     next = Notice::WifiScanning;
   } else if (transientNotice != Notice::None) {
     next = transientNotice;
@@ -270,34 +235,19 @@ void ProjectStickActivity::updateNotice(const uint32_t nowMs) {
 void ProjectStickActivity::loop() {
   updateButtonHints(millis());
   updateFeedbackBubble();
-  service.syncClock();
-  tickBleSetup();
-  refreshBleState(millis());
   updateNotice(millis());
-  if (service.refreshOwnership()) requestUpdate();
+  // Binding, the setup QR, activation, alerts and the online state change in
+  // ProjectStickHost; repaint when any of them did.
+  if (hostGeneration != PROJECT_STICK_HOST.generation()) {
+    hostGeneration = PROJECT_STICK_HOST.generation();
+    requestUpdate();
+  }
   auto& frame = StudioFrame::instance();
   // No snapshot() here: it copies heap strings on every loop iteration.
   const bool hasStudio = frame.hasContent();
   const int64_t studioNow = epochSeconds(service.now());
   const int64_t alertUntil = epochSeconds(service.displaySnapshot().alertUntil);
   frame.tick(studioNow, 0, alertUntil);
-  auto startOnlineSync = [this] {
-    requestCloudSync();
-    requestUpdate();
-  };
-  if (!firmware_update::snapshot().busy() && wifiAutoConnect.tick(millis()) && !inactive) {
-    // Came online on its own (boot, wake, OTA restart, a recovered link or a
-    // BLE Wi-Fi push). Cloud requests wait while a phone is connected over
-    // BLE: a setup session may be binding the device right now.
-    if (studio_ble::connected())
-      syncAfterBle = true;
-    else
-      startOnlineSync();
-  }
-  if (syncAfterBle && !studio_ble::connected()) {
-    syncAfterBle = false;
-    if (WiFi.status() == WL_CONNECTED && !inactive) startOnlineSync();
-  }
   const auto firmwareUpdate = firmware_update::snapshot();
   if (firmwareUpdate.generation != firmwareUpdateGeneration) {
     firmwareUpdateGeneration = firmwareUpdate.generation;
@@ -307,26 +257,6 @@ void ProjectStickActivity::loop() {
     studioGeneration = frame.generation();
     requestUpdate();
   }
-  if (otaPending && PROJECT_STICK_BACKGROUND_SYNC.requestFirmwareInstall(otaTarget)) {
-    otaPending = false;
-    otaQueueDeadline.stop();
-  } else if (otaPending && otaQueueDeadline.expired(millis())) {
-    // The worker never became free: report it to the phone (STATUS.ota) rather
-    // than leaving the request queued forever.
-    LOG_ERR("OTA", "BLE update request not accepted by the worker in time");
-    otaPending = false;
-    otaQueueDeadline.stop();
-    firmware_update::fail("device_busy");
-  }
-  applyBackgroundResult();
-#ifdef SIMULATOR
-  if (simulatorAlertPollPending) {
-    simulatorAlertPollPending = false;
-    LOG_INF("STICK", "Simulator invoking one Project.Stick alert poll");
-    PROJECT_STICK_BACKGROUND_SYNC.requestAlertPoll();
-    return;
-  }
-#endif
 
   // X3 side buttons are fixed physical controls: BTN_UP is on the left edge
   // ("一般": next card) and BTN_DOWN is on the right edge ("有用": keep).
@@ -366,180 +296,13 @@ void ProjectStickActivity::loop() {
     requestUpdate();
     return;
   }
-
-  // Register heartbeat every 6 h (binding, owner, trading day, clock), retried
-  // no faster than poll_interval_seconds. Nothing goes out while the shared
-  // API backoff holds (429 / 5xx / unreachable) or without a credential.
-  const uint32_t nowMs = millis();
-  const bool cloudAllowed = !studio_ble::connected() && !inactive && WiFi.status() == WL_CONNECTED &&
-                            !ProjectStickService::apiBlocked() && service.hasCredential();
-  if (cloudAllowed && project_stick::registrationDue(nowMs, lastRegisterMs) &&
-      nowMs - lastSyncAttemptMs >= service.pollIntervalSeconds() * 1000UL) {
-    requestCloudSync();
-  }
-  if (cloudAllowed && service.inAlertWindow() && nowMs - lastAlertPollMs >= service.alertPollIntervalSeconds() * 1000UL) {
-    if (PROJECT_STICK_BACKGROUND_SYNC.requestAlertPoll()) lastAlertPollMs = nowMs;
-  }
-}
-
-// Applies work a phone queued over BLE (studio_ble callbacks never touch the
-// SD card or the radio themselves).
-void ProjectStickActivity::tickBleSetup() {
-  if (!service.isBound()) studio_ble::setup(service.deviceId());
-  const std::string payload = service.isBound() ? std::string() : studio_ble::setupPayload();
-  if (payload != setupPayload) {
-    {
-      RenderLock lock;
-      setupPayload = payload;
-    }
-    requestUpdate();
-  }
-
-  studio_ble::Binding binding;
-  if (studio_ble::takeBinding(binding)) {
-    RenderLock lock;
-    const bool ok = service.applyBleBinding(binding.token, binding.owner);
-    studio_ble::finishBinding(ok, binding);
-    if (ok) {
-      inactive = false;
-      // Register with the new token once the phone lets go of the link.
-      syncAfterBle = true;
-    }
-    lock.unlock();
-    requestUpdate();
-  }
-
-  studio_ble::SyncRequest sync;
-  if (studio_ble::takeSyncRequest(sync)) {
-    RenderLock lock;
-    service.applyPhoneSync(sync);
-    // The phone relayed the heartbeat: restart the cloud interval from here.
-    lastRegisterMs = millis();
-    lock.unlock();
-    refreshBleState(0);
-    requestUpdate();
-  }
-  if (studio_ble::takeUnbindRequest()) {
-    RenderLock lock;
-    service.unbindFromPhone();
-    lock.unlock();
-    requestUpdate();
-  }
-
-  studio_ble::WifiRequest wifi;
-  if (studio_ble::takeWifiRequest(wifi)) startBleWifi(wifi.ssid, wifi.password);
-  if (bleWifiActive) pollBleWifi();
-  if (studio_ble::takeScanRequest()) bleScanPending = true;
-  studio_ble::OtaRequest ota;
-  if (studio_ble::takeOtaRequest(ota)) {
-    otaTarget = {ota.version, ota.url, ota.sha256, ota.bytes};
-    otaPending = true;
-    otaQueueDeadline.start(millis(), project_stick::OTA_QUEUE_DEADLINE_MS);
-  }
-  if (bleScanPending && !bleWifiActive && !bleScanActive) startBleScan();
-  if (bleScanActive) pollBleScan();
-}
-
-void ProjectStickActivity::startBleWifi(const std::string& ssid, const std::string& password) {
-  {
-    RenderLock lock;
-    // Disk is the source of truth; the auto-connect helper may not have
-    // loaded the list yet and saving an empty in-memory list would drop it.
-    WIFI_STORE.loadFromFile();
-    if (!WIFI_STORE.addCredential(ssid, password)) {
-      // The store is full: forget the oldest network other than the current one.
-      for (const auto& saved : WIFI_STORE.getCredentials()) {
-        if (saved.ssid == WIFI_STORE.getLastConnectedSsid()) continue;
-        const std::string victim = saved.ssid;
-        WIFI_STORE.removeCredential(victim);
-        break;
-      }
-      WIFI_STORE.addCredential(ssid, password);
-    }
-    WIFI_STORE.setLastConnectedSsid(ssid);
-  }
-  wifiAutoConnect.holdOff(millis(), BLE_WIFI_TIMEOUT_MS + 5000);
-  WiFi.persistent(false);
-  WiFi.mode(WIFI_STA);
-  WiFi.disconnect();
-  if (password.empty())
-    WiFi.begin(ssid.c_str());
-  else
-    WiFi.begin(ssid.c_str(), password.c_str());
-  bleWifiSsid = ssid;
-  bleWifiActive = true;
-  bleWifiStartedMs = millis();
-  studio_ble::reportWifi(studio_ble::WifiState::Connecting, ssid);
-}
-
-void ProjectStickActivity::pollBleWifi() {
-  const wl_status_t status = WiFi.status();
-  const uint32_t elapsed = millis() - bleWifiStartedMs;
-  const char* error = nullptr;
-  if (status == WL_CONNECTED) {
-    bleWifiActive = false;
-    studio_ble::reportWifi(studio_ble::WifiState::Connected, bleWifiSsid);
-    showTransientNotice(stick_overlay::Notice::WifiConnected, NOTICE_RESULT_MS);
-    return;
-  }
-  // The driver reports these once the join has had time to scan and handshake.
-  if (elapsed >= 3000 && status == WL_NO_SSID_AVAIL)
-    error = "no_ap";
-  else if (elapsed >= 3000 && status == WL_CONNECT_FAILED)
-    error = "wrong_password";
-  else if (elapsed >= BLE_WIFI_TIMEOUT_MS)
-    error = "timeout";
-  if (!error) return;
-  bleWifiActive = false;
-  WiFi.disconnect();
-  studio_ble::reportWifi(studio_ble::WifiState::Failed, bleWifiSsid, error);
-  showTransientNotice(stick_overlay::Notice::WifiFailed, NOTICE_FAILURE_MS);
-  wifiAutoConnect.retrySoon();
-}
-
-void ProjectStickActivity::startBleScan() {
-  bleScanPending = false;
-  wifiAutoConnect.holdOff(millis(), BLE_SCAN_TIMEOUT_MS + 5000);
-  WiFi.mode(WIFI_STA);
-  // A half-finished join makes the driver refuse to scan.
-  if (WiFi.status() != WL_CONNECTED) WiFi.disconnect();
-  WiFi.scanNetworks(true);
-  bleScanActive = true;
-  bleScanStartedMs = millis();
-  studio_ble::reportScan(true);
-}
-
-void ProjectStickActivity::pollBleScan() {
-  const int result = WiFi.scanComplete();
-  if (result == WIFI_SCAN_RUNNING && millis() - bleScanStartedMs < BLE_SCAN_TIMEOUT_MS) return;
-  std::vector<ble_setup::Network> found;
-  for (int i = 0; i < result; ++i)
-    found.push_back({WiFi.SSID(i).c_str(), static_cast<int>(WiFi.RSSI(i)), WiFi.encryptionType(i) != WIFI_AUTH_OPEN});
-  WiFi.scanDelete();
-  bleScanActive = false;
-  studio_ble::reportScan(false, std::move(found));
-  if (WiFi.status() != WL_CONNECTED) wifiAutoConnect.retrySoon();
-}
-
-// Publishes the STATE characteristic (firmware, metrics, pending events, OTA
-// outcome) the phone reads during a BLE session. `nowMs == 0` forces a refresh.
-void ProjectStickActivity::refreshBleState(uint32_t nowMs) {
-  // Nothing competes with a running transfer for the main loop and the card.
-  if (nowMs != 0 && StudioFrame::instance().busy()) return;
-  const bool connected = studio_ble::connected();
-  const bool justConnected = connected && !stateLinkWasConnected;  // fresh values before the phone's first read
-  stateLinkWasConnected = connected;
-  const uint32_t interval = connected ? STATE_REFRESH_LINKED_MS : STATE_REFRESH_IDLE_MS;
-  if (nowMs != 0 && !justConnected && lastStateRefreshMs != 0 && nowMs - lastStateRefreshMs < interval) return;
-  lastStateRefreshMs = nowMs ? nowMs : millis();
-  studio_ble::setState(service.phoneStateJson());
 }
 
 void ProjectStickActivity::launchWifiSelection() {
   startActivityForResult(std::make_unique<WifiSelectionActivity>(renderer, mappedInput, false),
                          [this](const ActivityResult&) {
-                           wifiAutoConnect.retrySoon();
-                           requestCloudSync(true);
+                           PROJECT_STICK_HOST.wifiRetrySoon();
+                           PROJECT_STICK_HOST.requestCloudSync(true);
                            requestUpdate();
                          });
 }
@@ -592,12 +355,13 @@ void ProjectStickActivity::renderStatusScreen() {
   const Rect content{metrics.contentSidePadding, contentTop, width - metrics.contentSidePadding * 2,
                      hintTop - metrics.verticalSpacing - contentTop};
 
-  if (inactive) {
+  if (PROJECT_STICK_HOST.inactive()) {
     UITheme::drawCenteredWrappedText(renderer, content, UI_12_FONT_ID, tr(STR_PROJECT_STICK_INACTIVE), 4, true,
                                      EpdFontFamily::BOLD);
   } else if (!service.isBound()) {
     // BLE setup (protocol 3): the QR carries the device id and the one-time
     // key; the phone binds and pushes Wi-Fi over Bluetooth.
+    const std::string& setupPayload = PROJECT_STICK_HOST.setupPayload();
     const char* title = tr(STR_PROJECT_STICK_SETUP_TITLE);
     const char* helper = tr(STR_PROJECT_STICK_SETUP_HELP);
     const int titleHeight = renderer.getTextLineHeight(NOTOSANSSC_13_FONT_ID, title);

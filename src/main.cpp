@@ -34,6 +34,7 @@
 #include "util/LanguagePacks.h"
 #include "network/OtaTrial.h"
 #include "project_stick/ProjectStickBackgroundSync.h"
+#include "project_stick/ProjectStickHost.h"
 #include "project_stick/StudioBluetooth.h"
 #include "util/ScreenshotUtil.h"
 
@@ -345,6 +346,11 @@ void setup() {
       break;
   }
 
+  // StockStick's page-independent work (BLE requests, Wi-Fi, heartbeat) starts
+  // here, after the display took its heap and before the first page opens.
+  // Recovery mode stays minimal: only the SD flasher runs.
+  if (!recoveryFirmwareMode) PROJECT_STICK_HOST.begin();
+
   if (recoveryFirmwareMode) {
     // Skip normal home/reader routing: jump straight into the SD firmware picker.
     activityManager.replaceActivity(
@@ -439,7 +445,8 @@ void loop() {
   // Check for any user activity (button press or release) or active background work
   static unsigned long lastActivityTime = millis();
   if (gpio.wasAnyPressed() || gpio.wasAnyReleased() || gpio.wasTouchActivity() || halTiltSensor.hadActivity() ||
-      (activityManager.preventAutoSleep() && !activityManager.allowIdlePowerSaving())) {
+      (activityManager.preventAutoSleep() && !activityManager.allowIdlePowerSaving()) ||
+      PROJECT_STICK_HOST.busy()) {  // a phone link, a transfer or a firmware update keeps any page awake
     lastActivityTime = millis();         // Reset inactivity timer
     powerManager.setPowerSaving(false);  // Restore normal CPU frequency on user activity
   }
@@ -505,9 +512,11 @@ void loop() {
 
   ota_trial::tick(WiFi.status() == WL_CONNECTED);
 
-  // The radio and queued BLE transfer work run on every page, so a phone can
-  // deliver content while the device sits in Settings.
+  // The radio, queued BLE transfer work and everything a phone or the cloud
+  // drives (bind, sync, Wi-Fi, OTA, heartbeat) run on every page, so a phone
+  // gets the same answers while the device sits in Settings.
   studio_ble::tick();
+  PROJECT_STICK_HOST.tick(millis());
 
   const unsigned long activityStartTime = millis();
   activityManager.loop();

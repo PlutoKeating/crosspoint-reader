@@ -10,6 +10,8 @@
 #include <string>
 #include <vector>
 
+#include <ProjectStickHostPolicy.h>
+
 #include "GfxRenderer.h"
 #include "MappedInputManager.h"
 #include "util/ScreenshotInfo.h"
@@ -97,6 +99,8 @@ class ActivityManager {
   // Note: if popActivity() on last activity on the stack, we will goHome()
   void popActivity();
 
+  // Role of the current page for ProjectStickHost; Never while a page change is pending.
+  StickTakeover stickTakeover() const;
   bool preventAutoSleep() const;
   bool allowIdlePowerSaving() const;
   bool handlesKeyguard() const;

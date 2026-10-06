@@ -60,9 +60,10 @@ BLE/TLS memory coexistence require X3 measurements, not simulator estimates.
 
 ## Cloud requests
 
-Only a bound device holding a device token talks to the cloud; an unbound device
+Only a bound device holding a device token uses the device API; an unbound device
 (and the website simulator, which is provisioned without a token) makes no
-requests at all. All requests use `Authorization: Bearer <device_token>`:
+device API requests. These use `Authorization: Bearer <device_token>` and are
+scheduled by `ProjectStickHost` on every page (2.7.1):
 
 - `POST /api/v2/device/register`: heartbeat every 6 h and on coming online
   (retried no faster than `poll_interval_seconds`) — **only when no phone has
@@ -84,8 +85,18 @@ requests at all. All requests use `Authorization: Bearer <device_token>`:
   `studio_useful`) and `firmware_rolled_back` (`payload.detail` = "<version>
   <reason>"), sent after a heartbeat; queue capped at 32. Since 2.6.0 the
   phone drains the same queue over BLE first (STATE `events` + `sync` `ack`).
-- `GET /api/v2/device/firmware/latest` on a manual 「检查更新」, then a direct
-  download of the catalogue `url` (see OTA below).
+
+One request needs no binding and no credential, only Wi-Fi (2.7.1):
+
+- `GET /api/v1/public/firmware/latest?channel=stable` on a manual 「检查更新」
+  (Settings > System > Firmware update), then a direct download of the
+  published image (see OTA below). The answer carries `version`, `url` (or
+  `bin_url`), `sha256`, `bytes`, `notes`; the device compares `version` with
+  its own (`stick_fw::compareVersions`: numeric fields, a plain release is
+  newer than a suffixed build of the same numbers) and only offers a strictly
+  newer one. 404 means nothing is published. No answer on this path touches
+  the binding. Until 2.7.0 the check used the authenticated
+  `/api/v2/device/firmware/latest` and refused unbound devices.
 
 Since 2.4.2 the register body also carries `metrics` (`heap_free`, `heap_min`,
 `heap_max_alloc`, `uptime_ms`, `wifi_rssi`, `battery_percent`), so field heap and
@@ -149,7 +160,9 @@ Defined in Project.StockStick `docs/product/BLE-TRANSFER-V4.md`; protocol 2's
 `begin`/DATA/`commit` transfer is gone (no compatibility). Service
 `9fe10000-6bc2-4ce7-8e62-77262df32ef1`: CONTROL 0001 (write, JSON line ≤ 512
 bytes, any chunking), DATA 0002 (write and write-without-response, uint32LE
-stream offset + up to MTU − 3 − 4 cipher bytes, MTU 517 accepted), STATUS 0003
+stream offset + up to MTU − 3 − 4 cipher bytes; the device offers MTU 517 and
+works with whatever is negotiated — WeChat asks for 511, payload ≤ 504 — since a
+write of 1 … 510 cipher bytes fits one queue slot), STATUS 0003
 (read, `protocol: 4`, plus `need` once known), STATE 0004 (unchanged),
 PROGRESS 0005 (read + notify, 16 bytes: u32 `received`, u8 state, u8 error,
 u16 need count, u32 0, u32 seq).
@@ -256,7 +269,9 @@ suppressed; the user can also close the Wi-Fi screen to force one.
 
 The same service runs BLE setup protocol 3 (since 2.3.0; unbound devices, key from
 the setup QR) and accepts `scan`/`wifi` and (since 2.4.0) `ota` ops in bound mode;
-bound STATUS also carries `fw`, `wifi`, `scan`, `networks` and `ota`, and the
+bound STATUS also carries `fw`, `wifi`, `scan`, `networks` and `ota` (since
+2.7.1 `wifi.state` follows the real link on every page: `connected` with the
+SSID whenever Wi-Fi is up, not only after a BLE Wi-Fi push), and the
 advertised name is `StockStick-XXXX` (scan response; the advertising packet
 carries the service UUID and the id characters as manufacturer data). Protocol 3 is defined in Project.StockStick
 `docs/product/BLE-SETUP.md` and `BLE-ONLY-DELIVERY.md`; see also

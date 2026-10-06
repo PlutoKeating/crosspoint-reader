@@ -1,3 +1,4 @@
+#include "project_stick/ProjectStickHost.h"
 #include "WifiSelectionActivity.h"
 
 #include <GfxRenderer.h>
@@ -17,6 +18,8 @@
 
 void WifiSelectionActivity::onEnter() {
   Activity::onEnter();
+  // This screen scans and joins itself; the background auto-connect stands aside.
+  PROJECT_STICK_HOST.suspendWifiAutoConnect(true);
 
   // Load saved WiFi credentials - SD card operations need lock as we use SPI
   // for both
@@ -75,6 +78,7 @@ void WifiSelectionActivity::onEnter() {
 
 void WifiSelectionActivity::onExit() {
   Activity::onExit();
+  PROJECT_STICK_HOST.suspendWifiAutoConnect(false);
 
   LOG_DBG("WIFI", "Free heap at onExit start: %d bytes", ESP.getFreeHeap());
 

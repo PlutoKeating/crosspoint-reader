@@ -18,6 +18,7 @@ class FirmwarePickerActivity final : public Activity {
   void onExit() override;
   void loop() override;
   void render(RenderLock&&) override;
+  StickTakeover stickTakeover() const override { return StickTakeover::Never; }
 
  private:
   static constexpr size_t MAX_ENTRIES = 32;

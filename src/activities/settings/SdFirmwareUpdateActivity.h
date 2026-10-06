@@ -36,6 +36,8 @@ class SdFirmwareUpdateActivity : public Activity {
   void render(RenderLock&&) override;
   bool preventAutoSleep() override { return state == State::UPDATING || state == State::VALIDATING; }
   bool skipLoopDelay() override { return state == State::UPDATING; }
+  // Recovery and SD flashing own the device until they finish.
+  StickTakeover stickTakeover() const override { return StickTakeover::Never; }
 
  private:
   State state = State::PICKING;

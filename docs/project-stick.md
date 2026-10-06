@@ -25,12 +25,15 @@ built in Simplified Chinese; other languages load from SD-card packs.
    `ProjectStickActivity` by default. Recovery firmware mode, crash reporting,
    and explicit silent-restart targets retain their dedicated routes; holding
    Back during boot opens the system menu (StockStick / Settings) instead.
-2. The activity opens immediately and reconnects to saved Wi-Fi networks in the
-   background (last network first, 15 s per attempt, exponential backoff up to
-   5 min), so boot, deep-sleep wake and OTA restarts come back online without
-   user input; a bound device registers on the offline->online edge.
+2. The activity opens immediately. `ProjectStickHost` (ticked from the main
+   loop, see "Page-independent host" below) reconnects to saved Wi-Fi networks
+   in the background (last network first, 15 s per attempt, exponential backoff
+   up to 5 min) on every page, so boot, deep-sleep wake and OTA restarts come
+   back online without user input; a bound device registers on the
+   offline->online edge.
 3. The service keeps a persistent UUID v4 identity. An unbound device makes no
-   cloud requests: it runs BLE setup mode and its status screen shows
+   device API requests (the public firmware catalogue is the one thing it may
+   ask, from Settings > Firmware update): it runs BLE setup mode and its status screen shows
    `用小程序扫码绑定` with the setup QR `stockstick://setup?d=<device_id>&k=<K>`
    (K: 16 random bytes generated in RAM on entering the unbound state; QR
    version 5-L). The phone binds the device (the device token and the BLE
@@ -59,6 +62,47 @@ built in Simplified Chinese; other languages load from SD-card packs.
    (STATE `events`, `sync` `ack`) or, failing that, uploaded after a heartbeat;
    the queue is capped at 32.
 
+## Page-independent host (since 2.7.1)
+
+Until 2.7.0 everything a phone asks for over BLE was applied by
+`ProjectStickActivity`: the radio (`studio_ble::tick`) ran on every page, but
+bind, `sync`, `unbind`, Wi-Fi join/scan, `ota`, the STATE refresh and the setup
+key of an unbound device only existed while the StockStick page was open. On
+Home or in Settings a phone could connect and nothing it sent was executed.
+
+`ProjectStickHost` (`src/project_stick/ProjectStickHost.{h,cpp}`, started once
+in `setup()` after the display, ticked from the main loop right after
+`studio_ble::tick()`, same UI task) now owns all of it:
+
+- BLE requests: `takeBinding`/`finishBinding`, `takeSyncRequest`,
+  `takeUnbindRequest`, `takeWifiRequest` + join polling, `takeScanRequest` +
+  scan polling, `takeOtaRequest` + queueing on the worker (60 s deadline).
+- STATE: rebuilt every 2 s while a phone is connected, every 10 min otherwise,
+  and right after a `sync`.
+- STATUS `wifi.state` mirrors the real link: `connected` + SSID whenever Wi-Fi
+  is up (a saved network joined by itself counts), `idle` when it drops; a
+  failed BLE join stays readable until a link comes up.
+- Setup mode: an unbound device gets its one-time key and starts advertising on
+  any page; the QR payload is kept for the status screen.
+- Wi-Fi auto-connect (`WifiAutoConnect`), suspended only while
+  `WifiSelectionActivity` is open (it drives the radio itself).
+- Cloud: the register heartbeat, trading-hours alert polls, their results
+  (clock, activation, alert display), the RTC write-back and ownership changes.
+- Power: publishes "external power is charging" for the install guard, and
+  keeps the device awake (no auto deep sleep on any page) while a phone is
+  connected, a transfer, a BLE Wi-Fi job, a cloud job or a firmware update runs.
+- Page switches (`StickTakeover`, `project_stick::shouldShowStickPage`,
+  host-tested): incoming content and a firmware update are shown by the
+  StockStick page, so the host switches to it from ordinary pages. Without
+  this a delivery made while the device sat in Settings was installed but
+  never displayed, and the phone waited for a receipt that could not come.
+  Boot, sleep, the crash report, SD flashing and a firmware check/install in
+  progress are never replaced; the firmware screen shows update progress
+  itself.
+
+`ProjectStickActivity` keeps what belongs to its screen: the card, key hints,
+feedback bubbles and notices. It shares the host's `ProjectStickService`.
+
 ## BLE setup (protocol 3, since 2.3.0)
 
 The wire protocol is defined in Project.StockStick
@@ -66,7 +110,7 @@ The wire protocol is defined in Project.StockStick
 `src/project_stick/StudioBluetooth.cpp` (GATT, sessions, ops),
 `lib/ProjectStick/BleSetupProtocol.cpp` (MAC strings, AES-256-CTR seal, QR
 payload, capped STATUS network list; host-tested against the shared vectors)
-and `ProjectStickActivity::tickBleSetup` (applies queued work).
+and `ProjectStickHost::tickBle` (applies queued work, on every page).
 
 - Advertising (since 2.5.0): the 31-byte packet carries the flags, the 128-bit
   service UUID and manufacturer data `FF FF` + the four id characters; the
@@ -85,7 +129,8 @@ and `ProjectStickActivity::tickBleSetup` (applies queued work).
 - Status notices (`stick_overlay::drawNotice`, driven by
   `ProjectStickActivity::updateNotice`): phone connected, receiving with a
   progress bar, verifying, done/failed, Wi-Fi join and scan, cloud heartbeat.
-  Busy notices animate once per `NOTICE_FRAME_MS`.
+  Busy notices animate once per `NOTICE_FRAME_MS`. The work itself runs in
+  `ProjectStickHost`; the page reads its state and one-shot events.
 - Unbound: setup mode keyed with K; bound: the secret delivered
   by `bind` (transfer protocol 4 `begin4`/DATA/`commit`, see studio-protocol.md,
   plus `scan`/`wifi`/`ota`).
@@ -98,14 +143,14 @@ and `ProjectStickActivity::tickBleSetup` (applies queued work).
   only frames the device lacks arrive, deflate-compressed; held frames are
   copied from the kept program files. See memory-budget.md for the 2.4.3
   host-task stack overflow that keeps SD I/O out of the callbacks.
-- NimBLE callbacks only verify and queue. The activity loop applies a bind
+- NimBLE callbacks only verify and queue. `ProjectStickHost` (main loop, any page) applies a bind
   (`ProjectStickService::applyBleBinding`: token, owner, `bound=true`; then the
   BLE credential is persisted by `studio_ble::finishBinding`), a Wi-Fi join (saved to `WifiCredentialStore` and marked last
   connected; auto-connect stands aside; 20 s, errors `no_ap` /
   `wrong_password` / `timeout`) and an async scan (top 5 by RSSI, STATUS kept
   within 512 bytes).
 - `ota` (bound mode only): the phone names a catalogue image (`version`, `url`,
-  `sha256`, `bytes`); the activity hands it to the background worker, which
+  `sha256`, `bytes`); the host hands it to the background worker, which
   downloads it over Wi-Fi and installs it (see [firmware-ota.md](firmware-ota.md)).
   Only URLs under `<API base>/firmware/` are accepted. BLE pauses during the
   download; STATUS `ota` reports `queued`/`downloading`/…/`failed` with the
@@ -166,8 +211,10 @@ build_flags =
 ```
 
 The authenticated HTTP API path prefix (`/api/v2/device`) is appended by the
-service. Every request sends `Authorization: Bearer <device_token>`; without a
-token (unbound) the device makes no requests.
+service. Every device API request sends `Authorization: Bearer <device_token>`;
+without a token (unbound) the device makes none. The firmware catalogue
+(`/api/v1/public/firmware/latest`) and the image download are public and need
+only Wi-Fi.
 
 ## X3 controls
 

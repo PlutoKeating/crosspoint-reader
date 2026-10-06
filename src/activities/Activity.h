@@ -52,6 +52,8 @@ class Activity {
   // Returns true when the activity schedules its own forced refresh.
   virtual bool handleForcedRefresh() { return false; }
   virtual bool isHomeActivity() const { return false; }
+  // See StickTakeover: whether a phone's delivery may replace this page.
+  virtual StickTakeover stickTakeover() const { return StickTakeover::Allowed; }
   virtual bool handleHomeGesture() { return false; }
   virtual ScreenshotInfo getScreenshotInfo() const { return {}; }
 

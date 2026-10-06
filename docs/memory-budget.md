@@ -108,6 +108,17 @@ Verify on the device: the log line `Transfer installed (… writes dropped,
 writer stack free N)` after a push (N should stay above ~1 KB), and
 `[MEM] Free/MaxAlloc` with NimBLE up and with it released before a request.
 
+## 2.7.1: page-independent host
+
+`ProjectStickHost` is a static singleton (it must exist on every page), so the
+UI-side `ProjectStickService` (HTTP client object, a few strings) and the
+Wi-Fi auto-connect state that used to live on the heap inside
+`ProjectStickActivity` are now static: `.dram0.bss` 66,424 → 67,216 (+792 B),
+`.dram0.data` and IRAM unchanged, and the activity allocation shrinks by the
+same amount. The host's per-loop work on other pages is a handful of mutex
+checks; the unbound setup-key check (which builds a string) runs every 500 ms
+instead of every loop.
+
 ## Where the RAM goes
 
 Static, from `riscv32-esp-elf-size -A` on the release ELF (2.4.2 → 2.4.3):

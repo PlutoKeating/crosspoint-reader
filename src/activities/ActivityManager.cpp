@@ -254,6 +254,11 @@ void ActivityManager::popActivity() {
   pendingAction = PendingAction::Pop;
 }
 
+StickTakeover ActivityManager::stickTakeover() const {
+  if (!currentActivity || pendingAction != PendingAction::None) return StickTakeover::Never;
+  return currentActivity->stickTakeover();
+}
+
 bool ActivityManager::handlesKeyguard() const { return currentActivity && currentActivity->handlesKeyguard(); }
 
 bool ActivityManager::allowIdlePowerSaving() const {
