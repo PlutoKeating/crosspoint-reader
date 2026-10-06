@@ -1500,8 +1500,27 @@ std::string ProjectStickService::phoneStateJson() {
       out["reason"] = outcome.reason;
     }
   }
+  // The characteristic holds at most STATUS_LIMIT bytes and a longer value is
+  // cut mid-JSON. The fixed part alone can exceed it (all metrics plus a
+  // rollback outcome), so shed the least useful telemetry first and shorten
+  // the outcome reason before any event is added.
+  static constexpr const char* SHEDDABLE[] = {"tls_heap", "tls_max", "net",      "wifi_on", "stack_min",
+                                              "heap_largest_min", "sd_total", "sd_used", "uptime_ms"};
+  JsonObject metrics = doc["metrics"].as<JsonObject>();
+  for (const char* key : SHEDDABLE) {
+    if (measureJson(doc) <= ble_setup::STATUS_LIMIT) break;
+    metrics.remove(key);
+  }
+  if (measureJson(doc) > ble_setup::STATUS_LIMIT && doc["ota_outcome"].is<JsonObject>()) {
+    std::string reason = doc["ota_outcome"]["reason"] | "";
+    const size_t over = measureJson(doc) - ble_setup::STATUS_LIMIT;
+    reason.resize(reason.size() > over ? reason.size() - over : 0);
+    doc["ota_outcome"]["reason"] = reason;
+  }
   JsonArray list = doc["events"].to<JsonArray>();
+  if (measureJson(doc) > ble_setup::STATUS_LIMIT) doc.remove("events");
   for (const auto& event : events) {
+    if (!doc["events"].is<JsonArray>()) break;
     JsonObject obj = list.add<JsonObject>();
     obj["id"] = event.id;
     obj["type"] = event.type;
