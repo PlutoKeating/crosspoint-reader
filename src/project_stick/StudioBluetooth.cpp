@@ -14,6 +14,7 @@
 #include "FirmwareUpdateState.h"
 #include "StudioFrame.h"
 #ifndef SIMULATOR
+#include <LinkTuning.h>
 #include <StudioTransfer.h>
 
 #include "StudioReceiver.h"
@@ -87,6 +88,11 @@ void awaitResume() {
   if (resumeWaitSinceMs == 0) resumeWaitSinceMs = millis() ? millis() : 1;
 }
 uint32_t lastConnectMs = 0, lastDisconnectMs = 0;
+// Last content/firmware transfer as the device saw it (2.7.10, shown on
+// Settings > Bluetooth): where it stopped, why, and how long the first
+// PROGRESS took after begin4/fw4. `beginAtMs` is 0 outside a begin.
+uint32_t beginAtMs = 0, firstProgressMs = 0, lastTransferAtMs = 0;
+std::string lastTransferStage, lastTransferReason;
 bool everConnected = false, everDisconnected = false;
 // GAP-level link diagnostics (2.7.7). `connections` only counts links our
 // onConnect accepted; a phone whose connect never completes (link-layer
@@ -98,6 +104,14 @@ std::atomic<uint32_t> linkAttempts{0}, linkFailures{0}, linkRejected{0};
 uint32_t untrackedLinks = 0;  // links the watchdog adopted (under `mutex`)
 std::atomic<int> lastLinkFailure{0}, lastDisconnectReason{-1};
 std::atomic<uint32_t> lastLinkFailureHeap{0};
+// Connection-parameter tuning (2.7.10): one conservative update per link,
+// asked after the first PROGRESS of a transfer; the GAP listener records the
+// outcome for Settings > Bluetooth. `connUpdateStatus` -1 = never asked.
+link_tuning::Policy linkPolicy;  // under `mutex`
+uint8_t peerAddress[6]{};       // under `mutex`
+std::atomic<int> connUpdateStatus{-1};
+std::atomic<uint32_t> connIntervalUnits{0};
+std::atomic<bool> connUpdateBlocked{false};
 #ifndef SIMULATOR
 struct ble_gap_event_listener gapListener;
 int onGapEvent(struct ble_gap_event* event, void*) {
@@ -111,6 +125,21 @@ int onGapEvent(struct ble_gap_event* event, void*) {
     }
   } else if (event->type == BLE_GAP_EVENT_DISCONNECT) {
     lastDisconnectReason.store(event->disconnect.reason);
+  } else if (event->type == BLE_GAP_EVENT_CONN_UPDATE) {
+    struct ble_gap_conn_desc desc;
+    const int rc = ble_gap_conn_find(event->conn_update.conn_handle, &desc);
+    connUpdateStatus.store(event->conn_update.status);
+    if (rc == 0) connIntervalUnits.store(desc.conn_itvl);
+    LOG_INF("BLE", "Connection update: status=%d interval=%u latency=%u timeout=%u", event->conn_update.status,
+            rc == 0 ? (unsigned)desc.conn_itvl : 0u, rc == 0 ? (unsigned)desc.conn_latency : 0u,
+            rc == 0 ? (unsigned)desc.supervision_timeout : 0u);
+  } else if (event->type == BLE_GAP_EVENT_PHY_UPDATE_COMPLETE) {
+    LOG_INF("BLE", "PHY update: status=%d tx=%u rx=%u", event->phy_updated.status,
+            (unsigned)event->phy_updated.tx_phy, (unsigned)event->phy_updated.rx_phy);
+  } else if (event->type == BLE_GAP_EVENT_DATA_LEN_CHG) {
+    LOG_INF("BLE", "Data length: tx=%u/%u us rx=%u/%u us", (unsigned)event->data_len_chg.max_tx_octets,
+            (unsigned)event->data_len_chg.max_tx_time, (unsigned)event->data_len_chg.max_rx_octets,
+            (unsigned)event->data_len_chg.max_rx_time);
   }
   return 0;
 }
@@ -279,6 +308,10 @@ bool allocateQueueLocked() {
 void requestAbortLocked(const bool discard) {
   pendingAbort = true;
   pendingDiscard = pendingDiscard || discard;
+  // The pump may sit in its housekeeping wait for minutes; until it runs the
+  // abort the next begin4 would find the old transfer still open (2.7.9:
+  // the reconnecting phone got device_busy).
+  wakePump();
 }
 void resetSession() {
   if (authenticated && state == "receiving") awaitResume();  // the phone left mid-transfer; it reconnects and resumes
@@ -321,11 +354,24 @@ void resetSession() {
 // `discard` drops the partial on the card (protocol, cipher or validation
 // failures: the bytes cannot be trusted); a stall keeps it so the retry
 // resumes from what reached the card instead of starting over.
+// Caller holds `mutex`. The phase a running transfer is in, for the record.
+const char* transferStageLocked() {
+  if (firmwareTransfer) return "firmware";
+  if (pendingOp == PendingOp::Commit || state == "refreshing") return "commit";
+  return framesPhase ? "frames" : "header";
+}
+// Caller holds `mutex`.
+void noteTransferLocked(const char* stage, const std::string& reason) {
+  lastTransferStage = stage;
+  lastTransferReason = reason;
+  lastTransferAtMs = millis() ? millis() : 1;
+}
 void fail(const char* reason, const bool discard = true) {
   // The first cause is the one the phone must see; later chunks arriving
   // after a failure would otherwise overwrite it (the 2.6.0 reports all read
   // "unauthorized_or_invalid_chunk" whatever had actually gone wrong).
   if (state == "failed" && !error.empty()) return;
+  if (authenticated) noteTransferLocked(transferStageLocked(), reason);
   if (authenticated && (state == "receiving" || state == "refreshing")) {
     if (discard)
       ++failedTransfers;
@@ -442,14 +488,34 @@ void notifyProgressUnguarded() {
   uint8_t value[studio_v4::PROGRESS_BYTES];
   NimBLECharacteristic* characteristic = nullptr;
   uint16_t handle = 0xffff;
+  bool tune = false;
   {
     std::lock_guard<std::recursive_mutex> lock(mutex);
     if (!isConnected || !progressChar || released) return;
     buildProgressLocked(value);
+    if (beginAtMs) {
+      firstProgressMs = millis() - beginAtMs;
+      beginAtMs = 0;
+      LOG_INF("BLE", "First PROGRESS %u ms after begin (state=%s)", (unsigned)firstProgressMs, state.c_str());
+      // One conservative connection update per link, only once the phone has
+      // its answer and only for a transfer that is running (BLE-TRANSFER-V4 §3).
+      if (state == "receiving" && linkPolicy.shouldRequest(peerAddress)) {
+        linkPolicy.requested(millis());
+        tune = true;
+      }
+    }
     characteristic = progressChar;
     handle = connectionHandle;
   }
   characteristic->notify(value, sizeof(value), handle);
+  if (tune) {
+    auto* server = NimBLEDevice::getServer();
+    if (server) {
+      server->updateConnParams(handle, link_tuning::MIN_INTERVAL, link_tuning::MAX_INTERVAL, link_tuning::LATENCY,
+                               link_tuning::SUPERVISION_TIMEOUT);
+      LOG_INF("BLE", "Asked for a 15-30 ms interval (6 s timeout)");
+    }
+  }
 }
 void notifyProgress() {
   std::unique_lock<std::mutex> radio(radioMutex, std::try_to_lock);
@@ -460,26 +526,18 @@ void notifyProgress() {
   }
   notifyProgressUnguarded();
 }
-// Link parameters for a transfer (BLE-TRANSFER-V4 §3): 2M PHY, 251-byte link
-// layer packets and a 7.5-15 ms interval; relaxed to 30-50 ms afterwards.
-// Phones that refuse keep their own values. Host-callback or radioMutex context.
-void fastLink(uint16_t handle) {
+// Link layer (BLE-TRANSFER-V4 §3, 2.7.10): only the data length is asked for,
+// once per connection. 2.7.0-2.7.9 also requested a 2M-only PHY and a
+// 7.5-15 ms interval with a 4 s supervision timeout on connect and again on
+// begin4; on the field X3 (Android 16) the link died 4.2 s after every begin4,
+// i.e. one supervision timeout after those procedures, before the first
+// PROGRESS. PHY and interval are left to the phone; throughput comes from
+// DLE plus write-without-response under the PROGRESS window.
+// Host-callback context.
+void requestDataLength(uint16_t handle) {
   auto* server = NimBLEDevice::getServer();
   if (!server || handle == 0xffff) return;
-  server->updatePhy(handle, BLE_GAP_LE_PHY_2M_MASK, BLE_GAP_LE_PHY_2M_MASK, 0);
   server->setDataLen(handle, 251);
-  server->updateConnParams(handle, 6, 12, 0, 400);
-}
-void relaxLink() {
-  std::unique_lock<std::mutex> radio(radioMutex, std::try_to_lock);
-  if (!radio.owns_lock()) return;
-  uint16_t handle = 0xffff;
-  {
-    std::lock_guard<std::recursive_mutex> lock(mutex);
-    if (!isConnected || released || !started) return;
-    handle = connectionHandle;
-  }
-  if (auto* server = NimBLEDevice::getServer()) server->updateConnParams(handle, 24, 40, 0, 400);
 }
 std::string statusJson() {
   if (sessionSetup) {
@@ -653,6 +711,8 @@ class ServerCallbacks final : public NimBLEServerCallbacks {
         connectionHandle = info.getConnHandle();
         ++connections;
         lastConnectMs = millis();
+        memcpy(peerAddress, info.getIdAddress().getVal(), sizeof(peerAddress));
+        linkPolicy.linkUp();
         everConnected = true;
         resetSession();
       }
@@ -661,14 +721,21 @@ class ServerCallbacks final : public NimBLEServerCallbacks {
       server->disconnect(info.getConnHandle());
       return;
     }
-    // Most sessions are content pushes: ask for the fast link right away.
-    fastLink(info.getConnHandle());
+    requestDataLength(info.getConnHandle());
   }
   void onDisconnect(NimBLEServer*, NimBLEConnInfo& info, int) override {
     bool advertise = false;
     {
       std::lock_guard<std::recursive_mutex> lock(mutex);
       if (connectionHandle != info.getConnHandle()) return;
+      if (authenticated && state == "receiving") noteTransferLocked(transferStageLocked(), "link_lost");
+      if (beginAtMs) LOG_ERR("BLE", "Link lost %u ms after begin, no PROGRESS sent", (unsigned)(millis() - beginAtMs));
+      beginAtMs = 0;
+      if (linkPolicy.linkDown(peerAddress, millis())) {
+        connUpdateBlocked.store(true);
+        LOG_ERR("BLE", "Link lost within %u ms of the connection update: not asking this phone again",
+                (unsigned)link_tuning::DROP_WINDOW_MS);
+      }
       resetSession();
       isConnected = false;
       connectionHandle = 0xffff;
@@ -792,8 +859,10 @@ class Callbacks final : public NimBLECharacteristicCallbacks {
     const bool completed = active.task == incomingTask && active.hash == incomingHash;
     StudioReceiver::Resume resume;
     if (!completed) {
-      if (StudioFrame::instance().busy() || pendingOp != PendingOp::None || pendingAbort ||
-          incomingTask.size() != 36) {
+      // A pending abort of the previous session is not "busy": pump() applies
+      // it before this start (abort, then start, in order).
+      if (studio_v4::beginRefusedAsBusy(StudioFrame::instance().busy(), pendingAbort, pendingOp != PendingOp::None,
+                                        incomingTask.size())) {
         fail("device_busy");
         return true;
       }
@@ -842,8 +911,12 @@ class Callbacks final : public NimBLECharacteristicCallbacks {
     }
     changed();
     seekCipherLocked(queuedEnd);  // the resume point
-    // A fresh program starts with the header; everything else waits for `need`.
-    return completed || (!single && !resume.headerDone);
+    // Announce at once (state 1 with the resume point): the phone has its
+    // answer within milliseconds whatever the writer still has to do. A
+    // resume past the header or a single frame then waits for state 2 and
+    // `need`, which the writer reports once it has resolved them.
+    (void)single;
+    return true;
   }
   // fw4 (firmware over BLE, 2.7.4). Caller holds `mutex`. Checks the proof and
   // the request; the pump task (which may touch the card and the fuel gauge)
@@ -904,7 +977,7 @@ class Callbacks final : public NimBLECharacteristicCallbacks {
       onData(characteristic, info);
       return;
     }
-    bool notify = false, fast = false;
+    bool notify = false;
     uint16_t handle = 0xffff;
     {
       std::lock_guard<std::recursive_mutex> lock(mutex);
@@ -932,11 +1005,13 @@ class Callbacks final : public NimBLECharacteristicCallbacks {
         return;
       }
       if (op == "begin4" && !authenticated) {
+        beginAtMs = millis();
         notify = beginTransferLocked(doc);
-        fast = state == "receiving";
+        LOG_INF("BLE", "begin4 %s in %u ms (state=%s, offset=%u)", notify ? "answered" : "queued",
+                (unsigned)(millis() - beginAtMs), state.c_str(), (unsigned)queuedEnd);
       } else if (op == "fw4" && !authenticated) {
+        beginAtMs = millis();
         notify = beginFirmwareLocked(doc);
-        fast = state == "receiving";
       } else if (op == "commit" && authenticated && !firmwareTransfer && state == "receiving" &&
                  pendingOp == PendingOp::None) {
         // The writer task checks, once every queued chunk is applied, that the
@@ -949,7 +1024,6 @@ class Callbacks final : public NimBLECharacteristicCallbacks {
       handle = connectionHandle;
     }
     wakePump();
-    if (fast) fastLink(handle);
     if (notify) notifyProgressUnguarded();
   }
 };
@@ -1089,7 +1163,7 @@ bool startRadioLocked() {
   // ble_gap_init() clears the listener list on every start: register again.
   ble_gap_event_listener_register(&gapListener, onGapEvent, nullptr);
   NimBLEDevice::setMTU(ATT_MTU);
-  // Allow 1M and 2M by default; fastLink() asks for 2M per link (BLE-TRANSFER-V4
+  // Allow 1M and 2M by default; the phone decides the PHY (BLE-TRANSFER-V4
   // §3). 2.7.x preferred 2M only, which leaves no PHY a 1M-only peer can
   // agree to; keeping 1M in the mask is the IDF default and costs nothing.
   NimBLEDevice::setDefaultPhy(BLE_GAP_LE_PHY_1M_MASK | BLE_GAP_LE_PHY_2M_MASK,
@@ -1318,6 +1392,15 @@ Diagnostics diagnostics() {
   const uint32_t now = millis();
   if (everConnected) result.sinceConnect = static_cast<int32_t>((now - lastConnectMs) / 1000);
   if (everDisconnected) result.sinceDisconnect = static_cast<int32_t>((now - lastDisconnectMs) / 1000);
+  if (lastTransferAtMs) {
+    result.transferStage = lastTransferStage;
+    result.transferReason = lastTransferReason;
+    result.sinceTransfer = static_cast<int32_t>((now - lastTransferAtMs) / 1000);
+  }
+  result.firstProgressMs = firstProgressMs;
+  result.connUpdateStatus = connUpdateStatus.load();
+  result.connIntervalUnits = connIntervalUnits.load();
+  result.connUpdateBlocked = connUpdateBlocked.load();
   return result;
 }
 bool enabled() {
@@ -1418,7 +1501,7 @@ void pump() {
   static Chunk chunk;  // off the worker's stack
   auto& receiver = StudioReceiver::instance();
   auto& firmware = FirmwareReceiver::instance();
-  bool notify = false, relax = false, install = false;
+  bool notify = false, install = false;
   std::string installVersion;
   size_t installSize = 0;
   PumpPriority priority;
@@ -1523,7 +1606,7 @@ void pump() {
       // A resume point that moved or a short heap keeps the partial for the retry.
       const bool keep = error == studio_v4::Error::OffsetMismatch || error == studio_v4::Error::DeviceBusy;
       fail(error == studio_v4::Error::None ? "storage_or_cipher_error" : studio_v4::errorName(error), !keep);
-      notify = relax = true;
+      notify = true;
     };
     if (job == Job::Start) {
       const bool ok = receiver.start(startTask, startHash, startExpires, startSize, startHeader, startResume);
@@ -1545,7 +1628,7 @@ void pump() {
       if (!ok) {
         const auto error = firmware.error();
         fail(error == studio_v4::Error::None ? "storage_or_cipher_error" : studio_v4::errorName(error), false);
-        notify = relax = true;
+        notify = true;
         continue;
       }
       rebuiltBytes = firmware.rawDone();
@@ -1579,7 +1662,6 @@ void pump() {
     if (ok) StudioFrame::instance().tick(time(nullptr));
     std::lock_guard<std::recursive_mutex> lock(mutex);
     if (session != sessionId) continue;
-    relax = true;
     notify = true;
     if (!ok) {
       receiverFailureLocked();
@@ -1588,6 +1670,7 @@ void pump() {
     state = "refreshing";
     resumeWaitSinceMs = 0;
     ++completedTransfers;
+    noteTransferLocked("commit", "ok");
     dropQueueLocked();  // the slots' heap goes back until the next begin4
     changed();
     LOG_INF("BLE", "Transfer installed (%u bytes received, %u writes dropped, heap=%u, worker stack free %u)",
@@ -1595,7 +1678,6 @@ void pump() {
             (unsigned)uxTaskGetStackHighWaterMark(nullptr));
   }
   if (notify) notifyProgress();
-  if (relax) relaxLink();
   if (install) installReceivedFirmware(installVersion, installSize);
 }
 // Main loop. Applies queued transfer work, starts the radio (retrying a
@@ -1609,17 +1691,16 @@ void tick() {
   {
     // The render task marks the frame displayed; report the outcome (and any
     // progress the writer could not notify) to the phone.
-    bool notify = false, relax = false;
+    bool notify = false;
     {
       std::lock_guard<std::recursive_mutex> lock(mutex);
       if (isConnected && authenticated && state == "refreshing") {
         refreshOutcomeLocked();
-        notify = relax = state != "refreshing";
+        notify = state != "refreshing";
       }
       notify = notify || (isConnected && progressPending && queueCount <= queueSlots / 2);
     }
     if (notify) notifyProgress();
-    if (relax) relaxLink();
   }
   bool start = false, watch = false;
   uint16_t stalled = 0xffff;

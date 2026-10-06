@@ -177,4 +177,13 @@ class FrameInflater {
   static int readByte(uzlib_uncomp* decomp);
 };
 
+// Whether a begin4 must be refused as device_busy (2.7.10). A transfer still
+// open on the card only counts while no abort of it is pending: after a link
+// loss the previous session's abort is queued, and the writer applies it
+// before the new start, so the reconnecting phone resumes instead of being
+// refused (2.7.9 refused it for as long as the writer slept).
+constexpr bool beginRefusedAsBusy(bool transferOpen, bool abortPending, bool opPending, size_t taskIdLength) {
+  return (transferOpen && !abortPending) || opPending || taskIdLength != 36;
+}
+
 }  // namespace studio_v4

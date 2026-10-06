@@ -54,3 +54,5 @@ target_compile_definitions(ProjectStickCoreTest PRIVATE
 # Streamed Studio cards (lib/ProjectStick/CardStrip.h): strips of panel columns
 # equal the Portrait framebuffer render pixel for pixel.
 target_sources(ProjectStickCoreTest PRIVATE CardStripTest.cpp)
+# Connection-parameter tuning (2.7.10)
+target_sources(ProjectStickCoreTest PRIVATE LinkTuningTest.cpp)

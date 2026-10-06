@@ -87,6 +87,18 @@ struct Diagnostics {
   uint32_t hostStackFree = 0;
   // Seconds since the last connect / disconnect; -1 when there was none.
   int32_t sinceConnect = -1, sinceDisconnect = -1;
+  // Last transfer (2.7.10): stage (header/frames/commit/firmware), outcome
+  // ("ok", a failure code or "link_lost"), seconds since, and how long the
+  // first PROGRESS took after begin (0 = never sent).
+  std::string transferStage, transferReason;
+  int32_t sinceTransfer = -1;
+  uint32_t firstProgressMs = 0;
+  // Connection-parameter tuning (2.7.10): HCI status of the last update
+  // (-1 = never asked), the interval in 1.25 ms units it produced, and whether
+  // a drop right after the request disabled it for this phone.
+  int connUpdateStatus = -1;
+  uint32_t connIntervalUnits = 0;
+  bool connUpdateBlocked = false;
 };
 Diagnostics diagnostics();
 // The user's switch (Settings > Bluetooth). Off deinitialises the stack and

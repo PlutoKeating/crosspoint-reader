@@ -398,3 +398,14 @@ TEST(StudioTransfer, DemoPlanFullSize) {
                 stream.size(), ssp.size(), frames, io.copies);
   }
 }
+
+// 2.7.10: a reconnecting phone's begin4 is not refused while the previous
+// session's abort is still queued on the writer.
+TEST(StudioTransfer, BeginBusyRule) {
+  using studio_v4::beginRefusedAsBusy;
+  EXPECT_FALSE(beginRefusedAsBusy(false, false, false, 36));  // idle device
+  EXPECT_TRUE(beginRefusedAsBusy(true, false, false, 36));    // a live transfer
+  EXPECT_FALSE(beginRefusedAsBusy(true, true, false, 36));    // the old one is being aborted: resume
+  EXPECT_TRUE(beginRefusedAsBusy(false, false, true, 36));    // a start or commit already queued
+  EXPECT_TRUE(beginRefusedAsBusy(false, false, false, 35));   // malformed task id
+}

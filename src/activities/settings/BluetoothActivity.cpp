@@ -135,6 +135,24 @@ void BluetoothActivity::render(RenderLock&&) {
     snprintf(text, sizeof(text), "0x%x", info.lastDisconnectReason);
     row(tr(STR_BT_LAST_DISCONNECT), text);
   }
+  if (!info.transferReason.empty()) {
+    // e.g. "frames · link_lost · 12 s 前" / "commit · ok"; PROGRESS latency when known.
+    if (info.firstProgressMs)
+      snprintf(text, sizeof(text), "%s · %s · %ld s · %lu ms", info.transferStage.c_str(), info.transferReason.c_str(),
+               (long)info.sinceTransfer, (unsigned long)info.firstProgressMs);
+    else
+      snprintf(text, sizeof(text), "%s · %s · %ld s", info.transferStage.c_str(), info.transferReason.c_str(),
+               (long)info.sinceTransfer);
+    row(tr(STR_BT_LAST_TRANSFER), text);
+  }
+  if (info.connUpdateBlocked) {
+    row(tr(STR_BT_CONN_PARAMS), tr(STR_BT_CONN_PARAMS_OFF));
+  } else if (info.connUpdateStatus >= 0) {
+    // e.g. "0 · 22.5 ms": HCI status of the last update and the interval it gave.
+    snprintf(text, sizeof(text), "0x%x · %u.%02u ms", (unsigned)info.connUpdateStatus,
+             (unsigned)(info.connIntervalUnits * 125 / 100), (unsigned)(info.connIntervalUnits * 125 % 100));
+    row(tr(STR_BT_CONN_PARAMS), text);
+  }
   row("Wi-Fi", WiFi.status() == WL_CONNECTED ? tr(STR_PROJECT_STICK_STATUS_ONLINE) : tr(STR_PROJECT_STICK_STATUS_OFFLINE));
   snprintf(text, sizeof(text), "%u / %u KB", static_cast<unsigned>(ESP.getFreeHeap() / 1024),
            static_cast<unsigned>(ESP.getMaxAllocHeap() / 1024));
