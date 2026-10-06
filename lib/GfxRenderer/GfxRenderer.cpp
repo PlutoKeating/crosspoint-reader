@@ -41,7 +41,9 @@ void GfxRenderer::begin() {
 }
 
 void GfxRenderer::releaseFrameBuffer() {
-  if (!frameBuffer) return;
+  // Only a panel that can show a card strip by strip may run without the
+  // framebuffer; otherwise it stays resident and nothing has to reacquire it.
+  if (!frameBuffer || !display.supportsStripDisplay()) return;
   freeBwBufferChunks();
   display.releaseFrameBuffer();
   frameBuffer = nullptr;
