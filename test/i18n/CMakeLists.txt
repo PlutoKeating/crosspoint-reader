@@ -11,26 +11,26 @@ add_custom_command(
   WORKING_DIRECTORY ${REPO_ROOT}
 )
 
-add_executable(I18nPackTest
-  I18nPackTest.cpp
+add_executable(I18nTest
+  I18nTest.cpp
   ${I18N_DIR}/I18n.cpp
   ${I18N_DIR}/I18nStrings.cpp
 )
 
-target_include_directories(I18nPackTest PRIVATE ${I18N_DIR})
+target_include_directories(I18nTest PRIVATE ${I18N_DIR})
 
-target_link_libraries(I18nPackTest PRIVATE
+target_link_libraries(I18nTest PRIVATE
   crosspoint_test_common
   GTest::gtest_main
 )
 
-gtest_discover_tests(I18nPackTest)
+gtest_discover_tests(I18nTest)
 
 # Every built-in string must render with the UI font stack (Ubuntu with the
 # Noto Sans SC 12 fallback), or the device shows missing-glyph boxes.
-target_sources(I18nPackTest PRIVATE
+target_sources(I18nTest PRIVATE
   BuiltinCoverageTest.cpp
   ${REPO_ROOT}/lib/EpdFont/EpdFont.cpp
   ${REPO_ROOT}/lib/Utf8/Utf8.cpp
 )
-target_include_directories(I18nPackTest PRIVATE ${REPO_ROOT}/lib/EpdFont ${REPO_ROOT}/lib/Utf8)
+target_include_directories(I18nTest PRIVATE ${REPO_ROOT}/lib/EpdFont ${REPO_ROOT}/lib/Utf8)

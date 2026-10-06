@@ -4,8 +4,8 @@ _order: "0"
 
 # Built-in catalogue. This is the only language compiled into the firmware and
 # the reference key list: every STR_* referenced by src/ or lib/ must exist here.
-# Other *.yaml files in this directory are compiled into SD-card language packs
-# by scripts/build_lang_pack.py; missing pack entries fall back to this file.
+# english.yaml is a translation reference only (no runtime language packs since
+# 2.7.5); scripts/gen_i18n.py reports keys it lacks or no longer needs.
 
 STR_CROSSPOINT: "StockStick"
 STR_BOOTING: "正在启动"
@@ -62,8 +62,6 @@ STR_KB_TIPS: "提示："
 STR_KEY_MODE_ABC: "abc"
 STR_KEY_MODE_SYMBOLS: "?123"
 STR_KEY_SHIFT: "大写"
-STR_LANGUAGE: "语言"
-STR_LANGUAGE_PACK_HINT: "更多语言包：SD 卡 /.crosspoint/lang/"
 STR_LOADING_POPUP: "加载中"
 STR_MAC_ADDRESS: "MAC 地址："
 STR_NETWORK_LEGEND: "* = 加密 | + = 已保存"
@@ -105,7 +103,6 @@ STR_SAVE_PASSWORD: "保存密码以便下次使用？"
 STR_SCANNING: "正在扫描…"
 STR_SD_FIRMWARE_UPDATE: "SD 卡固件更新"
 STR_SELECT: "选择"
-STR_SELECTED: "当前"
 STR_SETTINGS_TITLE: "设置"
 STR_SHOW_NETWORKS: "显示"
 STR_STATE_OFF: "关"

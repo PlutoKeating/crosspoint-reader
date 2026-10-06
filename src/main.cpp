@@ -31,7 +31,6 @@
 #include "fontIds.h"
 #include "images/LoadingIcon.h"
 #include "util/ButtonNavigator.h"
-#include "util/LanguagePacks.h"
 #include "network/OtaTrial.h"
 #include "project_stick/ProjectStickBackgroundSync.h"
 #include "project_stick/ProjectStickHost.h"
@@ -248,7 +247,6 @@ void setup() {
   SETTINGS.loadFromFile();
   APP_STATE.loadFromFile();
   studio_ble::setEnabled(SETTINGS.bluetoothEnabled != 0);
-  language_packs::apply(SETTINGS.language);
   ButtonNavigator::setMappedInputManager(mappedInputManager);
 
   const auto wakeupReason = gpio.getWakeupReason();
@@ -363,7 +361,7 @@ void setup() {
     activityManager.goToCrashReport();
   } else if (mappedInputManager.isPressed(MappedInputManager::Button::Back)) {
     // Holding Back during boot opens Settings directly: an escape hatch if
-    // the StockStick page itself needs attention (Wi-Fi, firmware, language).
+    // the StockStick page itself needs attention (Wi-Fi, firmware).
     activityManager.goToSettings();
   } else {
     // The StockStick page is this firmware's only home. Cold boots, ordinary

@@ -1,6 +1,5 @@
 #include "GfxRenderer.h"
 
-#include <BidiUtils.h>
 #include <BuildScratch.h>
 #include <FontDecompressor.h>
 #include <HalGPIO.h>
@@ -11,11 +10,6 @@
 #include <cstring>
 
 #include "FontCacheManager.h"
-
-namespace {
-const char* resolveVisualText(const char* text, std::string& visualBuffer, BidiUtils::BidiBaseDir baseDir);
-
-}  // namespace
 
 const uint8_t* GfxRenderer::getGlyphBitmap(const EpdFontData* fontData, const EpdGlyph* glyph) const {
   if (fontData->groups != nullptr) {
@@ -469,8 +463,7 @@ void GfxRenderer::drawPixel(const int x, const int y, const bool state) const {
   }
 }
 
-int GfxRenderer::getTextWidth(const int fontId, const char* text, const EpdFontFamily::Style style,
-                              const BidiUtils::BidiBaseDir baseDir) const {
+int GfxRenderer::getTextWidth(const int fontId, const char* text, const EpdFontFamily::Style style) const {
   if (text == nullptr || *text == '\0') {
     return 0;
   }
@@ -484,22 +477,19 @@ int GfxRenderer::getTextWidth(const int fontId, const char* text, const EpdFontF
     return 0;
   }
 
-  std::string visual;
-  const char* renderedText = resolveVisualText(text, visual, baseDir);
-
   int w = 0, h = 0;
-  fontIt->second.getTextDimensions(renderedText, &w, &h, style);
+  fontIt->second.getTextDimensions(text, &w, &h, style);
   return w;
 }
 
 void GfxRenderer::drawCenteredText(const int fontId, const int y, const char* text, const bool black,
-                                   const EpdFontFamily::Style style, const BidiUtils::BidiBaseDir baseDir) const {
-  const int x = (getScreenWidth() - getTextWidth(fontId, text, style, baseDir)) / 2;
-  drawText(fontId, x, y, text, black, style, baseDir);
+                                   const EpdFontFamily::Style style) const {
+  const int x = (getScreenWidth() - getTextWidth(fontId, text, style)) / 2;
+  drawText(fontId, x, y, text, black, style);
 }
 
 void GfxRenderer::drawText(const int fontId, const int x, const int y, const char* text, const bool black,
-                           const EpdFontFamily::Style style, const BidiUtils::BidiBaseDir baseDir) const {
+                           const EpdFontFamily::Style style) const {
   // cannot draw a NULL / empty string
   if (text == nullptr || *text == '\0') {
     return;
@@ -509,9 +499,7 @@ void GfxRenderer::drawText(const int fontId, const int x, const int y, const cha
   // lacks the glyphs (e.g. Chinese book titles drawn with a Latin UI font).
   const int resolvedFontId = resolveTextFontId(fontId, text, style);
 
-  std::string visual;
-  const char* renderedText = resolveVisualText(text, visual, baseDir);
-
+  const char* renderedText = text;
   const int yPos = y + getFontAscenderSize(resolvedFontId);
   int lastBaseX = x;
   int lastBaseLeft = 0;
@@ -535,14 +523,9 @@ void GfxRenderer::drawText(const int fontId, const int x, const int y, const cha
   uint32_t cp;
   uint32_t prevCp = 0;
   while ((cp = utf8NextCodepoint(reinterpret_cast<const uint8_t**>(&textCursor)))) {
-    // RTL vowel marks (Hebrew niqqud, Arabic harakat) ride the combining-mark
-    // path: zero-advance overlays on the preceding base glyph (applyBidiVisual
-    // emits base-then-marks per UAX#9 L3). anchorFor pins position-sensitive
-    // niqqud (dagesh, shin/sin dots, holam) to their spot on the base; other
-    // marks stay centered, raised above the base or (kasra) at their
-    // font-native position. Fonts without their glyphs — the built-ins — miss
-    // the getGlyph lookup and skip them, as before.
-    if (utf8IsCombiningMark(cp) || BidiUtils::isTransparentMark(cp)) {
+    // Combining marks are zero-advance overlays on the preceding base glyph.
+    // Fonts without their glyphs (most built-ins) skip them.
+    if (utf8IsCombiningMark(cp)) {
       const EpdGlyph* combiningGlyph = font.getGlyph(cp, style);
       if (!combiningGlyph) continue;
       const auto anchor = combiningMark::anchorFor(cp);
@@ -587,32 +570,6 @@ void GfxRenderer::drawText(const int fontId, const int x, const int y, const cha
     prevCp = cp;
   }
 }
-
-namespace {
-const char* resolveVisualText(const char* text, std::string& visualBuffer, const BidiUtils::BidiBaseDir baseDir) {
-  if (!text || *text == '\0') return text;
-
-  if (baseDir != BidiUtils::BidiBaseDir::RTL) {
-    // Byte-level scan: skip BiDi when no RTL script lead bytes are present.
-    // Hebrew UTF-8 lead bytes: 0xD6-0xD7; Arabic/Syriac: 0xD8-0xDB.
-    // This covers all RTL content without false negatives and avoids triggering
-    // the full UAX#9 algorithm for Latin-extended, em-dashes, accented text, etc.
-    bool hasRtlBytes = false;
-    for (const unsigned char* q = reinterpret_cast<const unsigned char*>(text); *q; ++q) {
-      if (*q >= 0xD6 && *q <= 0xDB) {
-        hasRtlBytes = true;
-        break;
-      }
-    }
-    if (!hasRtlBytes) return text;
-  }
-
-  if (BidiUtils::applyBidiVisual(text, visualBuffer, static_cast<int>(baseDir)) && !visualBuffer.empty()) {
-    return visualBuffer.c_str();
-  }
-  return text;
-}
-}  // namespace
 
 void GfxRenderer::drawLine(int x1, int y1, int x2, int y2, const bool state) const {
   if (fontCacheManager_ && fontCacheManager_->isScanning()) return;
@@ -1607,15 +1564,6 @@ int GfxRenderer::getKerning(const int fontId, const uint32_t leftCp, const uint3
 int GfxRenderer::getTextAdvanceX(const int fontId, const char* text, EpdFontFamily::Style style) const {
   // Match the font drawText would use for CJK-bearing strings (see resolveTextFontId).
   const int resolvedFontId = resolveTextFontId(fontId, text, style);
-  // Measure the exact codepoint stream drawText renders: bidi-reordered and
-  // Arabic-shaped (contextual presentation forms, Lam-Alef collapse).
-  // Measuring the raw logical text counts the Alef a ligature absorbs and
-  // uses base-letter advances instead of presentation-form advances, so RTL
-  // lines come out wider than they draw — uneven word gaps and a ragged
-  // right margin.
-  std::string visual;
-  text = resolveVisualText(text, visual, BidiUtils::BidiBaseDir::AUTO);
-
   const auto fontIt = fontMap.find(resolvedFontId);
   if (fontIt == fontMap.end()) {
     LOG_ERR("GFX", "Font %d not found", resolvedFontId);
@@ -1628,10 +1576,6 @@ int GfxRenderer::getTextAdvanceX(const int fontId, const char* text, EpdFontFami
   int32_t prevAdvanceFP = 0;  // 12.4 fixed-point: prev glyph's advance + next kern for snap
   const auto& font = fontIt->second;
   while ((cp = utf8NextCodepoint(reinterpret_cast<const uint8_t**>(&text)))) {
-    // RTL vowel marks (niqqud/harakat) are zero-advance overlays in drawText — no width.
-    if (BidiUtils::isTransparentMark(cp)) {
-      continue;
-    }
     if (utf8IsCombiningMark(cp)) {
       continue;
     }
@@ -1718,14 +1662,9 @@ void GfxRenderer::drawTextRotated90CW(const int fontId, const int x, const int y
   uint32_t cp;
   uint32_t prevCp = 0;
   while ((cp = utf8NextCodepoint(reinterpret_cast<const uint8_t**>(&text)))) {
-    // RTL vowel marks (Hebrew niqqud, Arabic harakat) ride the combining-mark
-    // path: zero-advance overlays on the preceding base glyph (applyBidiVisual
-    // emits base-then-marks per UAX#9 L3). anchorFor pins position-sensitive
-    // niqqud (dagesh, shin/sin dots, holam) to their spot on the base; other
-    // marks stay centered, raised above the base or (kasra) at their
-    // font-native position. Fonts without their glyphs — the built-ins — miss
-    // the getGlyph lookup and skip them, as before.
-    if (utf8IsCombiningMark(cp) || BidiUtils::isTransparentMark(cp)) {
+    // Combining marks are zero-advance overlays on the preceding base glyph.
+    // Fonts without their glyphs (most built-ins) skip them.
+    if (utf8IsCombiningMark(cp)) {
       const EpdGlyph* combiningGlyph = font.getGlyph(cp, style);
       if (!combiningGlyph) continue;
       const auto anchor = combiningMark::anchorFor(cp);

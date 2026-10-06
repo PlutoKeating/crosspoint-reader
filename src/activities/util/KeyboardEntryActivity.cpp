@@ -109,21 +109,14 @@ const fui::KeyboardLayout URL_LAYOUT{URL_ROWS, 5};
 const fui::KeyboardLayout URL_SHIFT_LAYOUT{URL_SHIFT_ROWS, 5};
 const fui::KeyboardLayout URL_SNIPPET_LAYOUT{URL_SNIP_ROWS, 4};
 
-fui::KeyboardLayoutId layoutForLanguage(const char* code) {
-  if (strcmp(code, "FR") == 0) return fui::KeyboardLayoutId::AzertyFr;
-  if (strcmp(code, "DE") == 0) return fui::KeyboardLayoutId::QwertzDe;
-  if (strcmp(code, "ES") == 0) return fui::KeyboardLayoutId::SpanishEs;
-  return fui::KeyboardLayoutId::QwertyEn;
-}
-
 }  // namespace
 
 void KeyboardEntryActivity::onEnter() {
   Activity::onEnter();
   cursorPos = text.length();
-  // URL layers are EN-arranged app tables; everything else follows the UI
-  // language.
-  layoutId = inputType == InputType::Url ? fui::KeyboardLayoutId::QwertyEn : layoutForLanguage(I18N.languageCode());
+  // The firmware is Chinese-only (2.7.5): Wi-Fi names and passwords use the
+  // US QWERTY layout.
+  layoutId = fui::KeyboardLayoutId::QwertyEn;
   shifted = false;
   symbols = false;
   urlPanel = false;

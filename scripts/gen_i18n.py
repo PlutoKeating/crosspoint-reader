@@ -3,17 +3,14 @@
 Generate the built-in I18n catalogue from lib/I18n/translations.
 
 StockStick compiles exactly one language into the firmware: the catalogue
-whose `_order` is "0" (currently chinese.yaml). Every other YAML file in the
-directory is a source for an SD-card language pack built by
-scripts/build_lang_pack.py; the firmware loads those at runtime and falls back
-to the built-in text for any key a pack does not provide.
-
-Packs are matched by key *name* (FNV-1a hash of "STR_..."), never by StrId
-number, so a pack keeps working when a firmware update adds or removes keys.
+whose `_order` is "0" (chinese.yaml). There are no runtime language packs
+(removed in 2.7.5). The only other file, english.yaml, is a translation
+reference kept in step with the built-in keys: this script reports keys it
+lacks or no longer needs.
 
 Outputs (all gitignored, regenerated on every build):
-- I18nKeys.h:     StrId enum, built-in language identity, pack format constants
-- I18nStrings.h:  declarations of the built-in blob, offsets and key hashes
+- I18nKeys.h:     StrId enum, built-in language identity
+- I18nStrings.h:  declarations of the built-in blob and offsets
 - I18nStrings.cpp: definitions
 
 YAML format (flat, no PyYAML dependency):
@@ -37,21 +34,8 @@ from pathlib import Path
 from typing import Dict, List, Set, Tuple
 
 BUILTIN_ORDER = "0"
-# Keep in sync with lib/I18n/I18n.cpp and scripts/build_lang_pack.py.
-PACK_MAGIC = b"SLNG"
-PACK_VERSION = 1
-PACK_CODE_BYTES = 8
-PACK_NAME_BYTES = 32
 
 _LINE = re.compile(r'^([A-Za-z_][A-Za-z0-9_]*)\s*:\s*"(.*)"$')
-
-
-def fnv1a32(text: str) -> int:
-    value = 0x811C9DC5
-    for byte in text.encode("utf-8"):
-        value ^= byte
-        value = (value * 0x01000193) & 0xFFFFFFFF
-    return value
 
 
 def _unescape(raw: str, where: str) -> str:
@@ -96,8 +80,6 @@ def parse_catalogue(path: Path) -> Dict[str, str]:
     code = result["_language_code"]
     if not re.fullmatch(r"[A-Z][A-Z0-9_]{1,6}", code):
         raise ValueError(f"{path}: _language_code must be 2-7 uppercase ASCII characters")
-    if len(result["_language_name"].encode("utf-8")) >= PACK_NAME_BYTES:
-        raise ValueError(f"{path}: _language_name must be shorter than {PACK_NAME_BYTES} bytes")
     return result
 
 
@@ -135,15 +117,6 @@ def referenced_keys(src_dirs: List[str]) -> Set[str]:
     return found
 
 
-def check_hashes(keys: List[str]) -> None:
-    seen: Dict[int, str] = {}
-    for key in keys:
-        value = fnv1a32(key)
-        if value in seen:
-            raise ValueError(f"key hash collision: {key} and {seen[value]}")
-        seen[value] = key
-
-
 def _c_string(value: str) -> str:
     # Escape as bytes; split after hex escapes so following hex digits are not absorbed.
     parts: List[str] = []
@@ -164,7 +137,6 @@ def _c_string(value: str) -> str:
 
 def generate(builtin: Dict[str, str], output_dir: Path) -> None:
     keys = string_keys(builtin)
-    check_hashes(keys)
     code = builtin["_language_code"]
     name = builtin["_language_name"]
 
@@ -196,10 +168,6 @@ def generate(builtin: Dict[str, str], output_dir: Path) -> None:
         f'constexpr const char* BUILTIN_CODE = "{code}";',
         f'constexpr const char* BUILTIN_NAME = "{_c_string(name)}";',
         f"constexpr size_t KEY_COUNT = {len(keys)};",
-        f'constexpr char PACK_MAGIC[4] = {{{", ".join(repr(chr(b)) for b in PACK_MAGIC)}}};',
-        f"constexpr uint16_t PACK_VERSION = {PACK_VERSION};",
-        f"constexpr size_t PACK_CODE_BYTES = {PACK_CODE_BYTES};",
-        f"constexpr size_t PACK_NAME_BYTES = {PACK_NAME_BYTES};",
         "}  // namespace i18n_catalogue",
         "",
     ]
@@ -214,8 +182,6 @@ def generate(builtin: Dict[str, str], output_dir: Path) -> None:
         "namespace i18n_catalogue {",
         "extern const char BUILTIN_DATA[];",
         "extern const uint16_t BUILTIN_OFFSETS[];",
-        "// FNV-1a 32 of each key name, indexed by StrId.",
-        "extern const uint32_t KEY_HASHES[];",
         "}  // namespace i18n_catalogue",
         "",
     ]
@@ -234,13 +200,10 @@ def generate(builtin: Dict[str, str], output_dir: Path) -> None:
     cpp += [f'  "{_c_string(builtin[key])}\\0"  // {key}' for key in keys]
     cpp += [";", "", "const uint16_t BUILTIN_OFFSETS[] = {"]
     cpp += [f"  {offset}," for offset in offsets]
-    cpp += ["};", "", "const uint32_t KEY_HASHES[] = {"]
-    cpp += [f"  0x{fnv1a32(key):08X}u,  // {key}" for key in keys]
     cpp += [
         "};",
         "",
         "static_assert(sizeof(BUILTIN_OFFSETS) / sizeof(BUILTIN_OFFSETS[0]) == KEY_COUNT, \"offset table size\");",
-        "static_assert(sizeof(KEY_HASHES) / sizeof(KEY_HASHES[0]) == KEY_COUNT, \"hash table size\");",
         "",
         "}  // namespace i18n_catalogue",
         "",
@@ -262,9 +225,13 @@ def main(translations_dir: str, output_dir: str, src_dirs: List[str]) -> None:
     if unused:
         print(f"I18n: warning: {len(unused)} built-in keys are never referenced: {', '.join(unused)}")
     for path, catalogue in others:
-        extra = sorted(set(string_keys(catalogue)) - keys)
+        theirs = set(string_keys(catalogue))
+        extra = sorted(theirs - keys)
+        missing_there = sorted(keys - theirs)
         if extra:
-            print(f"I18n: note: {path.name} has {len(extra)} keys the firmware no longer uses (ignored in packs)")
+            print(f"I18n: note: {path.name} has {len(extra)} keys the firmware no longer uses: {', '.join(extra)}")
+        if missing_there:
+            print(f"I18n: note: {path.name} lacks {len(missing_there)} built-in keys: {', '.join(missing_there)}")
     generate(builtin, Path(output_dir))
 
 

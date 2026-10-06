@@ -5,15 +5,13 @@
 #include "BluetoothActivity.h"
 #include "CrossPointSettings.h"
 #include "FirmwareUpdateActivity.h"
-#include "LanguageSelectActivity.h"
 #include "MappedInputManager.h"
 #include "SdFirmwareUpdateActivity.h"
 #include "activities/network/WifiSelectionActivity.h"
 #include "components/UITheme.h"
 
 const SettingsActivity::Item SettingsActivity::items[ITEM_COUNT] = {Item::Network, Item::Bluetooth,
-                                                                    Item::FirmwareUpdate, Item::SdFirmwareUpdate,
-                                                                    Item::Language};
+                                                                    Item::FirmwareUpdate, Item::SdFirmwareUpdate};
 
 StrId SettingsActivity::itemName(const Item item) {
   switch (item) {
@@ -25,8 +23,6 @@ StrId SettingsActivity::itemName(const Item item) {
       return StrId::STR_OTA_TITLE;
     case Item::SdFirmwareUpdate:
       return StrId::STR_SD_FIRMWARE_UPDATE;
-    case Item::Language:
-      return StrId::STR_LANGUAGE;
   }
   return StrId::STR_NONE_OPT;
 }
@@ -52,9 +48,6 @@ void SettingsActivity::openSelected() {
       break;
     case Item::SdFirmwareUpdate:
       startActivityForResult(std::make_unique<SdFirmwareUpdateActivity>(renderer, mappedInput), onResult);
-      break;
-    case Item::Language:
-      startActivityForResult(std::make_unique<LanguageSelectActivity>(renderer, mappedInput), onResult);
       break;
   }
 }

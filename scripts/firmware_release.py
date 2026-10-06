@@ -12,7 +12,6 @@ embedded StockStick descriptor, and writes:
       stockstick-<version>-web.js  browser simulator runtime (same source, Emscripten)
       stockstick-<version>-web.wasm
       manifest.json                identity, size, SHA-256, commit, notes
-      lang/<CODE>.lang             SD-card language packs for this build
       catalogue.json               body for the admin firmware catalogue
 
 Rules enforced (see docs/firmware-ota.md):
@@ -173,16 +172,10 @@ def main() -> int:
     out = args.out / version
     if out.exists():
         shutil.rmtree(out)
-    (out / "lang").mkdir(parents=True)
+    out.mkdir(parents=True)
     binary_name = f"stockstick-{version}.bin"
     (out / binary_name).write_bytes(image)
     shutil.copyfile(build_dir / "firmware.elf", out / f"stockstick-{version}.elf")
-    subprocess.run(
-        [sys.executable, str(ROOT / "scripts" / "build_lang_pack.py"), "--out", str(out / "lang")],
-        cwd=ROOT,
-        check=True,
-        stdout=subprocess.DEVNULL,
-    )
 
     # The website's simulator loads this build from the same directory as the
     # OTA image, so it always runs exactly the published firmware source.

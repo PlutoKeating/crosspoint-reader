@@ -23,9 +23,6 @@ class CrossPointSettings : public PersistableStore<CrossPointSettings> {
   // Bluetooth radio switch (Settings > Bluetooth). Content only arrives over
   // BLE, so this stays on unless the user turns it off for diagnosis.
   uint8_t bluetoothEnabled = 1;
-  // UI language code: the built-in catalogue ("ZH") or an SD-card pack in
-  // /.crosspoint/lang/<code>.lang. Persisted as the "language" string.
-  char language[8] = "ZH";
   // The device never powers itself off: the card stays on screen with idle
   // power saving between loop iterations, and only the power key sleeps it.
 
