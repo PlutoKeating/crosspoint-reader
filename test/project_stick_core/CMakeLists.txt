@@ -50,3 +50,7 @@ target_include_directories(ProjectStickCoreTest PRIVATE ${REPO_ROOT}/lib/uzlib/s
 target_sources(ProjectStickCoreTest PRIVATE ${REPO_ROOT}/lib/ProjectStick/FirmwareTransfer.cpp FirmwareTransferTest.cpp)
 target_compile_definitions(ProjectStickCoreTest PRIVATE
                            FW4_VECTOR_PATH="${CMAKE_CURRENT_SOURCE_DIR}/fixtures/ble-fw4-vector.json")
+
+# Streamed Studio cards (lib/ProjectStick/CardStrip.h): strips of panel columns
+# equal the Portrait framebuffer render pixel for pixel.
+target_sources(ProjectStickCoreTest PRIVATE CardStripTest.cpp)

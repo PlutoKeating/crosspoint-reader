@@ -428,10 +428,14 @@ void loop() {
       cmd.trim();
       if (cmd == "SCREENSHOT") {
         const uint32_t bufferSize = display.getBufferSize();
-        logSerial.printf("SCREENSHOT_START:%d\n", bufferSize);
-        uint8_t* buf = display.getFrameBuffer();
-        logSerial.write(buf, bufferSize);
-        logSerial.printf("SCREENSHOT_END\n");
+        // No framebuffer while a streamed card is shown (2.7.4).
+        if (const uint8_t* buf = display.getFrameBuffer()) {
+          logSerial.printf("SCREENSHOT_START:%d\n", bufferSize);
+          logSerial.write(buf, bufferSize);
+          logSerial.printf("SCREENSHOT_END\n");
+        } else {
+          logSerial.printf("SCREENSHOT_UNAVAILABLE\n");
+        }
       }
     }
   }

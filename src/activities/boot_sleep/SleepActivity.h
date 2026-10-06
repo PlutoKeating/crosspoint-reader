@@ -9,5 +9,7 @@ class SleepActivity final : public Activity {
   explicit SleepActivity(GfxRenderer& renderer, MappedInputManager& mappedInput)
       : Activity("Sleep", renderer, mappedInput) {}
   void onEnter() override;
+  // A streamed card left no framebuffer; onEnter() rebuilds it from the card.
+  bool ownsFrameBuffer() const override { return true; }
   StickTakeover stickTakeover() const override { return StickTakeover::Never; }
 };

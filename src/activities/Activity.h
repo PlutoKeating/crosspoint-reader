@@ -47,6 +47,10 @@ class Activity {
   // activity keeps updating its content underneath); otherwise the manager only
   // overlays the lock on the last framebuffer.
   virtual bool composesKeyguardOverlay() const { return false; }
+  // Pages that may show a frame without the framebuffer (a streamed card)
+  // manage it themselves; for every other page the manager makes sure it
+  // exists before onEnter() and render().
+  virtual bool ownsFrameBuffer() const { return false; }
   // True while the page needs the CPU at full speed (live work: a firmware
   // update, a transfer, live radio diagnostics); otherwise the main loop drops
   // to idle power saving after HalPowerManager::IDLE_POWER_SAVING_MS without

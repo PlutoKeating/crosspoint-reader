@@ -1,4 +1,5 @@
 #pragma once
+#include <HalDisplay.h>
 #include <HalStorage.h>
 #include <StudioProgram.h>
 #include <mbedtls/sha256.h>
@@ -34,6 +35,15 @@ class StudioFrame {
   bool commit();
   void abort(bool discard = false);
   bool render(const GfxRenderer& renderer);
+  // Shows the current visual straight from the SD card, one strip of panel
+  // columns at a time, with `overlay` drawn over each strip (the renderer's
+  // strip target is active while it runs; it must draw the same pixels every
+  // call). No framebuffer is touched. Unavailable: nothing drawn (no visual,
+  // a panel or orientation that cannot stream, no memory for a strip) — use
+  // render(). Failed: the panel was refreshed but a read failed.
+  enum class StreamResult : uint8_t { Shown, Unavailable, Failed };
+  using Overlay = void (*)(const GfxRenderer& renderer, void* ctx);
+  StreamResult stream(const GfxRenderer& renderer, Overlay overlay, void* ctx, HalDisplay::RefreshMode mode);
   void displayed();
   void clear();
   void tick(int64_t now, int event = 0, int64_t alertUntil = 0);
@@ -81,6 +91,8 @@ class StudioFrame {
   int selectedFrame = -1, alertFrame = -1;
   bool alertDisplayed = false;
   bool readProgram(const Snapshot& snapshot, studio::Program& result, size_t& start);
+  // The file and offset of the frame render()/stream() show; false: none.
+  bool visualSource(std::string& path, size_t& size, size_t& start) const;
   HalFile output;
   mbedtls_sha256_context sha{};
   size_t offset = 0;

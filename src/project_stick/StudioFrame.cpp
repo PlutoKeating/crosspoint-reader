@@ -3,7 +3,9 @@
 #include <atomic>
 
 #include <ArduinoJson.h>
+#include <CardStrip.h>
 #include <GfxRenderer.h>
+#include <Logging.h>
 
 #include <algorithm>
 #include <cctype>
@@ -383,6 +385,17 @@ bool StudioFrame::persist() {
   }
   return true;
 }
+bool StudioFrame::visualSource(std::string& path, size_t& size, size_t& start) const {
+  std::lock_guard<std::recursive_mutex> lock(mutex);
+  if (active.hash.empty()) return false;
+  const bool hold = active.size > BYTES && selectedFrame < 0;
+  const auto& visual = alertFrame >= 0 ? savedProgram : hold ? lastVisual : active;
+  start = alertFrame >= 0 ? headerOffset + size_t(alertFrame) * BYTES : hold ? lastVisualOffset : pixelOffset;
+  if (visual.hash.empty()) return false;
+  path = fileFor(visual.hash);
+  size = visual.size;
+  return true;
+}
 bool StudioFrame::render(const GfxRenderer& renderer) {
   // Only the choice of file and offset needs the lock. The SD read and the
   // pixel loop below take hundreds of milliseconds on the render task; holding
@@ -390,17 +403,8 @@ bool StudioFrame::render(const GfxRenderer& renderer) {
   // with it button sampling, so a key released during a repaint was lost.
   std::string path;
   size_t size = 0, start = 0;
-  {
-    std::lock_guard<std::recursive_mutex> lock(mutex);
-    if (active.hash.empty() || renderer.getScreenWidth() != WIDTH || renderer.getScreenHeight() != HEIGHT)
-      return false;
-    const bool hold = active.size > BYTES && selectedFrame < 0;
-    const auto& visual = alertFrame >= 0 ? savedProgram : hold ? lastVisual : active;
-    start = alertFrame >= 0 ? headerOffset + size_t(alertFrame) * BYTES : hold ? lastVisualOffset : pixelOffset;
-    if (visual.hash.empty()) return false;
-    path = fileFor(visual.hash);
-    size = visual.size;
-  }
+  if (renderer.getScreenWidth() != WIDTH || renderer.getScreenHeight() != HEIGHT) return false;
+  if (!visualSource(path, size, start)) return false;
   HalFile file;
   if (!Storage.openFileForRead("STUDIO", path, file)) return false;
   if (file.size() != size || !file.seek(start)) {
@@ -419,6 +423,75 @@ bool StudioFrame::render(const GfxRenderer& renderer) {
   }
   file.close();
   return true;
+}
+namespace {
+struct StripStream {
+  HalFile file;
+  size_t start = 0;
+  const GfxRenderer* renderer = nullptr;
+  StudioFrame::Overlay overlay = nullptr;
+  void* overlayCtx = nullptr;
+  uint8_t* group = nullptr;  // eight card rows
+};
+bool fillStrip(uint8_t* strip, const uint16_t x0, const uint16_t cols, void* ctx) {
+  auto& s = *static_cast<StripStream*>(ctx);
+  const uint16_t stripBytes = cols / 8;
+  if (!s.file.seek(s.start + size_t(x0) * card_strip::CARD_ROW_BYTES)) return false;
+  for (uint16_t k = 0; k < stripBytes; ++k) {
+    if (s.file.read(s.group, card_strip::GROUP_BYTES) != static_cast<int>(card_strip::GROUP_BYTES)) return false;
+    card_strip::transposeGroup(s.group, strip, stripBytes, k);
+  }
+  if (s.overlay) {
+    s.renderer->beginColumnStripTarget(strip, x0, cols);
+    s.overlay(*s.renderer, s.overlayCtx);
+    s.renderer->endStripTarget();
+  }
+  return true;
+}
+}  // namespace
+StudioFrame::StreamResult StudioFrame::stream(const GfxRenderer& renderer, const Overlay overlay, void* ctx,
+                                              const HalDisplay::RefreshMode mode) {
+  using card_strip::CARD_WIDTH;
+  if (!renderer.supportsStripDisplay() || renderer.getOrientation() != GfxRenderer::Portrait ||
+      renderer.getDisplayWidth() != HEIGHT || renderer.getDisplayHeight() != WIDTH)
+    return StreamResult::Unavailable;
+  std::string path;
+  size_t size = 0, start = 0;
+  if (!visualSource(path, size, start)) return StreamResult::Unavailable;
+  StripStream s;
+  if (!Storage.openFileForRead("STUDIO", path, s.file)) return StreamResult::Unavailable;
+  if (s.file.size() != size || start + BYTES > size) {
+    s.file.close();
+    return StreamResult::Unavailable;
+  }
+  // Strips of 72 panel columns (11 per frame, 4.7 KB); narrower ones when the
+  // heap is tight. The eight-row read buffer rides in the same block.
+  uint8_t* block = nullptr;
+  uint16_t stripCols = 0;
+  for (const uint16_t cols : {uint16_t(72), uint16_t(24), uint16_t(8)}) {
+    block = static_cast<uint8_t*>(malloc(size_t(CARD_WIDTH) * cols / 8 + card_strip::GROUP_BYTES));
+    if (block) {
+      stripCols = cols;
+      break;
+    }
+  }
+  if (!block) {
+    s.file.close();
+    return StreamResult::Unavailable;
+  }
+  s.start = start;
+  s.renderer = &renderer;
+  s.overlay = overlay;
+  s.overlayCtx = ctx;
+  s.group = block + size_t(CARD_WIDTH) * stripCols / 8;
+  const bool ok = renderer.displayStrips(&fillStrip, &s, block, stripCols, mode);
+  free(block);
+  s.file.close();
+  if (ok)
+    LOG_DBG("STUDIO", "Streamed card in %u-column strips", static_cast<unsigned>(stripCols));
+  else
+    LOG_ERR("STUDIO", "Streamed card refresh failed: %s", path.c_str());
+  return ok ? StreamResult::Shown : StreamResult::Failed;
 }
 void StudioFrame::displayed() {
   std::lock_guard<std::recursive_mutex> lock(mutex);

@@ -25,6 +25,10 @@ class ProjectStickActivity final : public Activity {
   // card change underneath still shows while locked.
   bool composesKeyguardOverlay() const override { return true; }
   bool skipLoopDelay() override;
+  // Cards stream to the panel without the framebuffer (2.7.4); this page
+  // takes it back only for the status screen and the firmware screen.
+  bool ownsFrameBuffer() const override { return true; }
+  bool handleForcedRefresh() override;
   StickTakeover stickTakeover() const override { return StickTakeover::StickPage; }
 
  private:
@@ -46,7 +50,26 @@ class ProjectStickActivity final : public Activity {
   uint8_t feedbackBubbleFrame = 0;
   void showFeedbackBubble(stick_overlay::Bubble bubble);
   void updateFeedbackBubble();
-  void drawOverlays(bool studio);
+  // Everything the overlays draw, read once per repaint: a streamed card
+  // draws them for every strip of every plane, and they must not change in
+  // between (the controller's baseline would then differ from the panel).
+  struct Layers {
+    bool locked = false;
+    project_stick::Keyguard::State keyguard{};
+    bool keyguardPrompt = false;
+    uint8_t keyguardCue = 0;
+    bool hints = false;
+    stick_overlay::Bubble bubble = stick_overlay::Bubble::None;
+    uint8_t bubbleFrame = 0;
+    stick_overlay::Notice notice = stick_overlay::Notice::None;
+    int noticePercent = 0;
+    uint8_t noticeFrame = 0;
+  } layers;
+  void captureLayers();
+  void drawOverlays(bool studio) const;
+  static void drawCardLayers(const GfxRenderer& renderer, void* self);
+  // A short power press while a streamed card is shown: repaint it HALF.
+  bool forcedRefreshPending = false;
   // Status notice over the card or status screen: live work (a phone link, a
   // transfer with progress, a Wi-Fi join, the cloud heartbeat) and its result.
   static constexpr uint32_t NOTICE_RESULT_MS = 3000;

@@ -40,6 +40,7 @@ class ActivityManager {
 
  protected:
   GfxRenderer& renderer;
+  uint32_t frameBufferWaitSinceMs = 0;
   MappedInputManager& mappedInput;
   std::vector<std::unique_ptr<Activity>> stackActivities;
   std::unique_ptr<Activity> currentActivity;
@@ -104,6 +105,12 @@ class ActivityManager {
   bool needsFullPower() const;
   bool handlesKeyguard() const;
   bool handleForcedRefresh();
+  // Brings the framebuffer back for a page that needs it (render task). When
+  // the heap has no block that large it asks for another render and returns
+  // false; after FRAMEBUFFER_WAIT_MS without one, and no live work, it
+  // reboots to Home (the framebuffer is allocated first at boot).
+  bool acquireFrameBuffer();
+  static constexpr uint32_t FRAMEBUFFER_WAIT_MS = 5000;
   bool skipLoopDelay() const;
   ScreenshotInfo getScreenshotInfo() const;
 

@@ -12,6 +12,7 @@
 
 #include "MappedInputManager.h"
 #include "ProjectStickCore.h"
+#include "activities/ActivityManager.h"
 #include "activities/network/WifiSelectionActivity.h"
 #include "components/UITheme.h"
 #include "fontIds.h"
@@ -403,40 +404,86 @@ void ProjectStickActivity::renderStatusScreen() {
   }
 }
 
+void ProjectStickActivity::captureLayers() {
+  layers.locked = mappedInput.isKeyguardLocked();
+  layers.keyguard = mappedInput.keyguardState();
+  layers.keyguardPrompt = mappedInput.isKeyguardPromptVisible();
+  layers.keyguardCue = mappedInput.keyguardCueFrame();
+  layers.hints = buttonHintsVisible;
+  layers.bubble = feedbackBubble;
+  layers.bubbleFrame = feedbackBubbleFrame;
+  layers.notice = notice;
+  layers.noticePercent = noticePercent;
+  layers.noticeFrame = noticeFrame;
+}
+
 // Transient layers over the frame or status screen: the unlock prompt while
 // locked, otherwise the key hints and the feedback window.
-void ProjectStickActivity::drawOverlays(const bool studio) {
-  if (mappedInput.isKeyguardLocked()) {
-    stick_overlay::drawKeyguard(renderer, mappedInput.keyguardState(), mappedInput.isKeyguardPromptVisible(),
-                                mappedInput.keyguardCueFrame());
+void ProjectStickActivity::drawOverlays(const bool studio) const {
+  if (layers.locked) {
+    stick_overlay::drawKeyguard(renderer, layers.keyguard, layers.keyguardPrompt, layers.keyguardCue);
     return;
   }
-  if (buttonHintsVisible) {
-    if (studio) stick_overlay::drawCardSideKeyHints(renderer, feedbackBubble == stick_overlay::Bubble::None);
+  if (layers.hints) {
+    if (studio) stick_overlay::drawCardSideKeyHints(renderer, layers.bubble == stick_overlay::Bubble::None);
     stick_overlay::drawFrontKeyHints(renderer, tr(STR_PROJECT_STICK_BACK), tr(STR_PROJECT_STICK_CONNECT_WIFI), "",
                                      studio ? tr(STR_PROJECT_STICK_NEXT_CARD) : "");
   }
-  if (studio) stick_overlay::drawFeedbackBubble(renderer, feedbackBubble, feedbackBubbleFrame);
+  if (studio) stick_overlay::drawFeedbackBubble(renderer, layers.bubble, layers.bubbleFrame);
+}
+
+void ProjectStickActivity::drawCardLayers(const GfxRenderer&, void* self) {
+  const auto& page = *static_cast<const ProjectStickActivity*>(self);
+  page.drawOverlays(true);
+  stick_overlay::drawNotice(page.renderer, page.layers.notice, page.layers.noticePercent, page.layers.noticeFrame);
+}
+
+bool ProjectStickActivity::handleForcedRefresh() {
+  if (renderer.hasFrameBuffer()) return false;  // main refreshes the framebuffer page itself
+  forcedRefreshPending = true;
+  requestUpdate(true);
+  return true;
 }
 
 void ProjectStickActivity::render(RenderLock&&) {
   // A firmware update owns the screen: the device restarts when it finishes.
   if (firmware_update::snapshot().busy()) {
-    renderFirmwareUpdate();
+    if (activityManager.acquireFrameBuffer()) renderFirmwareUpdate();
     return;
   }
-  if (StudioFrame::instance().render(renderer)) {
-    drawOverlays(true);
-    stick_overlay::drawNotice(renderer, notice, noticePercent, noticeFrame);
-    renderer.displayBuffer();
-    // Overlays are transient; the card underneath is what was displayed.
-    StudioFrame::instance().displayed();
+  captureLayers();
+  const auto mode = forcedRefreshPending ? HalDisplay::HALF_REFRESH : HalDisplay::FAST_REFRESH;
+  forcedRefreshPending = false;
+  auto& frame = StudioFrame::instance();
+  // X3: the card goes from the SD card to the panel strip by strip and the
+  // ~52 KB framebuffer is freed while it shows.
+  switch (frame.stream(renderer, &ProjectStickActivity::drawCardLayers, this, mode)) {
+    case StudioFrame::StreamResult::Shown:
+      // Overlays are transient; the card underneath is what was displayed.
+      frame.displayed();
+      renderer.releaseFrameBuffer();
+      return;
+    case StudioFrame::StreamResult::Failed:
+      renderer.releaseFrameBuffer();
+      return;
+    case StudioFrame::StreamResult::Unavailable:
+      break;
+  }
+  const bool hadFrameBuffer = renderer.hasFrameBuffer();
+  if (!activityManager.acquireFrameBuffer()) return;
+  if (frame.render(renderer)) {
+    drawCardLayers(renderer, this);
+    renderer.displayBuffer(mode);
+    frame.displayed();
     return;
   }
   // An installed program with no current frame keeps the last visual; only
-  // the lock can be layered onto it.
-  if (StudioFrame::instance().hasContent()) {
-    if (mappedInput.isKeyguardLocked()) {
+  // the lock can be layered onto it, and only when the framebuffer still
+  // holds that visual (a streamed one left none to draw over).
+  if (frame.hasContent()) {
+    if (!hadFrameBuffer) {
+      renderer.releaseFrameBuffer();
+    } else if (layers.locked) {
       drawOverlays(false);
       renderer.displayBuffer();
     }
@@ -444,8 +491,8 @@ void ProjectStickActivity::render(RenderLock&&) {
   }
   renderStatusScreen();
   drawOverlays(false);
-  stick_overlay::drawNotice(renderer, notice, noticePercent, noticeFrame);
-  renderer.displayBuffer();
+  stick_overlay::drawNotice(renderer, layers.notice, layers.noticePercent, layers.noticeFrame);
+  renderer.displayBuffer(mode);
 }
 
 

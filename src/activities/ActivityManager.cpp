@@ -6,6 +6,7 @@
 
 #include <algorithm>
 
+#include "SilentRestart.h"
 #include "boot_sleep/BootActivity.h"
 #include "boot_sleep/SleepActivity.h"
 #include "components/StickOverlays.h"
@@ -14,6 +15,7 @@
 #include "home/CrashActivity.h"
 #include "home/HomeActivity.h"
 #include "project_stick/ProjectStickActivity.h"
+#include "project_stick/ProjectStickHost.h"
 #include "settings/SettingsActivity.h"
 #include "util/FullScreenMessageActivity.h"
 
@@ -46,7 +48,9 @@ void ActivityManager::renderTaskLoop() {
     // Acquire the lock before reading currentActivity to avoid a TOCTOU race
     // where the main task deletes the activity between the null-check and render().
     RenderLock lock;
-    if (mappedInput.isKeyguardLocked() && !(currentActivity && currentActivity->composesKeyguardOverlay())) {
+    if (currentActivity && !currentActivity->ownsFrameBuffer() && !acquireFrameBuffer()) {
+      // Nothing to draw into yet; acquireFrameBuffer() queued a retry.
+    } else if (mappedInput.isKeyguardLocked() && !(currentActivity && currentActivity->composesKeyguardOverlay())) {
       HalPowerManager::Lock powerLock;
       // The activity keeps rendering under the lock: a firmware check, a
       // download or a Wi-Fi connection that finishes while the device is
@@ -166,6 +170,7 @@ void ActivityManager::loop() {
       currentActivity = std::move(pendingActivity);
 
       lock.unlock();  // onEnter may acquire its own lock
+      if (!currentActivity->ownsFrameBuffer()) renderer.ensureFrameBuffer();
       currentActivity->onEnter();
 
       // onEnter may request another pending action, we will handle it in the next loop iteration
@@ -200,6 +205,7 @@ void ActivityManager::replaceActivity(std::unique_ptr<Activity>&& newActivity) {
   } else {
     // No current activity, safe to launch immediately
     currentActivity = std::move(newActivity);
+    if (!currentActivity->ownsFrameBuffer()) renderer.ensureFrameBuffer();
     currentActivity->onEnter();
   }
 }
@@ -263,6 +269,23 @@ bool ActivityManager::handlesKeyguard() const { return currentActivity && curren
 
 bool ActivityManager::needsFullPower() const { return currentActivity && currentActivity->needsFullPower(); }
 
+
+bool ActivityManager::acquireFrameBuffer() {
+  if (renderer.ensureFrameBuffer()) {
+    frameBufferWaitSinceMs = 0;
+    return true;
+  }
+  const uint32_t now = millis();
+  if (frameBufferWaitSinceMs == 0) {
+    frameBufferWaitSinceMs = now | 1;
+  } else if (now - frameBufferWaitSinceMs >= FRAMEBUFFER_WAIT_MS && !PROJECT_STICK_HOST.busy()) {
+    LOG_ERR("ACT", "Framebuffer unavailable for %lu ms (largest block %u B); rebooting", now - frameBufferWaitSinceMs,
+            static_cast<unsigned>(ESP.getMaxAllocHeap()));
+    silentRestart();
+  }
+  requestUpdate();
+  return false;
+}
 
 bool ActivityManager::handleForcedRefresh() { return currentActivity && currentActivity->handleForcedRefresh(); }
 
