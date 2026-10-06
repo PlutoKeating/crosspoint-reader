@@ -35,9 +35,6 @@ std::string setupProofMessage(const std::string& nonce, const std::string& devic
 std::string scanMessage(const std::string& nonce);
 std::string wifiMessage(const std::string& nonce, const std::string& ssid, const std::string& pw);
 std::string bindMessage(const std::string& nonce, const std::string& owner, uint32_t epoch, const std::string& ct);
-// BLE-triggered OTA (Project.StockStick docs/product/BLE-ONLY-DELIVERY.md).
-std::string otaMessage(const std::string& nonce, const std::string& version, const std::string& sha256, size_t bytes,
-                       const std::string& url);
 // Phone-relayed sync (since 2.6.0, BLE-first): the phone uploaded the STATE
 // characteristic to the cloud and hands back the server clock, the trading-day
 // flag, how many pending events it acknowledges and whether the OTA outcome

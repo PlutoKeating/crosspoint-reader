@@ -44,3 +44,9 @@ target_sources(ProjectStickCoreTest PRIVATE AllocationFreeTest.cpp)
 target_sources(ProjectStickCoreTest PRIVATE ${REPO_ROOT}/lib/ProjectStick/StudioTransfer.cpp
                ${REPO_ROOT}/lib/uzlib/src/tinflate.c StudioTransferTest.cpp)
 target_include_directories(ProjectStickCoreTest PRIVATE ${REPO_ROOT}/lib/uzlib/src)
+
+# Firmware over BLE (op fw4, lib/ProjectStick/FirmwareTransfer): the mini
+# program's vector, read from fixtures/ at run time.
+target_sources(ProjectStickCoreTest PRIVATE ${REPO_ROOT}/lib/ProjectStick/FirmwareTransfer.cpp FirmwareTransferTest.cpp)
+target_compile_definitions(ProjectStickCoreTest PRIVATE
+                           FW4_VECTOR_PATH="${CMAKE_CURRENT_SOURCE_DIR}/fixtures/ble-fw4-vector.json")

@@ -11,7 +11,7 @@
 // Studio BLE service, the only content channel (Project.StockStick
 // docs/product/BLE-ONLY-DELIVERY.md). Bound devices use the secret delivered
 // at bind time: protocol 4 frame/program transfers (docs/product/BLE-TRANSFER-V4.md),
-// Wi-Fi setup and OTA triggers.
+// firmware transfers (op fw4), Wi-Fi setup and the phone-relayed sync.
 // Unbound devices run setup mode (protocol 3, docs/product/BLE-SETUP.md): the
 // phone scans the setup QR (device id + one-time key K), binds the device to
 // its account and pushes Wi-Fi credentials. The device cloud bearer is never
@@ -44,10 +44,6 @@ void setPumpTask(TaskHandle_t task);
 void pump();
 void tick();
 bool connected();
-// Age of the current phone link and time since its last read or write (0
-// without a link): inputs to project_stick::phoneLinkAction.
-uint32_t linkedForMs();
-uint32_t idleForMs();
 // A content transfer is receiving or being installed (ProjectStickHost keeps
 // Wi-Fi off meanwhile so the heap goes to the transfer).
 bool transferActive();
@@ -127,13 +123,10 @@ struct WifiRequest {
 bool takeWifiRequest(WifiRequest& out);
 bool takeScanRequest();
 
-// Op `ota` (bound mode): the phone names a catalogue image; the activity hands
-// it to the background worker. STATUS reports firmware_update progress.
-struct OtaRequest {
-  std::string version, url, sha256;
-  size_t bytes = 0;
-};
-bool takeOtaRequest(OtaRequest& out);
+// Firmware over BLE (op fw4, bound mode, 2.7.4; replaces op `ota`): the phone
+// streams the image like a content transfer; the pump task writes it to
+// firmware.tmp, then installs it like an SD-card update and restarts. STATUS
+// `ota` reports the firmware_update phases (verifying, installing, ...).
 
 // BLE-first sync (2.6.0, Project.StockStick docs/product/BLE-ONLY-DELIVERY.md):
 // the STATE characteristic carries what the cloud heartbeat used to (firmware,

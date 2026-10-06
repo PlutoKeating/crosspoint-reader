@@ -145,7 +145,8 @@ const std::vector<Bytes>& rawFrames() {
       const Bytes blob = unhex(f.deflate);
       io.stage = blob;
       FrameInflater inflater;
-      EXPECT_EQ(inflater.inflate(io, digestOf(f.digest)), Error::None) << f.digest;
+      const Digest expected = digestOf(f.digest);
+      EXPECT_EQ(inflater.inflate(io, FRAME_BYTES, &expected), Error::None) << f.digest;
       out.push_back(io.output);
     }
     return out;

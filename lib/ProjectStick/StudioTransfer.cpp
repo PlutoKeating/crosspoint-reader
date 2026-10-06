@@ -20,6 +20,9 @@ constexpr const char* ERROR_NAMES[] = {
     "insufficient_storage",
     "authorization_failed",
     "insufficient_memory",
+    "checksum_mismatch",
+    "low_battery",
+    "trial_active",
 };
 constexpr size_t ERROR_COUNT = sizeof(ERROR_NAMES) / sizeof(ERROR_NAMES[0]);
 
@@ -250,7 +253,7 @@ bool Assembler::inflateRecord() {
   // phone by now, so this is the easy allocation of the transfer.
   if (!inflater_) inflater_.reset(new (std::nothrow) FrameInflater());
   if (!inflater_) return fail(Error::InsufficientMemory);
-  const Error error = inflater_->inflate(*io_, digests_[next_]);
+  const Error error = inflater_->inflate(*io_, FRAME_BYTES, &digests_[next_]);
   if (error != Error::None) return fail(error);
   ++next_;
   return advance();
@@ -270,7 +273,8 @@ int FrameInflater::readByte(uzlib_uncomp* decomp) {
   return source->buffer[0];
 }
 
-Error FrameInflater::inflate(Io& io, const Digest& expected) {
+Error FrameInflater::inflate(RecordIo& io, const size_t expectedBytes, const Digest* expected,
+                             ble_crypto::Sha256* running) {
   static_assert(offsetof(Source, decomp) == 0, "uzlib callback casts the decompressor back to Source");
   memset(&source_, 0, sizeof(source_));
   source_.io = &io;
@@ -283,24 +287,26 @@ Error FrameInflater::inflate(Io& io, const Digest& expected) {
   for (;;) {
     source_.decomp.dest_start = out_;
     source_.decomp.dest = out_;
-    source_.decomp.dest_limit = out_ + std::min(sizeof(out_), FRAME_BYTES + 1 - produced);
+    source_.decomp.dest_limit = out_ + std::min(sizeof(out_), expectedBytes + 1 - produced);
     const int result = uzlib_uncompress(&source_.decomp);
     const size_t count = static_cast<size_t>(source_.decomp.dest - out_);
     if (source_.failed) return Error::StorageFailure;
     if (result < 0) return Error::FrameMismatch;
     produced += count;
-    if (produced > FRAME_BYTES) return Error::FrameMismatch;
+    if (produced > expectedBytes) return Error::FrameMismatch;
     if (count) {
-      sha.update(out_, count);
+      if (expected) sha.update(out_, count);
+      if (running) running->update(out_, count);
       if (!io.write(out_, count)) return Error::StorageFailure;
     }
     if (result == TINF_DONE) break;
     if (count == 0 && source_.decomp.eof) return Error::FrameMismatch;
   }
-  if (produced != FRAME_BYTES) return Error::FrameMismatch;
+  if (produced != expectedBytes) return Error::FrameMismatch;
+  if (!expected) return Error::None;
   uint8_t digest[32];
   sha.finish(digest);
-  return memcmp(digest, expected.data(), 32) == 0 ? Error::None : Error::FrameMismatch;
+  return memcmp(digest, expected->data(), 32) == 0 ? Error::None : Error::FrameMismatch;
 }
 
 }  // namespace studio_v4

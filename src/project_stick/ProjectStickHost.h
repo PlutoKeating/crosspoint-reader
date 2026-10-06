@@ -136,9 +136,6 @@ class ProjectStickHost {
   // A cloud sync owed once the phone lets go of the link (bind, came online).
   bool syncAfterBle_ = false;
   // An OTA the phone requested over BLE, held until the worker accepts it.
-  bool otaPending_ = false;
-  ProjectStickService::FirmwareTarget otaTarget_;
-  project_stick::Deadline otaQueueDeadline_;
 
   uint32_t lastSyncAttemptMs_ = 0;
   uint32_t lastAlertPollMs_ = 0;

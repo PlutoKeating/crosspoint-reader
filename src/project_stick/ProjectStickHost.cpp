@@ -51,7 +51,7 @@ void ProjectStickHost::refreshWifiSaved() {
 
 bool ProjectStickHost::busy() const {
   return begun_ && (studio_ble::connected() || StudioFrame::instance().busy() || bleWifiActive_ || bleScanActive_ ||
-                    bleScanPending_ || otaPending_ || firmware_update::snapshot().busy() ||
+                    bleScanPending_ || firmware_update::snapshot().busy() ||
                     PROJECT_STICK_BACKGROUND_SYNC.busy());
 }
 
@@ -187,24 +187,6 @@ void ProjectStickHost::tickBle(const uint32_t nowMs) {
   if (studio_ble::takeScanRequest()) bleScanPending_ = true;
   if (bleScanPending_ && !bleWifiActive_ && !bleScanActive_) startBleScan();
   if (bleScanActive_) pollBleScan();
-
-  studio_ble::OtaRequest ota;
-  if (studio_ble::takeOtaRequest(ota)) {
-    otaTarget_ = {ota.version, ota.url, ota.sha256, ota.bytes};
-    otaPending_ = true;
-    otaQueueDeadline_.start(millis(), project_stick::OTA_QUEUE_DEADLINE_MS);
-  }
-  if (otaPending_ && PROJECT_STICK_BACKGROUND_SYNC.requestFirmwareInstall(otaTarget_)) {
-    otaPending_ = false;
-    otaQueueDeadline_.stop();
-  } else if (otaPending_ && otaQueueDeadline_.expired(millis())) {
-    // The worker never became free: report it to the phone (STATUS.ota) rather
-    // than leaving the request queued forever.
-    LOG_ERR("OTA", "BLE update request not accepted by the worker in time");
-    otaPending_ = false;
-    otaQueueDeadline_.stop();
-    firmware_update::fail("device_busy");
-  }
 }
 
 void ProjectStickHost::startBleWifi(const std::string& ssid, const std::string& password) {
@@ -322,9 +304,6 @@ void ProjectStickHost::refreshBleState(uint32_t nowMs) {
 bool ProjectStickHost::backgroundJobDeferred() const {
   project_stick::PhoneLinkInputs in;
   in.phoneLinked = studio_ble::connected();
-  in.transferActive = studio_ble::transferActive() || StudioFrame::instance().busy();
-  in.linkedForMs = studio_ble::linkedForMs();
-  in.idleForMs = studio_ble::idleForMs();
   return project_stick::phoneLinkAction(in) == project_stick::PhoneLinkAction::Defer;
 }
 
@@ -335,8 +314,13 @@ project_stick::WifiNeeds ProjectStickHost::wifiNeeds(const uint32_t nowMs) const
   needs.bleJoinActive = bleWifiActive_ || bleScanActive_ || bleScanPending_;
   needs.joinHold = wifiJoinHoldUntilMs_ != 0 && static_cast<int32_t>(wifiJoinHoldUntilMs_ - nowMs) > 0;
   needs.pageHold = wifiPageHold_ || wifiSuspended_;
-  needs.cloudJob = PROJECT_STICK_BACKGROUND_SYNC.busy() || firmware_update::snapshot().busy();
-  needs.otaRequested = otaPending_;
+  // On-device firmware check or install (Settings): user-initiated, it
+  // disconnects a linked phone and needs Wi-Fi. Everything else the worker
+  // runs is background work that waits for a linked phone to leave.
+  using Kind = ProjectStickBackgroundSync::WorkKind;
+  const Kind kind = PROJECT_STICK_BACKGROUND_SYNC.runningKind();
+  needs.userJob = kind == Kind::FirmwareCheck || kind == Kind::FirmwareInstall;
+  needs.cloudJob = PROJECT_STICK_BACKGROUND_SYNC.busy() && !needs.userJob;
   // Cloud needs only count when there is a network to join.
   const bool canJoin = wifiSaved_ || WiFi.status() == WL_CONNECTED;
   needs.heartbeatDue = canJoin && service_.hasCredential() && !inactive_ && !service_.phoneSyncFresh() &&
@@ -375,9 +359,9 @@ void ProjectStickHost::tickOnline(const uint32_t nowMs) {
   if (wanted != wifiWantedLogged_) {
     // Rare (state changes only); tells the serial log why the radio is up or down.
     wifiWantedLogged_ = wanted;
-    LOG_INF("WIFI", "Wi-Fi %s (phone=%u transfer=%u join=%u hold=%u page=%u job=%u ota=%u heartbeat=%u alerts=%u trial=%u)",
+    LOG_INF("WIFI", "Wi-Fi %s (phone=%u transfer=%u join=%u hold=%u page=%u user=%u job=%u heartbeat=%u alerts=%u trial=%u)",
             wanted ? "wanted" : "not wanted", needs.phoneLinked, needs.transferActive, needs.bleJoinActive,
-            needs.joinHold, needs.pageHold, needs.cloudJob, needs.otaRequested, needs.heartbeatDue, needs.alertWindow,
+            needs.joinHold, needs.pageHold, needs.userJob, needs.cloudJob, needs.heartbeatDue, needs.alertWindow,
             needs.trialPending);
   }
   if (wanted) lastWifiWantedMs_ = nowMs;
@@ -411,10 +395,8 @@ void ProjectStickHost::tickOnline(const uint32_t nowMs) {
   // no faster than poll_interval_seconds. Nothing goes out while the shared
   // API backoff holds (429 / 5xx / unreachable) or without a credential; the
   // job itself waits for the on-demand link.
-  // A linked phone defers background jobs while it is active (never during a
-  // content transfer, at most PHONE_DEFER_MAX_MS otherwise); the queued job
-  // then disconnects it (2.7.3: a phone that kept reconnecting used to block
-  // the heartbeat and alerts for good).
+  // A linked phone defers every background job until it leaves (2.7.4): it
+  // relays the heartbeat's information itself and Wi-Fi stays off meanwhile.
   const bool phoneDefers = backgroundJobDeferred();
   const bool cloudAllowed =
       !updating && !phoneDefers && !inactive_ && !ProjectStickService::apiBlocked() && service_.hasCredential();

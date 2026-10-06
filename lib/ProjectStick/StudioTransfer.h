@@ -51,6 +51,10 @@ enum class Error : uint8_t {
   InsufficientStorage = 9,
   Authorization = 10,
   InsufficientMemory = 11,  // no heap for the transfer buffers (begin4 / first record)
+  // Firmware over BLE (op fw4, 2.7.4).
+  ChecksumMismatch = 12,  // the received image's SHA-256 differs from the announced one
+  LowBattery = 13,        // below 30 % and not charging
+  TrialActive = 14,       // a new image is still on its trial boot
 };
 // STATUS `error` string for a code ("" for None) and the reverse (None for an
 // unknown name, which the PROGRESS value then reports as 0).
@@ -73,26 +77,33 @@ bool parseNeedHex(const std::string& hex, size_t frames, std::vector<bool>& need
 using Digest = std::array<uint8_t, 32>;
 bool parseDigest(const char* hex, Digest& out);
 
-// Storage behind the Assembler: the device writes to the SD card, host tests
+// Sequential output plus a staging area for one compressed record: what the
+// record inflater needs. Shared by content transfers (Io below) and firmware
+// transfers (FirmwareTransfer.h). The device writes to the SD card, host tests
 // to memory. Every call reports success; a false return fails the transfer
 // with Error::StorageFailure.
-class Io {
+class RecordIo {
  public:
-  virtual ~Io() = default;
-  // Sequential output of the reconstructed file (header, then frames in order).
+  virtual ~RecordIo() = default;
+  // Sequential output of the reconstructed file.
   virtual bool write(const uint8_t* data, size_t size) = 0;
-  // The SSP1 header has been written: report the frame digests and which
-  // frames the device already holds (frames before `firstFrame` are already in
-  // the output on a resume and are ignored). Return false for an invalid header.
-  virtual bool resolve(std::vector<Digest>& frames, std::vector<bool>& have, Error& error) = 0;
-  // Appends locally held frame `index` (have[index] was true) to the output.
-  virtual bool copyFrame(size_t index) = 0;
   // Staging area for one compressed record, read back to inflate it.
   virtual bool stageBegin() = 0;
   virtual bool stageWrite(const uint8_t* data, size_t size) = 0;
   virtual bool stageRewind() = 0;
   // Returns bytes read (0 at the end), or -1 on an error.
   virtual int stageRead(uint8_t* data, size_t size) = 0;
+};
+
+// Content transfers: the SSP1 file (header, then frames in order).
+class Io : public RecordIo {
+ public:
+  // The SSP1 header has been written: report the frame digests and which
+  // frames the device already holds (frames before `firstFrame` are already in
+  // the output on a resume and are ignored). Return false for an invalid header.
+  virtual bool resolve(std::vector<Digest>& frames, std::vector<bool>& have, Error& error) = 0;
+  // Appends locally held frame `index` (have[index] was true) to the output.
+  virtual bool copyFrame(size_t index) = 0;
 };
 
 // Consumes the decrypted stream in order. The caller checks stream offsets and
@@ -145,16 +156,19 @@ class Assembler {
 };
 
 // Inflates one raw-deflate record from `io`'s staging area into `io.write`,
-// checking the exact frame size and digest. Fixed-size state (uzlib, a 1 KB
-// dictionary and small buffers) lives in this object; keep one per receiver.
+// checking that it produces exactly `expectedBytes`. With `expected` the
+// output's digest must match it (frames); `running` additionally receives the
+// output (the whole-image hash of a firmware transfer). Fixed-size state
+// (uzlib, a 1 KB dictionary and small buffers) lives in this object; it is
+// allocated for the data phase of a transfer only.
 class FrameInflater {
  public:
-  Error inflate(Io& io, const Digest& expected);
+  Error inflate(RecordIo& io, size_t expectedBytes, const Digest* expected, ble_crypto::Sha256* running = nullptr);
 
  private:
   struct Source {
     uzlib_uncomp decomp;  // must stay first: the uzlib callback casts back
-    Io* io;
+    RecordIo* io;
     uint8_t buffer[256];
     bool failed;
   } source_{};

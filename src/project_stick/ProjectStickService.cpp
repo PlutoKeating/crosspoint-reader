@@ -3,6 +3,7 @@
 #include <HalPowerManager.h>
 
 #include "FirmwareInstall.h"
+#include "FirmwareReceiver.h"
 #include "FirmwareUpdateState.h"
 #include "StudioBluetooth.h"
 #include "StudioFrame.h"
@@ -103,11 +104,11 @@ void describeFirmware(JsonDocument& request) {
   request["firmware_version"] = CROSSPOINT_VERSION;
   request["firmware_build"] = firmware_install::runningBuild();
   JsonObject capabilities = request["capabilities"].to<JsonObject>();
-  // Content over BLE only: protocol 2 frames/programs, protocol 3 setup
-  // (bind, Wi-Fi) and BLE-triggered OTA (resumable download of the catalogue
-  // image, identity checks, trial boot with automatic rollback).
+  // Content over BLE only: protocol 4 transfers, protocol 3 setup (bind,
+  // Wi-Fi) and firmware over BLE (op fw4, 2.7.4: the phone streams the image,
+  // which is installed like an SD-card update with a trial boot).
   capabilities["ble"] = 3;
-  capabilities["ota"] = 3;
+  capabilities["ota"] = 4;
   capabilities["panel"] = gpio.deviceIsX3() ? "xteink_x3" : "xteink_x4";
 }
 
@@ -220,6 +221,7 @@ void ProjectStickService::begin() {
 #ifdef SIMULATOR
   importSimulatorProgram();
   importSimulatorStream();
+  importSimulatorFirmware();
 #endif
   currentDisplay.alertUntil = PROJECT_STICK_STORE.alertUntil;
 }
@@ -317,21 +319,18 @@ void ProjectStickService::beginJob(const char* label, const bool userInitiated) 
 
 // Start of a cloud job (worker task, inside its RadioLease): a phone holding
 // the BLE link must yield, since TLS and a connected NimBLE stack do not fit
-// in the C3's heap together (2.7.3). User-initiated jobs disconnect it at
-// once; a background job leaves an active phone alone and is skipped (the host
-// queues it again later, and forces it after PHONE_DEFER_MAX_MS). The phone
-// cannot reconnect until the job's lease restores the stack. Returns false
-// when the job must not run now.
+// in the C3's heap together. A job the user started on the device disconnects
+// it at once; a background job is skipped while any phone is linked (2.7.4:
+// the host queues it again once the phone has left). The phone cannot
+// reconnect until the job's lease restores the stack. Returns false when the
+// job must not run now.
 bool ProjectStickService::yieldPhoneLink() {
   if (radioLent || !studio_ble::connected()) return true;
   project_stick::PhoneLinkInputs in;
   in.phoneLinked = true;
   in.userInitiated = userJob;
-  in.transferActive = studio_ble::transferActive() || StudioFrame::instance().busy();
-  in.linkedForMs = studio_ble::linkedForMs();
-  in.idleForMs = studio_ble::idleForMs();
   if (project_stick::phoneLinkAction(in) == project_stick::PhoneLinkAction::Defer) {
-    LOG_INF("STICK", "%s deferred: the phone is active (linked %us)", jobLabel, (unsigned)(in.linkedForMs / 1000));
+    LOG_INF("STICK", "%s deferred: a phone is linked", jobLabel);
     lastFailure = project_stick::NetFailure::Backoff;
     return false;
   }
@@ -1096,22 +1095,17 @@ void ProjectStickService::installFirmware(const FirmwareTarget& target) {
     Storage.remove(FIRMWARE_META);
     return fail("checksum_mismatch");
   }
-  const auto candidate = firmware_install::inspect(FIRMWARE_TEMP, target.version.c_str());
-  if (!candidate.ok()) {
-    Storage.remove(FIRMWARE_TEMP);
-    Storage.remove(FIRMWARE_META);
-    return fail(stick_fw::installVerdictName(candidate.verdict));
-  }
   firmware_update::setPhase(firmware_update::Phase::Installing);
+  // The same SD install as Settings > SD-card update and firmware over BLE.
   auto onProgress = +[](size_t written, size_t, void*) { firmware_update::setProgress(written); };
-  auto armTrial = +[](const esp_partition_t* dest, void* version) {
-    return ota_trial::arm(dest, static_cast<const char*>(version));
-  };
-  const auto result = firmware_flash::flashFromSdPath(FIRMWARE_TEMP, onProgress,
-                                                      const_cast<char*>(target.version.c_str()), false, armTrial);
-  if (result != firmware_flash::Result::OK) {
-    ota_trial::disarm();  // the new image will not boot, so there is no trial
-    return fail(firmware_flash::resultName(result));
+  const auto installed =
+      firmware_install::installFromSd(FIRMWARE_TEMP, target.version.c_str(), false, onProgress, nullptr);
+  if (!installed.ok) {
+    if (!installed.flashFailed) {  // the image itself is wrong: do not resume it
+      Storage.remove(FIRMWARE_TEMP);
+      Storage.remove(FIRMWARE_META);
+    }
+    return fail(installed.error);
   }
   Storage.remove(FIRMWARE_TEMP);
   Storage.remove(FIRMWARE_META);
@@ -1376,6 +1370,54 @@ void ProjectStickService::importSimulatorStream() {
   if (!ok) receiver.abort(true);
   LOG_INF("STICK", "v4 import %s: %u stream bytes for %u bytes (%s)", ok ? "installed" : "failed", (unsigned)length,
           (unsigned)size, studio_v4::errorName(receiver.error()));
+}
+
+// Test hook for firmware over BLE (op fw4; no radio in the simulator):
+// /.crosspoint/studio/import.fw4 holds a decrypted record stream and
+// import.fw4.json the fw4 fields {sha256, size[, stop_at]}. The stream goes
+// through the same FirmwareReceiver as BLE; with stop_at the first pass stops
+// there (link lost) and resumes from the receiver's checkpoint. The verified
+// image stays in firmware.tmp (flashing is stubbed in the simulator).
+void ProjectStickService::importSimulatorFirmware() {
+  constexpr char STREAM[] = "/.crosspoint/studio/import.fw4";
+  constexpr char META[] = "/.crosspoint/studio/import.fw4.json";
+  HalFile metaFile;
+  if (!Storage.exists(META) || !Storage.openFileForRead("STUDIO", META, metaFile)) return;
+  JsonDocument meta;
+  const bool parsed = !deserializeJson(meta, metaFile);
+  metaFile.close();
+  HalFile file;
+  if (!parsed || !Storage.openFileForRead("STUDIO", STREAM, file)) return;
+  const size_t length = file.size();
+  auto stream = makeUniqueNoThrow<uint8_t[]>(length);
+  const bool loaded = stream && file.read(stream.get(), length) == static_cast<int>(length);
+  file.close();
+  Storage.remove(STREAM);
+  Storage.remove(META);
+  if (!loaded) return;
+  const std::string sha = meta["sha256"] | "";
+  const size_t size = meta["size"] | size_t(0), stopAt = meta["stop_at"] | size_t(0);
+  auto& receiver = FirmwareReceiver::instance();
+  auto feed = [&](size_t from, size_t to) {
+    for (size_t at = from; at < to;) {
+      const size_t n = std::min<size_t>(504, to - at);
+      if (!receiver.feed(stream.get() + at, n)) return false;
+      at += n;
+    }
+    return true;
+  };
+  bool ok = receiver.start(sha, size);
+  LOG_INF("STICK", "fw4 import: start %s at stream %u", ok ? "ok" : "failed", (unsigned)receiver.streamOffset());
+  if (ok && stopAt && stopAt < length) {
+    ok = feed(receiver.streamOffset(), stopAt);
+    receiver.abort();  // the link dropped: the partial and its checkpoint stay
+    ok = ok && receiver.start(sha, size);
+    LOG_INF("STICK", "fw4 import: stopped at %u, resumed at stream %u (image %u)", (unsigned)stopAt,
+            (unsigned)receiver.streamOffset(), (unsigned)receiver.rawDone());
+  }
+  ok = ok && feed(receiver.streamOffset(), length) && receiver.complete();
+  LOG_INF("STICK", "fw4 import %s: %u stream bytes for a %u-byte image (%s)", ok ? "complete" : "failed",
+          (unsigned)length, (unsigned)size, studio_v4::errorName(receiver.error()));
 }
 #endif
 

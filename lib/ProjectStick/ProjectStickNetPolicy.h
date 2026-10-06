@@ -71,8 +71,7 @@ class Deadline {
 };
 
 // How long the UI waits for the worker: a firmware check (queueing behind a
-// running job included), and a BLE-triggered install waiting for the worker.
+// running job included).
 constexpr uint32_t FIRMWARE_CHECK_DEADLINE_MS = 60000;
-constexpr uint32_t OTA_QUEUE_DEADLINE_MS = 60000;
 
 }  // namespace project_stick

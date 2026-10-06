@@ -16,7 +16,15 @@
 #include <StudioTransfer.h>
 
 #include "StudioReceiver.h"
+#include <FirmwareTransfer.h>
+#include <HalPowerManager.h>
+#include <StickFirmware.h>
+#include <WiFi.h>
 #include <optional>
+
+#include "FirmwareInstall.h"
+#include "FirmwareReceiver.h"
+#include "network/OtaTrial.h"
 
 #include <Arduino.h>
 #include <NimBLEDevice.h>
@@ -101,13 +109,19 @@ size_t queueSlots = 0;                           // allocated slots, 0 outside a
 size_t queueHead = 0, queueCount = 0;            // under `mutex`
 size_t queuedEnd = 0, announcedOffset = 0;  // bytes accepted from the phone; offset promised at `begin4`
 uint32_t sessionId = 0;                     // bumps on every resetSession; pump() drops stale results
-enum class PendingOp : uint8_t { None, Start, Commit };
+enum class PendingOp : uint8_t { None, Start, Commit, FirmwareStart };
 PendingOp pendingOp = PendingOp::None;
 std::string pendingTask, pendingHash;
 int64_t pendingExpires = 0;
 size_t pendingSize = 0, pendingHeader = 0;
 StudioReceiver::Resume pendingResume;
 bool pendingAbort = false, pendingDiscard = false;
+// Firmware over BLE (op fw4, 2.7.4): the session streams an image instead of
+// content. FirmwareReceiver writes it to firmware.tmp; once complete the
+// pump installs it like an SD-card update and restarts.
+bool firmwareTransfer = false;
+std::string firmwareVersion, firmwareSha;
+size_t firmwareSize = 0;
 // Protocol 4 progress (PROGRESS characteristic and STATUS `need`).
 NimBLECharacteristic* progressChar = nullptr;  // under `mutex`; null while the stack is down
 uint32_t progressSeq = 0;
@@ -156,7 +170,6 @@ enum class BindState { None, Pending, Done, Failed };
 BindState bindState = BindState::None;
 std::optional<Binding> pendingBinding;
 std::optional<WifiRequest> pendingWifi;
-std::optional<OtaRequest> pendingOta;
 std::optional<SyncRequest> pendingSync;
 std::optional<TokenRequest> pendingToken;
 bool pendingUnbind = false;
@@ -245,6 +258,10 @@ void resetSession() {
   needCount = 0;
   rebuiltBytes = 0;
   transferHeader = 0;
+  firmwareTransfer = false;
+  firmwareVersion.clear();
+  firmwareSha.clear();
+  firmwareSize = 0;
   ++sessionId;
   transferTotal = 0;
   changed();
@@ -330,9 +347,9 @@ const char* otaStateName(firmware_update::Phase phase) {
 // Bound mode only; omitted while no update was requested since boot.
 void addOta(JsonDocument& doc) {
   const auto update = firmware_update::snapshot();
-  if (update.phase == firmware_update::Phase::Idle && !pendingOta) return;
+  if (update.phase == firmware_update::Phase::Idle) return;
   JsonObject ota = doc["ota"].to<JsonObject>();
-  ota["state"] = pendingOta ? "queued" : otaStateName(update.phase);
+  ota["state"] = otaStateName(update.phase);
   ota["received"] = update.done;
   if (update.phase == firmware_update::Phase::Failed && update.error[0]) ota["error"] = update.error;
 }
@@ -345,7 +362,8 @@ std::string finishStatus(JsonDocument& doc) {
 // the frame is on the panel, `scheduled` for a program with no current card.
 StudioFrame::Snapshot refreshOutcomeLocked() {
   auto snapshot = StudioFrame::instance().snapshot();
-  if (authenticated && snapshot.task == task && state != "receiving" && state != "failed") {
+  // A firmware transfer ends in a restart, not a displayed frame.
+  if (authenticated && !firmwareTransfer && snapshot.task == task && state != "receiving" && state != "failed") {
     const char* outcome = snapshot.displayed ? "displayed"
                           : snapshot.size > StudioFrame::BYTES && snapshot.card.empty() ? "scheduled"
                                                                                           : nullptr;
@@ -361,7 +379,9 @@ studio_v4::State progressStateLocked() {
   if (state == "failed") return studio_v4::State::Failed;
   if (state == "paused") return studio_v4::State::Paused;
   if (!authenticated) return studio_v4::State::Idle;
-  if (state == "receiving") return framesPhase ? studio_v4::State::ReceivingFrames : studio_v4::State::ReceivingHeader;
+  // A firmware transfer reports state 1 for its whole stream (no `need`).
+  if (state == "receiving")
+    return framesPhase && !firmwareTransfer ? studio_v4::State::ReceivingFrames : studio_v4::State::ReceivingHeader;
   if (state == "refreshing") return studio_v4::State::Committing;
   if (state == "displayed") return studio_v4::State::Displayed;
   if (state == "scheduled") return studio_v4::State::Scheduled;
@@ -520,24 +540,6 @@ bool handleSetupOp(const std::string& op, JsonDocument& doc) {
     bindState = BindState::Pending;
     return true;
   }
-  if (op == "ota") {
-    OtaRequest request;
-    request.version = doc["version"] | "";
-    request.sha256 = doc["sha256"] | "";
-    request.bytes = doc["bytes"] | size_t(0);
-    request.url = doc["url"] | "";
-    if (sessionSetup) return reject("invalid_control");
-    if (!equalProof(proof, mac(ble_setup::otaMessage(nonce, request.version, request.sha256, request.bytes,
-                                                     request.url))))
-      return reject("authorization_failed");
-    // The worker validates the image source, size and hash before any download.
-    if (request.version.empty() || request.url.empty() || request.sha256.size() != 64 || request.bytes == 0 ||
-        pendingOta || firmware_update::snapshot().busy())
-      return reject("invalid_control");
-    error.clear();
-    pendingOta = std::move(request);
-    return true;
-  }
   if (op == "token") {
     // A bound device that lost its cloud token (2.6.x store write under a
     // starved heap) gets a fresh one from the owner's phone; the BLE
@@ -584,6 +586,25 @@ bool handleSetupOp(const std::string& op, JsonDocument& doc) {
     return true;
   }
   return false;
+}
+// Caller holds `mutex`. Positions the session's AES-256-CTR stream (key
+// mac(K, "enc|N"), counter N) at stream offset `skip`, for a fresh transfer
+// (0) or a resume.
+bool seekCipherLocked(const size_t skip) {
+  if (!unhex(nonce, counter, sizeof(counter))) return false;
+  counterOffset = 0;
+  memset(stream, 0, sizeof(stream));
+  uint64_t blocks = skip / 16;
+  for (int i = 15; i >= 0 && blocks; --i) {
+    const uint64_t sum = counter[i] + (blocks & 255);
+    counter[i] = sum & 255;
+    blocks = (blocks >> 8) + (sum >> 8);
+  }
+  if (skip % 16) {
+    uint8_t zero[16]{}, discard[16];
+    mbedtls_aes_crypt_ctr(&aes, skip % 16, &counterOffset, counter, stream, zero, discard);
+  }
+  return true;
 }
 class ServerCallbacks final : public NimBLEServerCallbacks {
   // Host-task context: state under `mutex`, NimBLE calls after releasing it.
@@ -746,8 +767,7 @@ class Callbacks final : public NimBLECharacteristicCallbacks {
                                          StudioFrame::instance().resumeOffset(incomingTask, incomingHash, size));
     }
     uint8_t encryptionKey[32];
-    if (!unhex(mac("enc|" + nonce), encryptionKey, sizeof(encryptionKey)) ||
-        !unhex(nonce, counter, sizeof(counter))) {
+    if (!unhex(mac("enc|" + nonce), encryptionKey, sizeof(encryptionKey))) {
       fail("authorization_failed");
       return true;
     }
@@ -786,20 +806,63 @@ class Callbacks final : public NimBLECharacteristicCallbacks {
       outcomeRead = false;
     }
     changed();
-    // Seek the cipher stream to the resume point.
-    const size_t skip = queuedEnd;
-    uint64_t blocks = skip / 16;
-    for (int i = 15; i >= 0 && blocks; --i) {
-      const uint64_t sum = counter[i] + (blocks & 255);
-      counter[i] = sum & 255;
-      blocks = (blocks >> 8) + (sum >> 8);
-    }
-    if (skip % 16) {
-      uint8_t zero[16]{}, discard[16];
-      mbedtls_aes_crypt_ctr(&aes, skip % 16, &counterOffset, counter, stream, zero, discard);
-    }
+    seekCipherLocked(queuedEnd);  // the resume point
     // A fresh program starts with the header; everything else waits for `need`.
     return completed || (!single && !resume.headerDone);
+  }
+  // fw4 (firmware over BLE, 2.7.4). Caller holds `mutex`. Checks the proof and
+  // the request; the pump task (which may touch the card and the fuel gauge)
+  // applies the remaining guards, allocates the queue once Wi-Fi is off,
+  // opens or resumes firmware.tmp and then announces state 1 with the resume
+  // offset. Returns whether to notify now (a refusal).
+  bool beginFirmwareLocked(JsonDocument& doc) {
+    const std::string version = doc["version"] | "", sha = doc["sha256"] | "", proof = doc["proof"] | "";
+    const size_t size = doc["size"] | size_t(0);
+    const int64_t phoneTime = doc["time"] | int64_t(0);
+    if (!equalProof(proof, mac(firmware_v4::beginMessage(identity, nonce, epoch, version, sha, size, phoneTime)))) {
+      fail("authorization_failed");
+      return true;
+    }
+    studio_v4::Digest digest{};
+    if (version.empty() || version.size() > 32 || stick_fw::compareVersions(version.c_str(), CROSSPOINT_VERSION) <= 0 ||
+        size < firmware_v4::MIN_IMAGE_BYTES || size > firmware_v4::MAX_IMAGE_BYTES ||
+        !studio_v4::parseDigest(sha.c_str(), digest)) {
+      fail("invalid_target");
+      return true;
+    }
+    if (StudioFrame::instance().busy() || pendingOp != PendingOp::None || pendingAbort ||
+        firmware_update::snapshot().busy()) {
+      fail("device_busy");
+      return true;
+    }
+    uint8_t encryptionKey[32];
+    if (!unhex(mac("enc|" + nonce), encryptionKey, sizeof(encryptionKey))) {
+      fail("authorization_failed");
+      return true;
+    }
+    if (phoneTime >= 1735689600 && phoneTime < 4102444800 && time(nullptr) < 1735689600) {
+      timeval tv{static_cast<time_t>(phoneTime), 0};
+      settimeofday(&tv, nullptr);
+    }
+    mbedtls_aes_init(&aes);
+    mbedtls_aes_setkey_enc(&aes, encryptionKey, 256);
+    authenticated = true;
+    firmwareTransfer = true;
+    firmwareVersion = version;
+    firmwareSha = sha;
+    firmwareSize = size;
+    transferTotal = size;
+    transferHeader = 0;
+    framesPhase = false;
+    needValue.clear();
+    needCount = 0;
+    packetsSinceNotify = 0;
+    announcedOffset = queuedEnd = lastNotified = 0;
+    state = "receiving";
+    resumeWaitSinceMs = 0;
+    pendingOp = PendingOp::FirmwareStart;
+    changed();
+    return false;
   }
   void onWrite(NimBLECharacteristic* characteristic, NimBLEConnInfo& info) override {
     if (characteristic->getUUID() == NimBLEUUID(DATA)) {
@@ -836,7 +899,11 @@ class Callbacks final : public NimBLECharacteristicCallbacks {
       if (op == "begin4" && !authenticated) {
         notify = beginTransferLocked(doc);
         fast = state == "receiving";
-      } else if (op == "commit" && authenticated && state == "receiving" && pendingOp == PendingOp::None) {
+      } else if (op == "fw4" && !authenticated) {
+        notify = beginFirmwareLocked(doc);
+        fast = state == "receiving";
+      } else if (op == "commit" && authenticated && !firmwareTransfer && state == "receiving" &&
+                 pendingOp == PendingOp::None) {
         // The writer task checks, once every queued chunk is applied, that the
         // stream delivered every needed frame; STATUS stays "receiving" until then.
         pendingOp = PendingOp::Commit;
@@ -1221,13 +1288,57 @@ class PumpPriority {
   UBaseType_t previous = 0;
   bool raised = false;
 };
+// fw4 guards that need the card or the fuel gauge (pump task). Returns the
+// STATUS error name, or nullptr when the image may be received.
+const char* firmwareRefusal(const size_t size) {
+  if (ota_trial::active()) return "trial_active";
+  if (powerManager.getBatteryPercentage() < 30 && !firmware_update::externalPower()) return "low_battery";
+  uint64_t total = 0, used = 0;
+  if (StudioFrame::storageUsage(total, used) && (total <= used || total - used < uint64_t(size) + 65536))
+    return "insufficient_storage";
+  return nullptr;
+}
+// A complete, verified image is on the card (pump task, no locks held): the
+// phone has been told (PROGRESS state 3); STATUS `ota` shows verifying, then
+// the radio is released and the image installed by the same routine as the
+// SD-card update (identify, flash, trial boot). A success restarts.
+void installReceivedFirmware(const std::string& version, const size_t size) {
+  HalPowerManager::Lock powerLock;
+  firmware_update::begin(version.c_str(), static_cast<uint32_t>(size));
+  firmware_update::setPhase(firmware_update::Phase::Verifying);
+  delay(800);  // a phone polling STATUS sees `verifying` before the link drops
+  const bool lent = releaseRadio("firmware_install");
+  firmware_update::setPhase(firmware_update::Phase::Installing);
+  auto onProgress = +[](size_t written, size_t, void*) { firmware_update::setProgress(written); };
+  const auto result = firmware_install::installFromSd(FirmwareReceiver::path(), version.c_str(), false, onProgress,
+                                                      nullptr);
+  if (!result.ok) {
+    LOG_ERR("FWBLE", "Install of %s failed: %s", version.c_str(), result.error);
+    if (!result.flashFailed) {  // the image itself is wrong: no resume from it
+      Storage.remove(FirmwareReceiver::path());
+      Storage.remove("/.crosspoint/studio/firmware.meta");
+    }
+    firmware_update::fail(result.error);
+    if (lent) restoreRadio();
+    return;
+  }
+  Storage.remove(FirmwareReceiver::path());
+  Storage.remove("/.crosspoint/studio/firmware.meta");
+  firmware_update::setPhase(firmware_update::Phase::Restarting);
+  LOG_INF("FWBLE", "Firmware %s installed over BLE, restarting", version.c_str());
+  delay(1500);
+  ESP.restart();
+}
 void pump() {
   static Chunk chunk;  // off the worker's stack
   auto& receiver = StudioReceiver::instance();
-  bool notify = false, relax = false;
+  auto& firmware = FirmwareReceiver::instance();
+  bool notify = false, relax = false, install = false;
+  std::string installVersion;
+  size_t installSize = 0;
   PumpPriority priority;
-  for (size_t guard = 0; guard < QUEUE_SLOTS + 2; ++guard) {
-    enum class Job : uint8_t { None, Abort, Start, Chunk, Commit } job = Job::None;
+  for (size_t guard = 0; guard < QUEUE_SLOTS + 2 && !install; ++guard) {
+    enum class Job : uint8_t { None, Abort, Start, FirmwareStart, Chunk, Commit } job = Job::None;
     std::string startTask, startHash;
     int64_t startExpires = 0;
     size_t startSize = 0, startHeader = 0;
@@ -1241,6 +1352,11 @@ void pump() {
         job = Job::Abort;
         discard = pendingDiscard;
         pendingAbort = pendingDiscard = false;
+      } else if (pendingOp == PendingOp::FirmwareStart) {
+        job = Job::FirmwareStart;
+        startHash = firmwareSha;
+        startSize = firmwareSize;
+        pendingOp = PendingOp::None;
       } else if (pendingOp == PendingOp::Start) {
         job = Job::Start;
         startTask = pendingTask;
@@ -1264,6 +1380,46 @@ void pump() {
     priority.raise();
     if (job == Job::Abort) {
       receiver.abort(discard);
+      firmware.abort();  // a firmware partial always stays for a resume
+      continue;
+    }
+    if (job == Job::FirmwareStart) {
+      const char* refusal = firmwareRefusal(startSize);
+      // A linked phone keeps Wi-Fi off (ProjectStickHost); the queue is only
+      // allocated once its driver's heap is back.
+      for (uint32_t waited = 0; !refusal && WiFi.getMode() != WIFI_MODE_NULL; waited += 100) {
+        if (waited >= 10000) refusal = "device_busy";
+        delay(100);
+      }
+      {
+        std::lock_guard<std::recursive_mutex> lock(mutex);
+        if (session != sessionId) continue;
+        if (!refusal && !allocateQueueLocked()) {
+          LOG_ERR("BLE", "No heap for the firmware queue (heap=%u max=%u)", (unsigned)ESP.getFreeHeap(),
+                  (unsigned)ESP.getMaxAllocHeap());
+          refusal = "insufficient_memory";
+        }
+        if (refusal) {
+          fail(refusal, false);
+          notify = true;
+          continue;
+        }
+      }
+      const bool ok = firmware.start(startHash, startSize);
+      std::lock_guard<std::recursive_mutex> lock(mutex);
+      if (session != sessionId) {
+        firmware.abort();
+        continue;
+      }
+      if (!ok) {
+        fail(studio_v4::errorName(firmware.error()), false);
+        notify = true;
+        continue;
+      }
+      announcedOffset = queuedEnd = lastNotified = firmware.streamOffset();
+      seekCipherLocked(queuedEnd);
+      rebuiltBytes = firmware.rawDone();
+      notify = true;  // state 1 with the resume offset: the phone starts sending
       continue;
     }
     // Moves to the frames phase once the receiver knows `need` (and tells the phone).
@@ -1295,6 +1451,30 @@ void pump() {
         rebuiltBytes = receiver.rebuiltBytes();
         publishNeedLocked();
       }
+      continue;
+    }
+    if (job == Job::Chunk && firmwareTransfer) {
+      const bool ok = firmware.feed(chunk.bytes, chunk.length);
+      std::lock_guard<std::recursive_mutex> lock(mutex);
+      if (session != sessionId) continue;
+      if (!ok) {
+        const auto error = firmware.error();
+        fail(error == studio_v4::Error::None ? "storage_or_cipher_error" : studio_v4::errorName(error), false);
+        notify = relax = true;
+        continue;
+      }
+      rebuiltBytes = firmware.rawDone();
+      if (firmware.complete()) {
+        // PROGRESS state 3 goes out before the radio is released to install.
+        state = "refreshing";
+        dropQueueLocked();
+        install = notify = true;
+        installVersion = firmwareVersion;
+        installSize = firmwareSize;
+        changed();
+        continue;
+      }
+      if (progressPending && queueCount <= queueSlots / 2) notify = true;
       continue;
     }
     if (job == Job::Chunk) {
@@ -1331,6 +1511,7 @@ void pump() {
   }
   if (notify) notifyProgress();
   if (relax) relaxLink();
+  if (install) installReceivedFirmware(installVersion, installSize);
 }
 // Main loop. Applies queued transfer work, starts the radio (retrying a
 // failed start with backoff), keeps it advertising, and drops stalled
@@ -1422,14 +1603,6 @@ bool connected() {
   std::lock_guard<std::recursive_mutex> lock(mutex);
   return isConnected;
 }
-uint32_t linkedForMs() {
-  std::lock_guard<std::recursive_mutex> lock(mutex);
-  return isConnected ? millis() - lastConnectMs : 0;
-}
-uint32_t idleForMs() {
-  std::lock_guard<std::recursive_mutex> lock(mutex);
-  return isConnected ? millis() - lastActivity : 0;
-}
 void setup(const std::string& deviceId) {
   std::lock_guard<std::mutex> radio(radioMutex);
   bool needStart = false;
@@ -1519,13 +1692,6 @@ bool takeScanRequest() {
   scanRequested = false;
   return requested;
 }
-bool takeOtaRequest(OtaRequest& out) {
-  std::lock_guard<std::recursive_mutex> lock(mutex);
-  if (!pendingOta) return false;
-  out = std::move(*pendingOta);
-  pendingOta.reset();
-  return true;
-}
 void setState(std::string json) {
   std::lock_guard<std::recursive_mutex> lock(mutex);
   if (json.size() > ble_setup::STATUS_LIMIT) json = "{}";
@@ -1574,8 +1740,6 @@ namespace studio_ble {
 void revoke() {}
 bool adoptAuthority(const std::string&, const std::string&, uint32_t, const std::string&) { return false; }
 bool releaseRadio(const char*) { return false; }
-uint32_t linkedForMs() { return 0; }
-uint32_t idleForMs() { return 0; }
 void restoreRadio() {}
 void begin() {}
 void setPumpTask(TaskHandle_t) {}
@@ -1647,7 +1811,6 @@ void setWifiSaved(bool) {}
 bool transferActive() { return false; }
 bool takeWifiRequest(WifiRequest&) { return false; }
 bool takeScanRequest() { return false; }
-bool takeOtaRequest(OtaRequest&) { return false; }
 void setState(std::string) {}
 bool takeSyncRequest(SyncRequest&) { return false; }
 bool takeUnbindRequest() { return false; }

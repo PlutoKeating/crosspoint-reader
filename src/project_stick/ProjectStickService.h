@@ -170,6 +170,7 @@ class ProjectStickService {
   // loader) through the same StudioFrame path BLE uses.
   void importSimulatorProgram();
   void importSimulatorStream();
+  void importSimulatorFirmware();
 #endif
   static std::string makeUuid();
 };

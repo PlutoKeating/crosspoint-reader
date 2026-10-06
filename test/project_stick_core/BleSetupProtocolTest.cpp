@@ -61,14 +61,6 @@ TEST(BleSetupProtocol, BindCiphertextAndProof) {
   EXPECT_FALSE(ble_setup::splitBindPlaintext(token + "|zz", gotToken, gotSecret));
 }
 
-TEST(BleSetupProtocol, OtaProof) {
-  const std::string url = "https://stockstick.plutokeating.beer/firmware/2.4.0/stockstick-2.4.0.bin";
-  std::string sha;
-  for (int i = 0; i < 32; ++i) sha += "ab";
-  const auto message = ble_setup::otaMessage(N, "2.4.0", sha, 3400469, url);
-  EXPECT_EQ(message, "ota3|" + N + "|2.4.0|" + sha + "|3400469|" + url);
-  EXPECT_EQ(ble_setup::mac(SECRET, message), "a379b3f844093dddde5017052e1e0108f899fbda3a36d91c0427dc0c6985e75b");
-}
 
 TEST(BleSetupProtocol, SyncAndUnbindMessages) {
   EXPECT_EQ(ble_setup::syncMessage(N, 1759482000, 1, 2, true), "sync3|" + N + "|1759482000|1|2|1");

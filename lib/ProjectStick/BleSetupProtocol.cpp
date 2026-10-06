@@ -80,10 +80,6 @@ std::string bindMessage(const std::string& nonce, const std::string& owner, uint
   return "bind3|" + nonce + "|" + owner + "|" + std::to_string(epoch) + "|" + ct;
 }
 
-std::string otaMessage(const std::string& nonce, const std::string& version, const std::string& sha256, size_t bytes,
-                       const std::string& url) {
-  return "ota3|" + nonce + "|" + version + "|" + sha256 + "|" + std::to_string(bytes) + "|" + url;
-}
 
 std::string syncMessage(const std::string& nonce, int64_t time, int trading, size_t ackCount, bool otaAck) {
   return "sync3|" + nonce + "|" + std::to_string(time) + "|" + std::to_string(trading) + "|" +
