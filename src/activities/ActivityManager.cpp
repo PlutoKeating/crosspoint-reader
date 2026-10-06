@@ -13,7 +13,6 @@
 #include "components/UITheme.h"
 #include "fontIds.h"
 #include "home/CrashActivity.h"
-#include "home/HomeActivity.h"
 #include "project_stick/ProjectStickActivity.h"
 #include "project_stick/ProjectStickHost.h"
 #include "settings/SettingsActivity.h"
@@ -228,17 +227,7 @@ void ActivityManager::goToFullScreenMessage(std::string message, EpdFontFamily::
   replaceActivity(std::make_unique<FullScreenMessageActivity>(renderer, mappedInput, std::move(message), style));
 }
 
-void ActivityManager::goHome(HomeMenuItem initialMenuItem) {
-  if (initialMenuItem == HomeMenuItem::NONE && currentActivity) {
-    const auto& activityName = currentActivity->name;
-    if (activityName == "ProjectStick") {
-      initialMenuItem = HomeMenuItem::PROJECT_STICK;
-    } else if (activityName == "Settings") {
-      initialMenuItem = HomeMenuItem::SETTINGS_MENU;
-    }
-  }
-  replaceActivity(std::make_unique<HomeActivity>(renderer, mappedInput, initialMenuItem));
-}
+void ActivityManager::goHome() { goToProjectStick(); }
 void ActivityManager::goToCrashReport() { replaceActivity(std::make_unique<CrashActivity>(renderer, mappedInput)); }
 
 void ActivityManager::pushActivity(std::unique_ptr<Activity>&& activity) {

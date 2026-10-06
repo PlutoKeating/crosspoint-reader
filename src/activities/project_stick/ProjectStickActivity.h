@@ -30,6 +30,7 @@ class ProjectStickActivity final : public Activity {
   bool ownsFrameBuffer() const override { return true; }
   bool handleForcedRefresh() override;
   StickTakeover stickTakeover() const override { return StickTakeover::StickPage; }
+  bool isHomeActivity() const override { return true; }
 
  private:
   ProjectStickService& service = PROJECT_STICK_HOST.service();
@@ -90,5 +91,4 @@ class ProjectStickActivity final : public Activity {
   void updateNotice(uint32_t nowMs);
   void renderFirmwareUpdate();
   void renderStatusScreen();
-  void launchWifiSelection();
 };

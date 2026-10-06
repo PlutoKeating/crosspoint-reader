@@ -335,7 +335,7 @@ sdkApiThatTakesOwnership(buffer, bufferSize);  // SDK calls free() / delete[]
 
 **Examples in codebase**:
 - Memory utilities: [Memory.h](../lib/Memory/Memory.h) (`makeUniqueNoThrow`)
-- Cover image buffers: [HomeActivity.cpp:166](../src/activities/home/HomeActivity.cpp)
+- Transfer queue (allocated per transfer): [StudioBluetooth.cpp](../src/project_stick/StudioBluetooth.cpp)
 - Bitmap rendering: [GfxRenderer.cpp:439-440](../lib/GfxRenderer/GfxRenderer.cpp)
 
 ### Heap Allocation with `new`: Always Use `makeUniqueNoThrow`

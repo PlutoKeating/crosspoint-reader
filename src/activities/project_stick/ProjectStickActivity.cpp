@@ -13,7 +13,6 @@
 #include "MappedInputManager.h"
 #include "ProjectStickCore.h"
 #include "activities/ActivityManager.h"
-#include "activities/network/WifiSelectionActivity.h"
 #include "components/UITheme.h"
 #include "fontIds.h"
 #include "project_stick/FirmwareUpdateState.h"
@@ -280,14 +279,11 @@ void ProjectStickActivity::loop() {
     return;
   }
 
-  // Front buttons (one fixed layout): Back / Wi-Fi / unassigned /
-  // "换一张" (only while a Studio card is shown).
+  // Front buttons (one fixed layout): 设置 / unassigned / unassigned /
+  // "换一张" (only while a Studio card is shown). This page is the device's
+  // home; Settings is the only other place, and its Back returns here.
   if (mappedInput.wasPressed(MappedInputManager::Button::Back)) {
-    onGoHome(HomeMenuItem::PROJECT_STICK);
-    return;
-  }
-  if (mappedInput.wasPressed(MappedInputManager::Button::Confirm)) {
-    launchWifiSelection();
+    activityManager.goToSettings();
     return;
   }
   if (mappedInput.wasPressed(MappedInputManager::Button::Right) && hasStudio) {
@@ -296,15 +292,6 @@ void ProjectStickActivity::loop() {
     requestUpdate();
     return;
   }
-}
-
-void ProjectStickActivity::launchWifiSelection() {
-  startActivityForResult(std::make_unique<WifiSelectionActivity>(renderer, mappedInput, false),
-                         [this](const ActivityResult&) {
-                           PROJECT_STICK_HOST.wifiRetrySoon();
-                           PROJECT_STICK_HOST.requestCloudSync(true);
-                           requestUpdate();
-                         });
 }
 
 void ProjectStickActivity::renderFirmwareUpdate() {
@@ -426,7 +413,7 @@ void ProjectStickActivity::drawOverlays(const bool studio) const {
   }
   if (layers.hints) {
     if (studio) stick_overlay::drawCardSideKeyHints(renderer, layers.bubble == stick_overlay::Bubble::None);
-    stick_overlay::drawFrontKeyHints(renderer, tr(STR_PROJECT_STICK_BACK), tr(STR_PROJECT_STICK_CONNECT_WIFI), "",
+    stick_overlay::drawFrontKeyHints(renderer, tr(STR_SETTINGS_TITLE), "", "",
                                      studio ? tr(STR_PROJECT_STICK_NEXT_CARD) : "");
   }
   if (studio) stick_overlay::drawFeedbackBubble(renderer, layers.bubble, layers.bubbleFrame);

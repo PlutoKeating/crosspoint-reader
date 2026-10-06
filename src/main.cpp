@@ -347,7 +347,7 @@ void setup() {
   if (!recoveryFirmwareMode) PROJECT_STICK_HOST.begin();
 
   if (recoveryFirmwareMode) {
-    // Skip normal home/reader routing: jump straight into the SD firmware picker.
+    // Skip normal routing: jump straight into the SD firmware picker.
     activityManager.replaceActivity(
         std::make_unique<SdFirmwareUpdateActivity>(renderer, mappedInputManager, /*recoveryMode=*/true));
   }
@@ -361,18 +361,13 @@ void setup() {
   else if (HalSystem::isRebootFromPanic()) {
     // If we rebooted from a panic, go to crash report screen to show the panic info
     activityManager.goToCrashReport();
-  } else if (resume == BootResume::Silent) {
-    // Preserve the explicit target used by Wi-Fi/settings workflows. A reader
-    // target without a valid book also falls back safely to Home.
-    activityManager.goHome();
   } else if (mappedInputManager.isPressed(MappedInputManager::Button::Back)) {
-    // Holding Back during boot remains a safe escape hatch to the full reader
-    // Home screen if Project.Stick configuration needs attention.
-    activityManager.goHome();
+    // Holding Back during boot opens Settings directly: an escape hatch if
+    // the StockStick page itself needs attention (Wi-Fi, firmware, language).
+    activityManager.goToSettings();
   } else {
-    // Project.Stick is this firmware's default product surface. Cold boots,
-    // ordinary restarts, and quick-resume wakeups all enter it regardless of
-    // stale reader resume state.
+    // The StockStick page is this firmware's only home. Cold boots, ordinary
+    // and silent restarts and quick-resume wakeups all enter it.
     activityManager.goToProjectStick();
   }
 

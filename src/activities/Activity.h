@@ -74,7 +74,7 @@ class Activity {
 
   // Convenience method to facilitate API transition to ActivityManager
   // TODO: remove this in near future
-  void onGoHome(HomeMenuItem item = HomeMenuItem::NONE);
+  void onGoHome();
 
  protected:
   enum class ListTouchResult : uint8_t {
