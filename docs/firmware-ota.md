@@ -90,6 +90,8 @@ python3 scripts/firmware_release.py --build --notes RELEASE_NOTES.md \
 | 恢复模式（按住左侧键开机） | 用户 | 同上但不做描述符限制，用于救砖；只有 StockStick 镜像启用试运行 |
 | USB / 网页刷机 | 开发者 | 不经过试运行，视为可信镜像 |
 
+2.7.2 起 Wi‑Fi 按需开启：固件更新页打开期间、收到蓝牙 `ota` 请求或排队了下载任务时，设备自行连接已保存的网络，任务最多等待 20 秒。有已保存网络时，检查更新不再弹出 Wi‑Fi 选择页。
+
 ## 5. 设备端执行流程
 
 设备注册时上报 `firmware_version`、`firmware_build` 与能力 `ble: 3`、`ota: 3`、`panel: xteink_x3|xteink_x4`。

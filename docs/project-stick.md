@@ -103,6 +103,62 @@ in `setup()` after the display, ticked from the main loop right after
 `ProjectStickActivity` keeps what belongs to its screen: the card, key hints,
 feedback bubbles and notices. It shares the host's `ProjectStickService`.
 
+## Credential loss and the `token` op (since 2.7.2)
+
+A 2.6.x device could end up bound over BLE (`/.crosspoint/studio/ble.json`
+holds identity, owner and secret) while its store
+(`/.crosspoint/project_stick.json`) said unbound with no cloud token. Then the
+on-device check said 「请先在小程序绑定设备」 and a phone-triggered `ota` failed
+with `invalid_target` (2.6.5 `ProjectStickService.cpp:867`). Mechanism, all in
+2.6.5:
+
+1. `PersistableStoreBase::readDocFromFile` (`lib/Serialization/PersistableStore.cpp:42-56`)
+   reads the whole file with `Storage.readFile` into an Arduino `String`. On a
+   heap like the measured one (13 KB free, 10.7 KB largest block) that
+   allocation fails, `readFile` returns an empty string, and the read counts
+   as "no file" — for the backup too.
+2. `ProjectStickService::begin` (`ProjectStickService.cpp:198-202`) then runs
+   `ensureIdentity()` on the default store, creates a new device id and calls
+   `saveToFile()`: the good file is rotated to `.bak` and replaced by
+   defaults (`bound:false`, no token). The next save rotates the good copy
+   away for good.
+3. `ble.json` is a separate file and survives, so the phone still verifies the
+   device and it still answers BLE, but the cloud credential is gone.
+   Writes had the mirror-image weakness (`writeDocToFile` serialized into a
+   `String`, which truncates when its growth fails; `writeCredentials` truncated
+   `ble.json` in place before streaming into it).
+
+2.7.2:
+
+- Stores parse from the file, report `Missing`/`Corrupt`/`Unavailable`, and a
+  store whose file exists but could not be read never saves (boot retries the
+  load 3×). Writes refuse overflowed documents, stream to `.tmp`, verify the
+  byte count and the size on the card, then rotate (`.bak` kept). `ble.json`
+  uses the same writer; StudioFrame's state checks overflow and length.
+- `ProjectStickService::loadStore` heals the split at boot: if `ble.json`
+  holds an authority, the store takes its identity and owner and becomes
+  bound again. Only the cloud token is missing then.
+- A BLE bind is all or nothing: if `ble.json` cannot be written, the store
+  binding is undone. `revoke()` removes `ble.json`, its `.bak` and `.tmp`, so a
+  revoked authority cannot be resurrected from the backup.
+- STATE `cred` (1 = holds a cloud token). Op `token` (bound mode):
+  `{op:"token", owner, ct, proof}`, `ct = seal(secret, "token3", n, token)`,
+  `proof = mac(secret, "token3|n|owner|ct")`; owner must match the authority's
+  owner. The owner's phone re-claims the device (`ble-claim`, same owner keeps
+  the BLE secret) and writes the new token; failures show as `bind_failed` /
+  `authorization_failed` / `invalid_control`. Vector:
+  Project.StockStick `miniprogram/tests/fixtures/ble-token-vector.json`,
+  checked by `BleSetupProtocol.TokenVector`.
+
+## Wi-Fi on demand (since 2.7.2)
+
+See memory-budget.md "2.7.2". STATUS `wifi.saved` is true when at least one
+network is saved (the device joins on demand); `wifi.state` stays
+`idle|connecting|connected|failed` and reflects the real link, so `idle` with
+`saved:true` is a healthy device. The status header shows 「在线」 when
+connected and 「Wi‑Fi 待机」 when a network is saved but the radio is down.
+The firmware page and a BLE `ota` bring the radio up themselves.
+
 ## BLE setup (protocol 3, since 2.3.0)
 
 The wire protocol is defined in Project.StockStick
@@ -138,8 +194,8 @@ and `ProjectStickHost::tickBle` (applies queued work, on every page).
   until the phone disconnects, so the phone can bind and then push Wi-Fi in one
   connection; the next connection is in bound mode.
 - Content transfers (protocol 4, 2.7.0): the callbacks decrypt into a static
-  chunk queue and `studio_ble::pump()` on the `StudioWriter` task (static
-  stack, created in `setup()`) rebuilds the program through `StudioReceiver`:
+  chunk queue (heap, allocated per transfer since 2.7.2) and `studio_ble::pump()`
+  on the background sync worker rebuilds the program through `StudioReceiver`:
   only frames the device lacks arrive, deflate-compressed; held frames are
   copied from the kept program files. See memory-budget.md for the 2.4.3
   host-task stack overflow that keeps SD I/O out of the callbacks.

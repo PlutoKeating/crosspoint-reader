@@ -119,6 +119,67 @@ same amount. The host's per-loop work on other pages is a handful of mutex
 checks; the unbound setup-key check (which builds a string) runs every 500 ms
 instead of every loop.
 
+## 2.7.2: measured headroom, transfer buffers on demand, Wi-Fi on demand
+
+First number from a real X3, read by the phone over STATE (firmware 2.6.5,
+uptime 26.5 s, Wi-Fi connected at -33 dBm, phone connected over BLE):
+`heap_free` 13,120, `heap_min` 11,044, `heap_max_alloc` 10,740. That is the
+steady state with both radios up: there is no room for 2.7.0's +16 KB of
+static RAM plus ~4 KB of larger NimBLE pools. Every 2.7.2 change below follows
+from that measurement.
+
+Static RAM, release ELF (`riscv32-esp-elf-size -A`):
+
+| Section | 2.6.5 | 2.7.1 | 2.7.2 |
+|---|---|---|---|
+| `.iram0.text` | 86,936 | 86,936 | 87,266 |
+| `.dram0.data` | 17,601 | 17,625 | 17,625 |
+| `.dram0.bss` | 51,040 | 67,208 | 49,528 |
+| Total static in SRAM | 155,577 | 171,769 (+16,192) | 154,419 (−1,158) |
+
+What moved off the static image:
+
+| Object | 2.7.1 | 2.7.2 |
+|---|---|---|
+| Writer task (6 KB stack + TCB) | static | gone: transfer work runs on the sync worker (idle while a phone is connected), raised to priority 2 while it pumps |
+| Chunk queue, 16 × 510 B | static 8,256 B | heap, allocated at `begin4` (4–16 slots, whatever fits), freed at commit/abort/drop |
+| `FrameInflater` (uzlib state + 1 KB dictionary) | static 3,084 B | heap, frames phase only, freed with the receiver |
+| NimBLE mbufs / ACL buffers | 20 / 20 (+~4 KB heap) | library default 12 / 12 |
+
+Free heap per state (2.6.5 measured, the rest **estimated** from the static
+difference and the Wi-Fi driver's footprint of ~40–55 KB):
+
+| State | 2.6.5 | 2.7.1 | 2.7.2 |
+|---|---|---|---|
+| Wi-Fi + BLE (phone linked) | 13.1 KB measured | ≈ −7 KB (does not fit) | does not occur: Wi-Fi goes off while a phone is linked |
+| BLE only, phone linked | — | — | ≈ 55–70 KB |
+| Content transfer (BLE only) | — | — | ≈ 40–55 KB (queue ≤ 8.2 KB, inflater 3 KB, header JSON ~4 KB) |
+| Idle, Wi-Fi off | — | — | ≈ 55–70 KB |
+| Cloud job (Wi-Fi up, NimBLE released) | — | — | ≥ 2.6.5's TLS headroom + 1.2 KB |
+
+Wi-Fi on demand (`lib/ProjectStick/ProjectStickWifiPolicy.h`, host-tested):
+the radio is up for a queued/running cloud job, a BLE `ota` request, a BLE
+Wi-Fi join or scan (and 60 s after a successful join), the Wi-Fi and firmware
+pages, a trial boot or unreported outcome, a due heartbeat, and trading-hours
+alert polls (device holds a token). A running transfer always wins; a linked
+phone otherwise keeps it down (it relays what the cloud would say). Unwanted
+for 20 s (immediately while a phone is linked) the driver is stopped
+(`WiFi.disconnect(true)` + `WIFI_OFF`). Jobs wait up to 20 s for the link.
+
+Persistence under a starved heap: 2.6.x read stores with `Storage.readFile`
+into a `String` (fails first on a fragmented heap) and wrote them through a
+`String`; a failed read was treated as "no file", so the device created a new
+identity and saved defaults over the store (see project-stick.md
+"Credential loss"). 2.7.2 parses straight from the file, never saves a store
+whose file exists but could not be read, refuses documents that overflowed
+their allocator, and verifies the byte count before rotating `.tmp` → file
+→ `.bak`.
+
+Verify on the device: STATE `metrics.heap_free`/`heap_max_alloc` with the phone
+linked (Wi-Fi off) and `metrics.wifi_on`; the serial line
+`Wi-Fi wanted/not wanted (…)` explains every radio change, and
+`Transfer installed (…, heap=N, worker stack free M)` after a push.
+
 ## Where the RAM goes
 
 Static, from `riscv32-esp-elf-size -A` on the release ELF (2.4.2 → 2.4.3):

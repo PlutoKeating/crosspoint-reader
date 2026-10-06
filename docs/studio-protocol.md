@@ -193,15 +193,17 @@ is `header = 0`, `size = 52272`, `hash` = its digest, and only that record.
   file to `StudioFrame::commit()` (full SHA-256 check, install, receipts as
   before).
 - **Flow control:** the host callback never blocks. In-order writes are
-  decrypted into 16 static 510-byte slots; a duplicate or out-of-order write
+  decrypted into up to 16 510-byte slots (heap, allocated at `begin4`, at least 4 or `insufficient_memory`, freed when the transfer ends; static until 2.7.1); a duplicate or out-of-order write
   is dropped (a gap triggers an immediate notification with error 2,
   `offset_mismatch`, once), as is a write that finds the queue full. PROGRESS
   is notified every 4 writes or 4 KB, but held back while the queue is over
   half full, which paces the phone's 8 KB window; the writer task notifies
   once it drained.
-- **Writer task** (`StudioWriter`, 6 KB static stack, priority 2, created in
-  `setup()`): runs `pump()` (start, chunks, commit, abort), so an e-paper
-  refresh on the UI loop or render task never stalls reception. The UI loop's
+- **Pump** (since 2.7.2 on the background sync worker, which is idle while a
+  phone is connected; 2.7.0–2.7.1 had a separate 6 KB `StudioWriter` task):
+  `pump()` (start, chunks, commit, abort) runs at priority 2 while it has
+  work, so an e-paper refresh on the UI loop or render task never stalls
+  reception. The inflater and the frame digests live only while receiving. The UI loop's
   `tick()` only reports the outcome (`displayed`/`scheduled`) and pending
   progress.
 - **Link:** on connect and on `begin4` the device asks for 2M PHY, 251-byte
@@ -218,7 +220,8 @@ is `header = 0`, `size = 52272`, `hash` = its digest, and only that record.
 - Errors (PROGRESS code / STATUS `error`): 1 unauthorized_or_invalid_chunk,
   2 offset_mismatch, 3 device_busy, 4 storage_or_cipher_error,
   5 frame_validation_failed, 6 frame_mismatch, 7 too_many_frames,
-  8 transfer_timeout, 9 insufficient_storage, 10 authorization_failed.
+  8 transfer_timeout, 9 insufficient_storage, 10 authorization_failed,
+  11 insufficient_memory (2.7.2: no heap for the transfer buffers; retryable).
 
 Measured with the official 17-frame plan (892,146 bytes): the full stream is
 41,919 bytes; with one changed card it is 6,054 bytes (the other 16 frames are
@@ -257,6 +260,10 @@ at hand when content is pushed (Project.StockStick `docs/product/BLE-ONLY-DELIVE
   records `last_phone_sync`, restarts the heartbeat interval and, during a
   trial boot, confirms the image (`phone_ok`). The phone re-reads STATE and
   repeats while `pending` > 0.
+- STATE `cred` (since 2.7.2): 1 when the device holds a cloud token, 0 when a
+  bound device lost it; op `token` restores it (project-stick.md
+  "Credential loss and the `token` op"). `metrics.wifi_on` (2.7.2): the Wi-Fi
+  radio is powered (Wi-Fi is on demand).
 - Op `unbind` (bound mode): `{op:"unbind", proof: mac(secret, "unbind3|n")}`,
   sent by the owner's phone right after `DELETE /api/v1/miniapp/devices`
   succeeded; the device drops the binding exactly like `bound:false`.
@@ -271,7 +278,8 @@ The same service runs BLE setup protocol 3 (since 2.3.0; unbound devices, key fr
 the setup QR) and accepts `scan`/`wifi` and (since 2.4.0) `ota` ops in bound mode;
 bound STATUS also carries `fw`, `wifi`, `scan`, `networks` and `ota` (since
 2.7.1 `wifi.state` follows the real link on every page: `connected` with the
-SSID whenever Wi-Fi is up, not only after a BLE Wi-Fi push), and the
+SSID whenever Wi-Fi is up, not only after a BLE Wi-Fi push; since 2.7.2
+`wifi.saved` says a network is saved and the radio comes up on demand), and the
 advertised name is `StockStick-XXXX` (scan response; the advertising packet
 carries the service UUID and the id characters as manufacturer data). Protocol 3 is defined in Project.StockStick
 `docs/product/BLE-SETUP.md` and `BLE-ONLY-DELIVERY.md`; see also
