@@ -24,7 +24,5 @@ bool isTransparentMark(uint32_t cp);
 // paragraphLevel: -1 = auto-detect, 0 = LTR, 1 = RTL
 bool applyBidiVisual(const char* utf8, std::string& out, int paragraphLevel = -1);
 
-bool computeVisualWordOrder(const std::vector<std::string>& words, bool paragraphIsRtl,
-                            std::vector<uint16_t>& visualOrder);
 
 }  // namespace BidiUtils

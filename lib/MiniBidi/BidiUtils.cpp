@@ -8,6 +8,7 @@ extern "C" {
 #undef otherwise
 
 #include <Logging.h>
+#include <Memory.h>
 #include <Utf8.h>
 
 #include <cstring>
@@ -89,8 +90,13 @@ bool applyBidiVisual(const char* utf8, std::string& out, int paragraphLevel) {
   if (!utf8 || !*utf8) return false;
   const std::lock_guard<std::mutex> lock(bidiMutex);
 
-  static bidi_char line[BIDI_MAX_LINE];
-  static bidi_char shaped[BIDI_MAX_LINE];
+  // ~3 KB, only for strings that contain RTL script: on the heap for the
+  // call instead of static (2.7.4; the UI is Chinese by default).
+  auto lineBuffer = makeUniqueNoThrow<bidi_char[]>(BIDI_MAX_LINE);
+  auto shapedBuffer = makeUniqueNoThrow<bidi_char[]>(BIDI_MAX_LINE);
+  if (!lineBuffer || !shapedBuffer) return false;  // rendered unshaped
+  bidi_char* const line = lineBuffer.get();
+  bidi_char* const shaped = shapedBuffer.get();
   int count = 0;
   int lastBase = -1;           // last non-formatter character (mintty's ibase)
   uint8_t pendingJoiners = 0;  // ZWJ/ZWNJ seen since lastBase
@@ -166,140 +172,6 @@ bool applyBidiVisual(const char* utf8, std::string& out, int paragraphLevel) {
       i = j - 1;
     }
   }
-  return true;
-}
-
-bool computeVisualWordOrder(const std::vector<std::string>& words, bool paragraphIsRtl,
-                            std::vector<uint16_t>& visualOrder) {
-  visualOrder.clear();
-  const size_t nWords = words.size();
-  if (nWords <= 1 || nWords > BIDI_MAX_LINE) return false;
-  const std::lock_guard<std::mutex> lock(bidiMutex);
-
-  static bidi_char line[BIDI_MAX_LINE];
-  int count = 0;
-  bool truncated = false;
-
-  for (size_t w = 0; w < nWords && !truncated; w++) {
-    auto* p = reinterpret_cast<const unsigned char*>(words[w].c_str());
-    while (*p) {
-      if (count >= BIDI_MAX_LINE) {
-        truncated = true;
-        break;
-      }
-      const uint32_t cp = utf8NextCodepoint(&p);
-      if (!cp || cp == REPLACEMENT_GLYPH) break;
-      line[count].origwc = line[count].wc = cp;
-      line[count].index = static_cast<uint16_t>(w);
-      line[count].joiners = 0;
-      count++;
-    }
-
-    if (!truncated && w + 1 < nWords) {
-      if (count >= BIDI_MAX_LINE) {
-        truncated = true;
-        break;
-      }
-      line[count].origwc = line[count].wc = ' ';
-      line[count].index = static_cast<uint16_t>(nWords);
-      line[count].joiners = 0;
-      count++;
-    }
-  }
-
-  if (truncated || count == 0) return false;
-
-  // Fast-path for homogeneous lines: skip UAX#9 if there's no mixing.
-  bool hasL = false, hasR = false;
-  for (int i = 0; i < count; i++) {
-    uchar bc = bidi_class(line[i].wc);
-    if (bc == L || bc == EN || bc == AN)
-      hasL = true;
-    else if (bc == R || bc == AL)
-      hasR = true;
-  }
-
-  // Purely LTR line in RTL paragraph: identity order, but we might still need to reorder
-  // if some characters are mirrored or neutral resolution differs.
-  // Actually, UAX#9 rule L1/L2 says purely LTR in RTL para stays as is (identity).
-  // Purely RTL line: just reverse the words.
-  if (!hasL && hasR && paragraphIsRtl) {
-    visualOrder.reserve(nWords);
-    for (int i = static_cast<int>(nWords) - 1; i >= 0; i--) {
-      visualOrder.push_back(static_cast<uint16_t>(i));
-    }
-    return true;
-  }
-  if (!hasR) {
-    if (!paragraphIsRtl) {
-      // Pure LTR in LTR paragraph: nothing to do.
-      return false;
-    }
-    // Pure LTR in RTL paragraph: no word reordering, but must use the
-    // willReorder (left-to-right) positioning path, not the RTL right-to-left path.
-    visualOrder.reserve(nWords);
-    for (size_t i = 0; i < nWords; i++) {
-      visualOrder.push_back(static_cast<uint16_t>(i));
-    }
-    return true;
-  }
-
-  do_bidi(/*autodir=*/false, paragraphIsRtl ? 1 : 0, line, count);
-
-  uint16_t firstAny[BIDI_MAX_LINE];
-  uint16_t firstNatural[BIDI_MAX_LINE];
-  for (size_t w = 0; w < nWords; w++) {
-    firstAny[w] = UINT16_MAX;
-    firstNatural[w] = UINT16_MAX;
-  }
-
-  for (int i = 0; i < count; i++) {
-    const uint16_t w = line[i].index;
-    if (w >= nWords) continue;
-
-    if (firstAny[w] == UINT16_MAX) {
-      firstAny[w] = static_cast<uint16_t>(i);
-    }
-
-    if (firstNatural[w] == UINT16_MAX && isNaturalDirectionClass(bidi_class(line[i].wc))) {
-      firstNatural[w] = static_cast<uint16_t>(i);
-    }
-  }
-
-  visualOrder.reserve(nWords);
-  for (int i = 0; i < count; i++) {
-    const uint16_t w = line[i].index;
-    if (w >= nWords) continue;
-
-    const uint16_t anchor = firstNatural[w] != UINT16_MAX ? firstNatural[w] : firstAny[w];
-    if (anchor == UINT16_MAX) {
-      visualOrder.clear();
-      return false;
-    }
-    if (anchor == static_cast<uint16_t>(i)) {
-      visualOrder.push_back(w);
-    }
-  }
-
-  if (visualOrder.size() != nWords) {
-    visualOrder.clear();
-    return false;
-  }
-
-  // Check if the order is exactly the same as the original input
-  bool needsReorder = false;
-  for (size_t i = 0; i < nWords; i++) {
-    if (visualOrder[i] != i) {
-      needsReorder = true;
-      break;
-    }
-  }
-
-  if (!needsReorder) {
-    visualOrder.clear();
-    return false;
-  }
-
   return true;
 }
 
