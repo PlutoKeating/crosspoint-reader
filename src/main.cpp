@@ -118,6 +118,7 @@ void waitForPowerRelease() {
 constexpr char SLEEP_FRAME_FILE[] = "/.crosspoint/sleep_frame.bin";
 
 static void saveSleepFrameBuffer() {
+  if (!renderer.getFrameBuffer()) return;
   HalFile file;
   if (!Storage.openFileForWrite("SLP", SLEEP_FRAME_FILE, file)) return;
   file.write(renderer.getFrameBuffer(), renderer.getBufferSize());
@@ -144,8 +145,9 @@ static bool loadSleepFrameBuffer() {
 void enterDeepSleep() {
   HalPowerManager::Lock powerLock;  // Ensure we are at normal CPU frequency for sleep preparation
 
-  const bool isQuickResumeSleep = SETTINGS.sleepScreen == CrossPointSettings::SLEEP_SCREEN_MODE::QUICK_RESUME;
-  APP_STATE.showBootScreen = !isQuickResumeSleep;
+  // The card stays on screen through sleep (a small moon marks it); waking
+  // resumes without the splash.
+  APP_STATE.showBootScreen = false;
 
   APP_STATE.saveToFile();
 
@@ -155,9 +157,7 @@ void enterDeepSleep() {
   ota_trial::onCleanShutdown();
   activityManager.goToSleep();
 
-  if (isQuickResumeSleep) {
-    saveSleepFrameBuffer();
-  }
+  saveSleepFrameBuffer();
 
   // Tear down WiFi so the modem power domain isn't held alive across deep sleep.
   // Wake from deep sleep is effectively a chip reset, so no state needs to survive.
@@ -250,15 +250,13 @@ void setup() {
   APP_STATE.loadFromFile();
   studio_ble::setEnabled(SETTINGS.bluetoothEnabled != 0);
   language_packs::apply(SETTINGS.language);
-  UITheme::getInstance().reload();
   ButtonNavigator::setMappedInputManager(mappedInputManager);
 
   const auto wakeupReason = gpio.getWakeupReason();
   switch (wakeupReason) {
     case HalGPIO::WakeupReason::PowerButton:
       LOG_DBG("MAIN", "Verifying power button press duration");
-      if (!gpio.verifyPowerButtonWakeup(SETTINGS.getPowerButtonDuration(),
-                                        SETTINGS.shortPwrBtn == CrossPointSettings::SHORT_PWRBTN::SLEEP)) {
+      if (!gpio.verifyPowerButtonWakeup(CrossPointSettings::POWER_BUTTON_SLEEP_MS, false)) {
         powerManager.startDeepSleep(gpio);
       }
       break;
@@ -410,11 +408,9 @@ void loop() {
     HalSystem::sampleHeap();  // kept in RTC memory for the next crash report
   }
 
-  gpio.setSharedConfirmPowerShortPressEmitsPower(SETTINGS.shortPwrBtn == CrossPointSettings::SHORT_PWRBTN::SLEEP);
+  gpio.setSharedConfirmPowerShortPressEmitsPower(false);
   gpio.update();
   if (mappedInputManager.updateKeyguard(millis(), !activityManager.handlesKeyguard())) activityManager.requestUpdate();
-
-  renderer.setFadingFix(SETTINGS.fadingFix);
 
   if (Serial && millis() - lastMemPrint >= 10000) {
     LOG_INF("MEM", "Free: %d bytes, Total: %d bytes, Min Free: %d bytes, MaxAlloc: %d bytes, loop stack free: %u",
@@ -476,7 +472,7 @@ void loop() {
   }
 
   if (millis() >= allowSleepAt && gpio.isPressed(HalGPIO::BTN_POWER) &&
-      gpio.getPowerButtonHeldTime() > SETTINGS.getPowerButtonDuration()) {
+      gpio.getPowerButtonHeldTime() > CrossPointSettings::POWER_BUTTON_SLEEP_MS) {
     // If the screenshot combination is potentially being pressed, don't sleep
     if (gpio.isPressed(HalGPIO::BTN_DOWN)) {
       return;
@@ -486,9 +482,8 @@ void loop() {
     return;
   }
 
-  // Refresh screen when power button is short-pressed with FORCE_REFRESH setting.
-  if (SETTINGS.shortPwrBtn == CrossPointSettings::SHORT_PWRBTN::FORCE_REFRESH &&
-      mappedInputManager.wasReleased(MappedInputManager::Button::Power)) {
+  // A short power press refreshes the screen (fixed behaviour since 2.7.4).
+  if (mappedInputManager.wasReleased(MappedInputManager::Button::Power)) {
     LOG_DBG("MAIN", "Manual screen refresh triggered");
     if (!activityManager.handleForcedRefresh()) {
       RenderLock lock;

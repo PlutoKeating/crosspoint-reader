@@ -279,18 +279,17 @@ void ProjectStickActivity::loop() {
     return;
   }
 
-  // Fixed physical front-button positions: Back / Wi-Fi / unassigned /
+  // Front buttons (one fixed layout): Back / Wi-Fi / unassigned /
   // "换一张" (only while a Studio card is shown).
-  const int frontButton = mappedInput.getPressedFrontButton();
-  if (frontButton == HalGPIO::BTN_BACK) {
+  if (mappedInput.wasPressed(MappedInputManager::Button::Back)) {
     onGoHome(HomeMenuItem::PROJECT_STICK);
     return;
   }
-  if (frontButton == HalGPIO::BTN_CONFIRM) {
+  if (mappedInput.wasPressed(MappedInputManager::Button::Confirm)) {
     launchWifiSelection();
     return;
   }
-  if (frontButton == HalGPIO::BTN_RIGHT && hasStudio) {
+  if (mappedInput.wasPressed(MappedInputManager::Button::Right) && hasStudio) {
     // The program plays on the device: the right key is the manual "next card".
     frame.tick(studioNow, 1, alertUntil);
     requestUpdate();

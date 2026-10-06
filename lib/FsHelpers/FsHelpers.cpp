@@ -159,7 +159,6 @@ bool hasJpgExtension(std::string_view fileName) {
 
 bool hasPngExtension(std::string_view fileName) { return checkFileExtension(fileName, ".png"); }
 
-bool hasBmpExtension(std::string_view fileName) { return checkFileExtension(fileName, ".bmp"); }
 
 bool hasGifExtension(std::string_view fileName) { return checkFileExtension(fileName, ".gif"); }
 

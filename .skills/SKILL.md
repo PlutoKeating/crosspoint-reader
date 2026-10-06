@@ -372,30 +372,28 @@ sdkApiThatTakesOwnership(obj);  // SDK calls delete
 
 **Source**: [src/MappedInputManager.cpp:20-55](../src/MappedInputManager.cpp)
 
-Constraint: Physical button positions are fixed on hardware, but their logical functions change based on user settings and screen orientation.
+Constraint: Physical button positions are fixed on hardware; the logical layout is fixed too (front-button remapping was removed in 2.7.4).
 
 **Button Categories**:
 1. **Physical Fixed** (Up/Down side buttons):
    - `Button::Up` → Always `HalGPIO::BTN_UP`
    - `Button::Down` → Always `HalGPIO::BTN_DOWN`
 
-2. **User Remappable** (Front buttons):
-   - `Button::Back` → Maps to `SETTINGS.frontButtonBack` (hardware index)
-   - `Button::Confirm` → Maps to `SETTINGS.frontButtonConfirm`
-   - `Button::Left` → Maps to `SETTINGS.frontButtonLeft`
-   - `Button::Right` → Maps to `SETTINGS.frontButtonRight`
+2. **Front buttons** (fixed layout):
+   - `Button::Back` → `HalGPIO::BTN_BACK`
+   - `Button::Confirm` → `HalGPIO::BTN_CONFIRM`
+   - `Button::Left` → `HalGPIO::BTN_LEFT`
+   - `Button::Right` → `HalGPIO::BTN_RIGHT`
 
-3. **Reader-Specific** (Page navigation with optional swap):
-   - `Button::PageBack` → Uses side button (swappable via `SETTINGS.sideButtonLayout`)
-   - `Button::PageForward` → Uses side button (swappable)
+3. **Page navigation**:
+   - `Button::PageBack` / `Button::PageForward` → side buttons
 
 **Implementation**:
 - Activities use **logical buttons** (e.g., `Button::Confirm`)
 - `MappedInputManager` translates to **physical hardware buttons**
-- User can remap front buttons in settings
 - Orientation changes handled separately by renderer coordinate transforms
 
-**Rule**: Always use `MappedInputManager::Button::*` enums, never raw `HalGPIO::BTN_*` indices (except in ButtonRemapActivity).
+**Rule**: Always use `MappedInputManager::Button::*` enums, never raw `HalGPIO::BTN_*` indices.
 
 ### UITheme (The GUI Macro)
 * Rule: All UI rendering must go through the GUI macro (UITheme). 
@@ -410,7 +408,7 @@ Constraint: Physical button positions are fixed on hardware, but their logical f
 ```cpp
 #define SETTINGS CrossPointSettings::getInstance()  // User settings
 #define APP_STATE CrossPointState::getInstance()    // Runtime state
-#define GUI UITheme::getInstance()                   // Current theme
+#define GUI UITheme::getInstance()                   // The UI theme (Lyra, the only one since 2.7.4)
 #define Storage HalStorage::getInstance()            // SD card I/O
 #define I18N I18n::getInstance()                     // Internationalization
 ```

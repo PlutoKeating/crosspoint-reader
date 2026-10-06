@@ -5,7 +5,6 @@
 #include <functional>
 #include <memory>
 
-#include "CrossPointSettings.h"
 #include "components/themes/BaseTheme.h"
 
 class UITheme {
@@ -29,8 +28,6 @@ class UITheme {
                                       int maxLines, bool black = true,
                                       EpdFontFamily::Style style = EpdFontFamily::REGULAR,
                                       TextVerticalAlignment verticalAlignment = TextVerticalAlignment::CENTER);
-  void reload();
-  void setTheme(CrossPointSettings::UI_THEME type);
   static int getNumberOfItemsPerPage(const GfxRenderer& renderer, bool hasHeader, bool hasTabBar, bool hasButtonHints,
                                      bool hasSubtitle, int extraReservedHeight = 0);
 

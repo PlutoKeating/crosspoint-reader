@@ -12,51 +12,20 @@
 #include "components/StickOverlays.h"
 #include "components/themes/BaseTheme.h"
 #include "components/themes/lyra/LyraTheme.h"
-#include "components/themes/roundedraff/RoundedRaffTheme.h"
 
 // Screens reserve exactly the shared front-key bar and side pills.
 static_assert(BaseMetrics::values.buttonHintsHeight == stick_overlay::FRONT_BAR_HEIGHT);
 static_assert(LyraMetrics::values.buttonHintsHeight == stick_overlay::FRONT_BAR_HEIGHT);
-static_assert(RoundedRaffMetrics::values.buttonHintsHeight == stick_overlay::FRONT_BAR_HEIGHT);
 static_assert(BaseMetrics::values.sideButtonHintsWidth == stick_overlay::SIDE_HINT_WIDTH);
 static_assert(LyraMetrics::values.sideButtonHintsWidth == stick_overlay::SIDE_HINT_WIDTH);
-static_assert(RoundedRaffMetrics::values.sideButtonHintsWidth == stick_overlay::SIDE_HINT_WIDTH);
 
 UITheme UITheme::instance;
 
+// One theme since 2.7.4 (theme selection removed): Lyra on top of the base
+// theme's shared drawing.
 UITheme::UITheme() {
-  auto themeType = static_cast<CrossPointSettings::UI_THEME>(SETTINGS.uiTheme);
-  setTheme(themeType);
-}
-
-void UITheme::reload() {
-  auto themeType = static_cast<CrossPointSettings::UI_THEME>(SETTINGS.uiTheme);
-  setTheme(themeType);
-}
-
-void UITheme::setTheme(CrossPointSettings::UI_THEME type) {
-  switch (type) {
-    case CrossPointSettings::UI_THEME::CLASSIC:
-      LOG_DBG("UI", "Using Classic theme");
-      currentTheme = std::make_unique<BaseTheme>();
-      currentMetrics = &BaseMetrics::values;
-      break;
-    case CrossPointSettings::UI_THEME::LYRA:
-      LOG_DBG("UI", "Using Lyra theme");
-      currentTheme = std::make_unique<LyraTheme>();
-      currentMetrics = &LyraMetrics::values;
-      break;
-    case CrossPointSettings::UI_THEME::ROUNDEDRAFF:
-      LOG_DBG("UI", "Using RoundedRaff theme");
-      currentTheme = std::make_unique<RoundedRaffTheme>();
-      currentMetrics = &RoundedRaffMetrics::values;
-      break;
-    case CrossPointSettings::UI_THEME::LYRA_3_COVERS:  // legacy value, folded on load
-      currentTheme = std::make_unique<LyraTheme>();
-      currentMetrics = &LyraMetrics::values;
-      break;
-  }
-  metricsValid = false;
+  currentTheme = std::make_unique<LyraTheme>();
+  currentMetrics = &LyraMetrics::values;
 }
 
 const ThemeMetrics& UITheme::getMetrics() const {
