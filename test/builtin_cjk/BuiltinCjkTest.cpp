@@ -15,7 +15,7 @@ void expectTextCovered(const EpdFont& font, const char* text) {
 
 }  // namespace
 
-TEST(BuiltinCjk, CoversProjectStickContentWithoutSdFont) {
+TEST(BuiltinCjk, CoversProjectStickContent) {
   const EpdFont font(&notosanssc_13_regular);
   expectTextCovered(font, "今天交易结束。新配置还是云，先别急着说利润。");
   expectTextCovered(font, "把过程记录下来，下次就能少猜价格的表现。");

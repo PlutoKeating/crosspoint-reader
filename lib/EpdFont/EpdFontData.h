@@ -195,7 +195,8 @@ typedef struct {
   const EpdLigaturePair* ligaturePairs;  ///< Sorted ligature pair table (nullptr if none)
   uint32_t ligaturePairCount;            ///< Number of entries in ligaturePairs
 
-  /// On-demand glyph loading for fonts that don't keep all glyphs in RAM (e.g. SD card fonts).
+  /// On-demand glyph loading for fonts that don't keep all glyphs in RAM (unused by the
+  /// built-in fonts, which set it to nullptr).
   /// Called by getGlyph() when a codepoint is not found in the interval table.
   /// Returns a valid EpdGlyph* with correct metadata, or nullptr to fall back to the
   /// replacement glyph.  The returned pointer is valid until the next glyphMissHandler
@@ -203,13 +204,11 @@ typedef struct {
   /// before requesting another missed glyph.
   const EpdGlyph* (*glyphMissHandler)(void* ctx, uint32_t codepoint);
 
-  /// Context pointer for glyphMissHandler (typically SdCardFont*).  Also used by
-  /// GfxRenderer::getGlyphBitmap() to retrieve overflow bitmaps via SdCardFont.
+  /// Context pointer for glyphMissHandler.
   void* glyphMissCtx;
 
   /// Full-coverage query for fonts whose interval table only reflects what is
-  /// currently in RAM (SD card fonts: stub/mini data cover at most one page of
-  /// glyphs).  Called by hasCodepoint() when the interval table misses; must
+  /// currently in RAM.  Called by hasCodepoint() when the interval table misses; must
   /// answer from RAM-resident data without storage I/O.  Shares glyphMissCtx.
   /// nullptr for fonts whose interval table is already complete (built-ins).
   bool (*coverageHandler)(void* ctx, uint32_t codepoint);

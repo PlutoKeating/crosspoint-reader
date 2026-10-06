@@ -5,7 +5,6 @@
 #include <FontDecompressor.h>
 #include <HalGPIO.h>
 #include <Logging.h>
-#include <SdCardFont.h>
 #include <Utf8.h>
 
 #include <algorithm>
@@ -14,48 +13,8 @@
 #include "FontCacheManager.h"
 
 namespace {
-
-/**
- * Resolves the requested style to the best available style in the given SD card font.
- * Falls back gracefully when the font lacks the requested variant.
- */
-uint8_t resolveSdCardStyle(const SdCardFont& font, const EpdFontFamily::Style style) {
-  return font.resolveStyle(static_cast<uint8_t>(style));
-}
-}  // namespace
-
-namespace {
 const char* resolveVisualText(const char* text, std::string& visualBuffer, BidiUtils::BidiBaseDir baseDir);
 
-// Appends the shaped visual form of every RTL token in `text` to `shapedOut`.
-// getTextAdvanceX() measures the bidi-reordered, Arabic-shaped codepoint stream,
-// so the SD advance table must be warmed with the presentation forms as well as
-// the logical codepoints — otherwise every RTL word measurement misses the fast
-// path and falls through to onGlyphMiss(), which opens the .cpfont and reads
-// glyph metadata + bitmap into the 8-slot overflow ring, once per glyph.
-// Tokens without RTL lead bytes (0xD6-0xDB) are skipped with a byte scan, so
-// pure-LTR text pays almost nothing.
-void appendShapedRtlTokens(const char* text, std::string& shapedOut) {
-  const auto isBreak = [](const char c) { return c == ' ' || c == '\n' || c == '\r' || c == '\t'; };
-  std::string token;
-  std::string visual;
-  const char* p = text;
-  while (*p) {
-    while (*p && isBreak(*p)) ++p;
-    const char* start = p;
-    bool hasRtlBytes = false;
-    while (*p && !isBreak(*p)) {
-      const auto b = static_cast<unsigned char>(*p);
-      hasRtlBytes = hasRtlBytes || (b >= 0xD6 && b <= 0xDB);
-      ++p;
-    }
-    if (!hasRtlBytes) continue;
-    token.assign(start, p - start);
-    if (BidiUtils::applyBidiVisual(token.c_str(), visual, static_cast<int>(BidiUtils::BidiBaseDir::AUTO))) {
-      shapedOut += visual;
-    }
-  }
-}
 }  // namespace
 
 const uint8_t* GfxRenderer::getGlyphBitmap(const EpdFontData* fontData, const EpdGlyph* glyph) const {
@@ -71,50 +30,7 @@ const uint8_t* GfxRenderer::getGlyphBitmap(const EpdFontData* fontData, const Ep
     // must consume it (draw the glyph) before requesting another bitmap.
     return fd->getBitmap(fontData, glyph, glyphIndex);
   }
-  // For SD card fonts, check if the glyph was loaded on demand into the overflow
-  // buffer.  getOverflowBitmap() returns:
-  //   - bitmap pointer for overflow glyphs with bitmap data
-  //   - nullptr for overflow glyphs without bitmap data (e.g. space: width=0, height=0)
-  //   - nullptr for non-overflow glyphs (normal prewarmed path)
-  // We distinguish overflow-with-no-bitmap from non-overflow by checking isOverflowGlyph().
-  if (fontData->glyphMissCtx) {
-    auto* sdFont = SdCardFont::fromMissCtx(fontData->glyphMissCtx);
-    if (sdFont->isOverflowGlyph(glyph)) {
-      return sdFont->getOverflowBitmap(glyph);  // may be nullptr for zero-width glyphs
-    }
-  }
   return &fontData->bitmap[glyph->dataOffset];
-}
-
-void GfxRenderer::ensureSdCardFontReady(int fontId, const char* utf8Text, uint8_t styleMask) const {
-  auto it = sdCardFonts_.find(fontId);
-  if (it != sdCardFonts_.end()) {
-    std::string shaped;
-    appendShapedRtlTokens(utf8Text, shaped);
-    int missed = it->second->buildAdvanceTable(utf8Text, styleMask, shaped.empty() ? nullptr : shaped.c_str());
-    if (missed > 0) {
-      LOG_DBG("GFX", "ensureSdCardFontReady: %d glyph(s) not found", missed);
-    }
-  }
-}
-
-void GfxRenderer::ensureSdCardFontReady(int fontId, const std::vector<std::string>& words, bool includeHyphen,
-                                        uint8_t styleMask) const {
-  auto it = sdCardFonts_.find(fontId);
-  if (it != sdCardFonts_.end()) {
-    // Augment the persistent advance-only table for layout measurement.
-    // The table survives across paragraphs/sections (capped per font), so
-    // repeated indexing of the same SD font amortizes glyph-metric SD reads.
-    std::string shaped;
-    for (const auto& w : words) {
-      appendShapedRtlTokens(w.c_str(), shaped);
-    }
-    int missed =
-        it->second->buildAdvanceTable(words, includeHyphen, styleMask, shaped.empty() ? nullptr : shaped.c_str());
-    if (missed > 0) {
-      LOG_DBG("GFX", "ensureSdCardFontReady: %d glyph(s) not found", missed);
-    }
-  }
 }
 
 void GfxRenderer::begin() {
@@ -1739,13 +1655,6 @@ bool GfxRenderer::copyBufferToRegion(int lx, int ly, int lw, int lh, const uint8
 }
 
 int GfxRenderer::getSpaceWidth(const int fontId, const EpdFontFamily::Style style) const {
-  // Advance table fast-path for SD card fonts during layout
-  auto sdIt = sdCardFonts_.find(fontId);
-  if (sdIt != sdCardFonts_.end() && sdIt->second->hasAdvanceTable()) {
-    const uint8_t resolvedStyle = resolveSdCardStyle(*sdIt->second, style);
-    return fp4::toPixel(sdIt->second->getAdvance(' ', resolvedStyle));
-  }
-
   const auto fontIt = fontMap.find(fontId);
   if (fontIt == fontMap.end()) {
     LOG_ERR("GFX", "Font %d not found", fontId);
@@ -1758,15 +1667,6 @@ int GfxRenderer::getSpaceWidth(const int fontId, const EpdFontFamily::Style styl
 
 int GfxRenderer::getSpaceAdvance(const int fontId, const uint32_t leftCp, const uint32_t rightCp,
                                  const EpdFontFamily::Style style) const {
-  // Advance table fast-path for SD card fonts during layout.
-  // Kern data is not loaded during layout (consistent with previous metadataOnly behavior),
-  // so we return just the space advance without kerning.
-  auto sdIt = sdCardFonts_.find(fontId);
-  if (sdIt != sdCardFonts_.end() && sdIt->second->hasAdvanceTable()) {
-    const uint8_t resolvedStyle = resolveSdCardStyle(*sdIt->second, style);
-    return fp4::toPixel(sdIt->second->getAdvance(' ', resolvedStyle));
-  }
-
   const auto fontIt = fontMap.find(fontId);
   if (fontIt == fontMap.end()) return 0;
   const auto& font = fontIt->second;
@@ -1799,15 +1699,7 @@ int GfxRenderer::getTextAdvanceX(const int fontId, const char* text, EpdFontFami
   std::string visual;
   text = resolveVisualText(text, visual, BidiUtils::BidiBaseDir::AUTO);
 
-  // Advance table fast-path for SD card fonts during layout.
-  // No kerning/ligature lookup — consistent with previous metadataOnly behavior
-  // where kern/lig data was not loaded.
-  auto sdIt = sdCardFonts_.find(resolvedFontId);
-  if (sdIt != sdCardFonts_.end() && sdIt->second->hasAdvanceTable()) {
-    int32_t widthFP = 0;
-    const bool isSupSub = (style & (EpdFontFamily::SUP | EpdFontFamily::SUB)) != 0;
-    const uint8_t styleIdx = resolveSdCardStyle(*sdIt->second, style);
-    const auto fontIt = fontMap.find(resolvedFontId);
+  const auto fontIt = fontMap.find(resolvedFontId);
     if (fontIt == fontMap.end()) {
       LOG_ERR("GFX", "Font %d not found", resolvedFontId);
       return 0;
