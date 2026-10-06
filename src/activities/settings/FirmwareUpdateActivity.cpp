@@ -22,8 +22,41 @@
 namespace {
 // The specific reason a check failed, with the HTTP status
 // for server errors.
+// Names the stage a network failure stopped at, with its code and the heap at
+// that moment (2.7.9), e.g. 「检查失败：加密握手失败（wolfSSL -188，可用 48/40 KB）」.
+const char* stageFailureText(const project_stick::NetDiag& d, char* buffer, size_t size) {
+  using project_stick::NetStage;
+  const char* stage = nullptr;
+  char code[32] = "";
+  switch (d.stage) {
+    case NetStage::Wifi: stage = tr(STR_NET_STAGE_WIFI); break;
+    case NetStage::Clock: stage = tr(STR_NET_STAGE_CLOCK); break;
+    case NetStage::Dns: stage = tr(STR_NET_STAGE_DNS); break;
+    case NetStage::Tcp:
+      stage = d.code == 116 ? tr(STR_NET_STAGE_TCP_TIMEOUT) : tr(STR_NET_STAGE_TCP);
+      if (d.code != 0) snprintf(code, sizeof code, "errno %d，", d.code);
+      break;
+    case NetStage::Tls:
+      stage = tr(STR_NET_STAGE_TLS);
+      snprintf(code, sizeof code, "wolfSSL %d，", d.code);
+      break;
+    case NetStage::TlsTimeout:
+      stage = tr(STR_NET_STAGE_TLS_TIMEOUT);
+      if (d.code != 0) snprintf(code, sizeof code, "wolfSSL %d，", d.code);
+      break;
+    case NetStage::Read: stage = tr(STR_NET_STAGE_READ); break;
+    default: return nullptr;
+  }
+  snprintf(buffer, size, tr(STR_OTA_FAIL_STAGE), stage, code, static_cast<unsigned>(d.freeHeap / 1024),
+           static_cast<unsigned>(d.maxAlloc / 1024));
+  return buffer;
+}
+
 const char* checkFailureText(const ProjectStickService::FirmwareOffer& offer, char* buffer, size_t size) {
   using project_stick::NetFailure;
+  if (offer.failure == NetFailure::Network || offer.failure == NetFailure::Clock) {
+    if (const char* text = stageFailureText(offer.diag, buffer, size)) return text;
+  }
   switch (offer.failure) {
     case NetFailure::Timeout:
       return tr(STR_OTA_FAIL_TIMEOUT);
@@ -213,7 +246,7 @@ void FirmwareUpdateActivity::render(RenderLock&&) {
   GUI.drawHeader(renderer, Rect{0, metrics.topPadding, pageWidth, metrics.headerHeight}, tr(STR_OTA_TITLE));
 
   int y = metrics.topPadding + metrics.headerHeight + metrics.verticalSpacing * 2;
-  char line[96];
+  char line[160];
   snprintf(line, sizeof(line), "%s  %s (%u)", tr(STR_OTA_CURRENT), CROSSPOINT_VERSION,
            static_cast<unsigned>(firmware_install::runningBuild()));
   renderer.drawText(UI_10_FONT_ID, side, y, line, true);

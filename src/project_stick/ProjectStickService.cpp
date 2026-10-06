@@ -107,6 +107,10 @@ bool apiBlockedNow() {
 // read server-side. Shared by the UI-side and worker service instances.
 std::atomic<uint32_t> lastTlsHeap{0}, lastTlsMaxAlloc{0};
 std::atomic<uint8_t> lastNetFailureCode{0};
+// Stage and code of the last request that did not succeed (2.7.9), relayed
+// in STATE so a field failure is readable without the SD card.
+std::atomic<uint8_t> lastNetStage{0};
+std::atomic<int32_t> lastNetCode{0};
 // Smallest largest-free-block seen since boot (2.7.4 telemetry: how
 // fragmented the heap got), sampled from the UI loop.
 std::atomic<uint32_t> lowestLargestBlock{UINT32_MAX};
@@ -167,6 +171,10 @@ void describeMetrics(JsonObject metrics) {
     metrics["tls_max"] = lastTlsMaxAlloc.load();
   }
   if (const uint8_t net = lastNetFailureCode.load()) metrics["net"] = net;
+  if (const uint8_t stage = lastNetStage.load()) {
+    metrics["net_stage"] = stage;
+    metrics["net_code"] = lastNetCode.load();
+  }
   // Card usage comes from the worker's idle scan (StudioFrame::refreshStorageUsage);
   // nothing here touches the FAT.
   uint64_t total = 0, used = 0;
@@ -198,7 +206,10 @@ bool trustedClockReady() {
   if (std::time(nullptr) >= 1735689600) return true;
   static bool requested = false;
   if (!requested) {
-    configTime(0, 0, "time.cloudflare.com", "time.google.com");
+    // Reachable from mainland networks first (time.google.com is not); the
+    // RTC (when valid) and the phone's time already seed the system clock,
+    // so this only matters for a device that never had either.
+    configTime(0, 0, "ntp.aliyun.com", "cn.pool.ntp.org", "time.cloudflare.com");
     requested = true;
   }
   const uint32_t deadline = millis() + 10000;
@@ -414,6 +425,14 @@ bool ProjectStickService::lendRadioIfLow(const char* what) {
   lastFailureStatus = 0;
   lastFailureHeap = freeHeap;
   lastNetFailureCode.store(static_cast<uint8_t>(lastFailure));
+  {
+    project_stick::NetDiag diag;
+    diag.stage = project_stick::NetStage::Memory;
+    diag.freeHeap = freeHeap;
+    diag.maxAlloc = maxAlloc;
+    diag.clock = std::time(nullptr) >= 1735689600;
+    noteDiag(diag);
+  }
   return false;
 #else
   (void)what;
@@ -460,7 +479,42 @@ bool ProjectStickService::requestAllowed() {
   return true;
 }
 
+void ProjectStickService::noteDiag(const project_stick::NetDiag& diag) {
+  lastDiag = diag;
+  if (diag.stage == project_stick::NetStage::Ok) return;  // STATE keeps the last failure
+  lastNetStage.store(static_cast<uint8_t>(diag.stage));
+  lastNetCode.store(diag.code);
+}
+
+void ProjectStickService::persistNetDiag(const char* what) {
+  char line[224];
+  project_stick::formatNetDiagLine(line, sizeof line, lastDiag, what, CROSSPOINT_VERSION,
+                                   static_cast<long long>(std::time(nullptr)), millis());
+  HalFile file;
+  if (Storage.openFileForWrite("STICK", "/.crosspoint/net_last.txt", file)) {
+    file.write(reinterpret_cast<const uint8_t*>(line), strlen(line));
+    file.close();
+  }
+  LOG_INF("STICK", "net: %s", line);
+}
+
 void ProjectStickService::recordOutcome(const bool clockReady, const int status) {
+  {
+    const bool wifiUp = WiFi.status() == WL_CONNECTED;
+#ifndef SIMULATOR
+    project_stick::NetDiag diag = project_stick::diagnoseRequest(
+        wifiUp, clockReady, static_cast<project_stick::TlsClientStage>(http.tlsStage()), http.tlsError(), status);
+    diag.freeHeap = ESP.getFreeHeap();
+    diag.maxAlloc = ESP.getMaxAllocHeap();
+    diag.ipv4 = static_cast<uint32_t>(http.tlsAddress());
+#else
+    project_stick::NetDiag diag = project_stick::diagnoseRequest(
+        wifiUp, clockReady, status > 0 ? project_stick::TlsClientStage::Ok : project_stick::TlsClientStage::Tcp, 0,
+        status);
+#endif
+    diag.rssi = wifiUp ? static_cast<int8_t>(WiFi.RSSI()) : 0;
+    noteDiag(diag);
+  }
 #ifndef SIMULATOR
   const uint32_t freeHeap = ESP.getFreeHeap();
   // A memory failure only once the stack has been lent: before that the
@@ -1229,6 +1283,10 @@ ProjectStickService::DownloadResult ProjectStickService::downloadFirmware(const 
     output.flush();
     output.close();
     ota_trial::noteApiResult(status, WiFi.status() == WL_CONNECTED);
+    if (status != 200 && status != 206) {
+      recordOutcome(true, status);
+      persistNetDiag("firmware_download");
+    }
     if (restartFromZero) {
       LOG_INF("OTA", "Server ignored Range; restarting download");
       Storage.remove(FIRMWARE_TEMP);
@@ -1257,46 +1315,68 @@ ProjectStickService::FirmwareOffer ProjectStickService::checkFirmware() {
   // link and the handshake get NimBLE's heap.
   RadioLease lease(*this);
   yieldPhoneLink();
-  if (!awaitWifi("firmware check")) {
-    offer.failure = project_stick::NetFailure::Network;
-    return offer;
-  }
-  HttpBurst burst(http);
-  std::string response;
-  if (!fetchJson(baseUrl + "/api/v1/public/firmware/latest?channel=stable", response, 6144, false)) {
-    if (lastFetchStatus == 404) {  // nothing published on this channel
-      offer.status = FirmwareOffer::Status::UpToDate;
-      return offer;
-    }
+  const auto failed = [this, &offer](const char* what) {
     offer.failure = lastFailure == project_stick::NetFailure::None || lastFailure == project_stick::NetFailure::Backoff
                         ? project_stick::NetFailure::Network
                         : lastFailure;
     offer.httpStatus = lastFailureStatus;
     offer.freeHeap = lastFailureHeap;
     offer.retryAfterSeconds = lastRateLimitSeconds;
+    offer.diag = lastDiag;
+    persistNetDiag(what);
+    return offer;
+  };
+  if (!awaitWifi("firmware check")) {
+    project_stick::NetDiag diag;
+    diag.stage = project_stick::NetStage::Wifi;
+    noteDiag(diag);
+    lastFailure = project_stick::NetFailure::Network;
+    return failed("firmware_check");
+  }
+  HttpBurst burst(http);
+  // Step 1, the whole check: the smallest answer the server has,
+  // {"v":"2.7.9"}. Nothing else is downloaded unless it is newer.
+  std::string response;
+  if (!fetchJson(baseUrl + "/api/v1/public/firmware/version?channel=stable", response, 128, false)) {
+    if (lastFetchStatus == 404) {  // nothing published on this channel
+      offer.status = FirmwareOffer::Status::UpToDate;
+      persistNetDiag("firmware_check");
+      return offer;
+    }
+    return failed("firmware_check");
+  }
+  char version[33] = {};
+  if (!project_stick::parseVersionAnswer(response.c_str(), version, sizeof version)) {
+    LOG_ERR("OTA", "Version answer not understood: %.64s", response.c_str());
+    lastFailure = project_stick::NetFailure::Server;
+    return failed("firmware_check");
+  }
+  persistNetDiag("firmware_check");
+  const bool newer = stick_fw::isNewerVersion(version, CROSSPOINT_VERSION);
+  LOG_INF("OTA", "Published %s, running %s: %s", version, CROSSPOINT_VERSION, newer ? "update available" : "up to date");
+  offer.target.version = version;
+  if (!newer) {
+    offer.status = FirmwareOffer::Status::UpToDate;
     return offer;
   }
+  // Step 2, only for a newer version: size, digest and image URL (~200 bytes).
+  if (!fetchJson(baseUrl + "/api/v1/public/firmware/version?channel=stable&full=1", response, 384, false))
+    return failed("firmware_details");
   JsonDocument doc;
   if (deserializeJson(doc, response)) {
-    offer.failure = project_stick::NetFailure::Server;
-    return offer;
+    lastFailure = project_stick::NetFailure::Server;
+    return failed("firmware_details");
   }
-  offer.target.version = doc["version"] | "";
-  offer.target.url = doc["url"] | "";
-  if (offer.target.url.empty()) offer.target.url = doc["bin_url"] | "";
-  offer.target.sha256 = doc["sha256"] | "";
-  offer.target.bytes = doc["bytes"] | size_t(0);
-  offer.notes = (doc["notes"] | "");
-  if (offer.notes.size() > 600) offer.notes.resize(600);
-  if (!validFirmwareTarget(offer.target)) {
+  offer.target.version = doc["v"] | "";
+  offer.target.url = doc["u"] | "";
+  offer.target.sha256 = doc["h"] | "";
+  offer.target.bytes = doc["n"] | size_t(0);
+  if (!validFirmwareTarget(offer.target) || !stick_fw::isNewerVersion(offer.target.version.c_str(), CROSSPOINT_VERSION)) {
     LOG_ERR("OTA", "Catalogue answer is not installable (version=%s)", offer.target.version.c_str());
-    offer.failure = project_stick::NetFailure::Server;
-    return offer;
+    lastFailure = project_stick::NetFailure::Server;
+    return failed("firmware_details");
   }
-  const bool newer = stick_fw::isNewerVersion(offer.target.version.c_str(), CROSSPOINT_VERSION);
-  LOG_INF("OTA", "Catalogue offers %s, running %s: %s", offer.target.version.c_str(), CROSSPOINT_VERSION,
-          newer ? "update available" : "up to date");
-  offer.status = newer ? FirmwareOffer::Status::UpdateAvailable : FirmwareOffer::Status::UpToDate;
+  offer.status = FirmwareOffer::Status::UpdateAvailable;
   return offer;
 }
 

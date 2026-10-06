@@ -48,6 +48,7 @@ class ProjectStickService {
     int httpStatus = 0;
     uint32_t freeHeap = 0;           // Memory: free heap with NimBLE released
     uint32_t retryAfterSeconds = 0;  // RateLimited: seconds left in the server's window
+    project_stick::NetDiag diag;     // where the request stopped (stage, code, heap)
     FirmwareTarget target;
     std::string notes;
   };
@@ -139,6 +140,12 @@ class ProjectStickService {
   project_stick::NetFailure lastFailure = project_stick::NetFailure::None;
   int lastFailureStatus = 0;
   void recordOutcome(bool clockReady, int status);
+  // Where the last request stopped (2.7.9): what the firmware screen names,
+  // what /.crosspoint/net_last.txt and STATE `net_stage`/`net_code` carry.
+  project_stick::NetDiag lastDiag;
+  void noteDiag(const project_stick::NetDiag& diag);
+  // Appends nothing: rewrites /.crosspoint/net_last.txt with the last outcome.
+  void persistNetDiag(const char* what);
 
   // NimBLE heap lending (worker task only). A cloud operation releases NimBLE
   // when the heap cannot afford a TLS handshake, or after a transport failure,
