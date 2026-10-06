@@ -118,8 +118,7 @@ bool SdFirmwareUpdateActivity::validateFirmware() {
     return false;
   }
   const auto candidate = firmware_install::inspect(firmwarePath.c_str(), nullptr);
-  stockStickImage = candidate.identity == stick_fw::IdentifyResult::Ok;
-  imageVersion = stockStickImage ? candidate.info.version : "";
+  imageVersion = candidate.identity == stick_fw::IdentifyResult::Ok ? candidate.info.version : "";
   if (!candidate.ok() && !recoveryMode) {
     switch (candidate.verdict) {
       case stick_fw::InstallVerdict::BelowMinimumBuild:
@@ -188,20 +187,13 @@ void SdFirmwareUpdateActivity::performUpdate() {
     self->requestUpdate(true);
   };
 
-  // Re-validate at flash time (TOCTOU): SD is removable, so don't trust the
-  // pre-confirmation pass. The alreadyValidated parameter on the API stays
-  // for callers (e.g. an OTA staging path) where the same byte stream was
-  // just hashed and there's no removable-media gap.
-  auto armTrial = +[](const esp_partition_t* dest, void* ctx) {
-    auto* self = static_cast<SdFirmwareUpdateActivity*>(ctx);
-    if (!self->stockStickImage) return true;
-    return ota_trial::arm(dest, self->imageVersion.c_str());
-  };
+  // The shared SD install (also used by the on-device download and firmware
+  // over BLE): image check, flash with re-validation (SD is removable), trial
+  // boot for StockStick images. Recovery mode flashes any bootable image.
   const auto result =
-      firmware_flash::flashFromSdPath(firmwarePath.c_str(), progressCb, this, /*alreadyValidated=*/false, armTrial);
-  if (result != firmware_flash::Result::OK) {
-    LOG_ERR("FW", "flash failed: %s", firmware_flash::resultName(result));
-    ota_trial::disarm();
+      firmware_install::installFromSd(firmwarePath.c_str(), nullptr, recoveryMode, progressCb, this);
+  if (!result.ok) {
+    LOG_ERR("FW", "install failed: %s", result.error);
     errorMessage = tr(STR_FIRMWARE_WRITE_FAILED);
     RenderLock lock(*this);
     state = State::FAILED;

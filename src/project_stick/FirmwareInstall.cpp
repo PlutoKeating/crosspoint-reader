@@ -4,6 +4,10 @@
 #include <HalStorage.h>
 #include <Logging.h>
 
+#include <string>
+
+#include "network/FirmwareFlasher.h"
+#include "network/OtaTrial.h"
 #include "platform/StickFirmwareDescriptor.h"
 
 #ifndef STOCKSTICK_FW_MIN_INSTALL_BUILD
@@ -41,6 +45,51 @@ Candidate inspect(const char* path, const char* expectedVersion) {
           static_cast<unsigned>(candidate.info.build), candidate.info.version,
           stick_fw::installVerdictName(candidate.verdict));
   return candidate;
+}
+
+InstallResult installFromSd(const char* path, const char* expectedVersion, const bool permissive,
+                            const ProgressFn onProgress, void* ctx) {
+  InstallResult result;
+  // A trial image rolls back to the other slot; flashing it now would
+  // overwrite the image the device returns to.
+  if (ota_trial::active() && !permissive) {
+    result.error = "trial_active";
+    return result;
+  }
+  const Candidate candidate = inspect(path, expectedVersion);
+  result.verdict = candidate.verdict;
+  const bool stockStick = candidate.identity == stick_fw::IdentifyResult::Ok;
+  if (!candidate.ok() && !permissive) {
+    result.error = stick_fw::installVerdictName(candidate.verdict);
+    return result;
+  }
+  struct Context {
+    ProgressFn onProgress;
+    void* ctx;
+    bool stockStick;
+    std::string version;
+  } context{onProgress, ctx, stockStick, stockStick ? candidate.info.version : ""};
+  auto progress = +[](size_t written, size_t total, void* raw) {
+    auto* c = static_cast<Context*>(raw);
+    if (c->onProgress) c->onProgress(written, total, c->ctx);
+  };
+  // Only identified StockStick images get a trial boot (rollback on crash).
+  auto armTrial = +[](const esp_partition_t* dest, void* raw) {
+    auto* c = static_cast<Context*>(raw);
+    return !c->stockStick || ota_trial::arm(dest, c->version.c_str());
+  };
+  // Re-validates the image file at flash time: SD is removable.
+  const auto flash = firmware_flash::flashFromSdPath(path, progress, &context, /*alreadyValidated=*/false, armTrial);
+  if (flash != firmware_flash::Result::OK) {
+    ota_trial::disarm();  // the new image will not boot, so there is no trial
+    result.error = firmware_flash::resultName(flash);
+    result.flashFailed = true;
+    LOG_ERR("FWINST", "%s: flash failed: %s", path, result.error);
+    return result;
+  }
+  result.ok = true;
+  LOG_INF("FWINST", "%s installed (%s)", path, stockStick ? context.version.c_str() : "unidentified image");
+  return result;
 }
 
 }  // namespace firmware_install
