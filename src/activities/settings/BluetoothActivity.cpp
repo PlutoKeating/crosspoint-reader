@@ -120,6 +120,21 @@ void BluetoothActivity::render(RenderLock&&) {
   row(tr(STR_BT_CONNECTIONS), text);
   formatAgo(text, sizeof(text), info.sinceConnect);
   row(tr(STR_BT_LAST_CONNECT), text);
+  // Every connect the stack saw, including link-level failures and refusals,
+  // which "连接次数" does not count (2.7.7).
+  if (info.linkFailures) {
+    snprintf(text, sizeof(text), tr(STR_BT_ATTEMPTS_FAILED_FORMAT), static_cast<unsigned>(info.linkAttempts),
+             static_cast<unsigned>(info.linkFailures), info.lastLinkFailure,
+             static_cast<unsigned>(info.lastLinkFailureHeap / 1024));
+  } else {
+    snprintf(text, sizeof(text), tr(STR_BT_ATTEMPTS_FORMAT), static_cast<unsigned>(info.linkAttempts),
+             static_cast<unsigned>(info.linkRejected));
+  }
+  row(tr(STR_BT_ATTEMPTS), text);
+  if (info.lastDisconnectReason >= 0) {
+    snprintf(text, sizeof(text), "0x%x", info.lastDisconnectReason);
+    row(tr(STR_BT_LAST_DISCONNECT), text);
+  }
   row("Wi-Fi", WiFi.status() == WL_CONNECTED ? tr(STR_PROJECT_STICK_STATUS_ONLINE) : tr(STR_PROJECT_STICK_STATUS_OFFLINE));
   snprintf(text, sizeof(text), "%u / %u KB", static_cast<unsigned>(ESP.getFreeHeap() / 1024),
            static_cast<unsigned>(ESP.getMaxAllocHeap() / 1024));

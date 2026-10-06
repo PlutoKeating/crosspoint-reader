@@ -77,6 +77,12 @@ struct Diagnostics {
   std::string name, address, error;
   int errorCode = 0;
   uint32_t starts = 0, startFailures = 0, connections = 0, advertisingRestarts = 0;
+  // GAP-level (2.7.7): every connect completion the host saw, the ones that
+  // failed at link level (HCI status of the last, and the free heap then),
+  // the ones refused because a phone was already linked, and the reason of
+  // the last disconnect (NimBLE code: 0x200 + HCI reason; -1 none yet).
+  uint32_t linkAttempts = 0, linkFailures = 0, linkRejected = 0, lastLinkFailureHeap = 0;
+  int lastLinkFailure = 0, lastDisconnectReason = -1;
   // Unused stack of the NimBLE host task in bytes (0 when the stack is down).
   uint32_t hostStackFree = 0;
   // Seconds since the last connect / disconnect; -1 when there was none.

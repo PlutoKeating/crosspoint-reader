@@ -22,6 +22,7 @@
 #include <StickFirmware.h>
 #include <WiFi.h>
 #include <optional>
+#include <vector>
 
 #include "FirmwareInstall.h"
 #include "FirmwareReceiver.h"
@@ -87,6 +88,33 @@ void awaitResume() {
 }
 uint32_t lastConnectMs = 0, lastDisconnectMs = 0;
 bool everConnected = false, everDisconnected = false;
+// GAP-level link diagnostics (2.7.7). `connections` only counts links our
+// onConnect accepted; a phone whose connect never completes (link-layer
+// failure: NimBLE logs it and restarts advertising, no callback) or that we
+// reject was invisible, so a 2.7.6 device read "connections 0" while the
+// phone kept trying. A GAP listener sees every connect completion and
+// disconnect, with the HCI status, reason and the heap at that moment.
+std::atomic<uint32_t> linkAttempts{0}, linkFailures{0}, linkRejected{0};
+uint32_t untrackedLinks = 0;  // links the watchdog adopted (under `mutex`)
+std::atomic<int> lastLinkFailure{0}, lastDisconnectReason{-1};
+std::atomic<uint32_t> lastLinkFailureHeap{0};
+#ifndef SIMULATOR
+struct ble_gap_event_listener gapListener;
+int onGapEvent(struct ble_gap_event* event, void*) {
+  if (event->type == BLE_GAP_EVENT_CONNECT) {
+    linkAttempts.fetch_add(1);
+    const int status = event->connect.status;
+    if (status != 0 && status != BLE_ERR_UNSUPP_REM_FEATURE) {
+      linkFailures.fetch_add(1);
+      lastLinkFailure.store(status);
+      lastLinkFailureHeap.store(ESP.getFreeHeap());
+    }
+  } else if (event->type == BLE_GAP_EVENT_DISCONNECT) {
+    lastDisconnectReason.store(event->disconnect.reason);
+  }
+  return 0;
+}
+#endif
 size_t transferTotal = 0;
 // NimBLE host callbacks run on a small stack and must never touch the SD card
 // (the 2.4.3 crash: a FAT long-name open from onWrite overflowed it). They
@@ -619,6 +647,7 @@ class ServerCallbacks final : public NimBLEServerCallbacks {
     {
       std::lock_guard<std::recursive_mutex> lock(mutex);
       reject = isConnected;
+      if (reject) linkRejected.fetch_add(1);
       if (!reject) {
         isConnected = true;
         connectionHandle = info.getConnHandle();
@@ -1057,9 +1086,14 @@ bool startRadioLocked() {
     failStartLocked(why.stage, why.code);
     return false;
   }
+  // ble_gap_init() clears the listener list on every start: register again.
+  ble_gap_event_listener_register(&gapListener, onGapEvent, nullptr);
   NimBLEDevice::setMTU(ATT_MTU);
-  // Prefer 2M PHY for every connection (BLE-TRANSFER-V4 §3); fastLink() asks again per link.
-  NimBLEDevice::setDefaultPhy(BLE_GAP_LE_PHY_2M_MASK, BLE_GAP_LE_PHY_2M_MASK);
+  // Allow 1M and 2M by default; fastLink() asks for 2M per link (BLE-TRANSFER-V4
+  // §3). 2.7.x preferred 2M only, which leaves no PHY a 1M-only peer can
+  // agree to; keeping 1M in the mask is the IDF default and costs nothing.
+  NimBLEDevice::setDefaultPhy(BLE_GAP_LE_PHY_1M_MASK | BLE_GAP_LE_PHY_2M_MASK,
+                              BLE_GAP_LE_PHY_1M_MASK | BLE_GAP_LE_PHY_2M_MASK);
   auto* server = NimBLEDevice::createServer();
   server->setCallbacks(&serverCallbacks, false);
   auto* service = server->createService(SERVICE);
@@ -1271,6 +1305,12 @@ Diagnostics diagnostics() {
   result.startFailures = startFailures;
   result.connections = connections;
   result.advertisingRestarts = advertisingRestarts;
+  result.linkAttempts = linkAttempts.load();
+  result.linkFailures = linkFailures.load();
+  result.linkRejected = linkRejected.load();
+  result.lastLinkFailure = lastLinkFailure.load();
+  result.lastLinkFailureHeap = lastLinkFailureHeap.load();
+  result.lastDisconnectReason = lastDisconnectReason.load();
   // Stack headroom of the NimBLE host task (its overflow was the 2.4.3 crash).
   if (started) {
     result.hostStackFree = nimble_port_freertos_get_hs_hwm();  // by handle; never xTaskGetHandle()
@@ -1623,10 +1663,28 @@ void tick() {
   }
   if (watch) {
     lastWatchMs = now;
-    // The controller can stop advertising on its own (host reset, a failed
-    // restart after a disconnect); without this the device stays invisible
-    // until the next reboot.
-    if (NimBLEDevice::getAdvertising()->isAdvertising()) {
+    // A link the stack holds but our onConnect never adopted (2.7.7): the
+    // phone sees a connection whose reads and writes are all ignored, and the
+    // advertising check below would tear the stack down under it. Adopt it.
+    auto* server = NimBLEDevice::getServer();
+    const std::vector<uint16_t> peers = server ? server->getPeerDevices() : std::vector<uint16_t>{};
+    if (!peers.empty()) {
+      {
+        std::lock_guard<std::recursive_mutex> lock(mutex);
+        if (!isConnected) {
+          isConnected = true;
+          connectionHandle = peers.front();
+          ++connections;
+          ++untrackedLinks;
+          lastConnectMs = now;
+          everConnected = true;
+          resetSession();
+          changed();
+        }
+      }
+      LOG_ERR("BLE", "Adopted a link onConnect missed (handle %u)", static_cast<unsigned>(peers.front()));
+      advertisingFaults = 0;
+    } else if (NimBLEDevice::getAdvertising()->isAdvertising()) {
       advertisingFaults = 0;
     } else if (NimBLEDevice::startAdvertising()) {
       advertisingFaults = 0;
