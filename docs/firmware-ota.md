@@ -84,7 +84,7 @@ python3 scripts/firmware_release.py --build --notes RELEASE_NOTES.md \
 | 入口 | 发起方 | 路径 |
 |---|---|---|
 | 小程序设备详情（手机在设备旁） | 所有者 | 2.7.4 起：小程序下载镜像，经蓝牙协议 4 的 `fw4` 操作分块传给设备（证明 `fw4|device_id|N|epoch|version|sha256|size|time`，仅已绑定模式），设备随收随写 SD 卡，收齐后走 SD 卡安装。2.7.3 及以前：协议 3 操作 `ota`，设备自己经 Wi‑Fi 下载（2.7.4 起不再接受） |
-| 设备「设置 → 系统 → 固件更新」 | 设备（无需绑定，联网即可，2.7.1 起） | `GET /api/v1/public/firmware/latest?channel=stable`（不带凭据）→ 设备本地比较版本 → 确认 → 直接下载 `url` 到 SD 卡、校验、刷写并重启 |
+| 设备设置里的「固件更新」 | 设备（无需绑定，联网即可，2.7.1 起） | 2.7.9 起：`GET /api/v1/public/firmware/version?channel=stable` 只返回 `{"v":"x.y.z"}`（不带凭据，响应上限 128 字节，不用 JSON 文档解析）→ 设备本地比较版本 → 仅当更新时再取 `&full=1`（`v,n,h,u`）→ 确认 → 下载 `u` 到 SD 卡、校验、刷写并重启。每次检查和下载失败都把结果写入 SD 卡 `/.crosspoint/net_last.txt` |
 | 设备「SD 卡固件更新」 | 用户 | 选择 `/` 或 `/firmware` 下的 `.bin`；只接受适用于本机的 StockStick 镜像，并启用试运行 |
 | 恢复模式（按住左侧键开机） | 用户 | 同上但不做描述符限制，用于救砖；只有 StockStick 镜像启用试运行 |
 | USB / 网页刷机 | 开发者 | 不经过试运行，视为可信镜像 |
@@ -178,7 +178,8 @@ PENDING_VERIFY 状态下的**任何**复位都当作失败；若把确认推迟�
 
 | 接口 | 语义 |
 |---|---|
-| `GET /api/v1/public/firmware/latest?channel=stable\|beta` | 公开的最新版本指针，设备端检查更新（2.7.1 起，不带凭据）与官网模拟器共用；含 `version`、`url`（或 `bin_url`）、`sha256`、`bytes`、`notes`，无发布时 404 |
+| `GET /api/v1/public/firmware/version?channel=stable\|beta[&full=1]` | 设备端检查更新（2.7.9 起）：默认 `{"v"}`，`full=1` 时 `{"v","n","h","u"}`，无发布时 404 |
+| `GET /api/v1/public/firmware/latest?channel=stable\|beta` | 公开的最新版本指针（2.7.1–2.7.8 的设备端检查与官网模拟器使用）；含 `version`、`url`（或 `bin_url`）、`sha256`、`bytes`、`notes`，无发布时 404 |
 | `GET <API 基址>/firmware/<version>/stockstick-<version>.bin` | 网站静态托管的镜像，支持 `Range`；设备不带凭据直接下载 |
 | `POST /api/v2/device/events` | 回滚事件 `firmware_rolled_back` |
 | `POST /api/v2/device/register` | 以新 `firmware_version` 注册即表示升级完成 |
@@ -205,3 +206,30 @@ PENDING_VERIFY 状态下的**任何**复位都当作失败；若把确认推迟�
 5. 故意安装会在启动后崩溃的测试构建：三次 panic 后自动回到旧版本，下次注册后服务端收到 `firmware_rolled_back` 事件。
 6. 安装非 StockStick 镜像（上游 CrossPoint）：设置中的 SD 更新拒绝，恢复模式仍可刷入。
 7. 深睡唤醒、Wi-Fi 自动重连、Studio 画面与按键反馈正常；阅读器相关入口已不存在。
+
+## 2.7.9：TLS 证书链与网络诊断
+
+**根因**：自从改用 wolfSSL，没有任何一个构建能与生产 API 完成 TLS 握手。
+
+- 生产证书链为 叶子证书 → WE1 → GTS Root R4（Cloudflare 额外发送了由 GlobalSign 交叉签名的 GTS Root R4）。
+- 原配置未开启 `WOLFSSL_SHA384`：WE1 用 ecdsa-with-SHA384 签名，会失败于 `HASH_TYPE_E` (-232)。
+- 原配置也未开启 `WOLFSSL_ALT_CERT_CHAINS`：那张交叉证书的签发者 GlobalSign 不在固定根证书里，会失败于 `ASN_NO_SIGNER_E` (-188)。
+- 这正是现场看到的「无法连接服务器」，而且请求从未到达 Cloudflare。
+
+2.7.9 开启了 `WOLFSSL_SHA384`、`WOLFSSL_SHA512` 和 `WOLFSSL_ALT_CERT_CHAINS`。叶子证书仍须链到固定根证书，主机名校验不变。
+
+**台架验证**：`scripts/tls_bench.sh` 会用 `platformio.ini` 中的 wolfSSL 参数和补丁后的 `user_settings.h`，在本机编译 wolfSSL，再用 `StudioTrust.h` 里的根证书对线上主机握手并发起 GET。
+
+- 修复前：-188。
+- 修复后：TLSv1.3 / TLS_AES_128_GCM_SHA256，HTTP 200 `{"v":"2.7.8"}`。
+- 不在固定根证书范围内的主机仍以 -188 失败。
+
+**以后凡是改动 TLS 参数或根证书，都必须先跑这个脚本。**
+
+**诊断**：每次请求都会记录停在哪一步，以及当时的堆内存。
+
+- 步骤取值：`wifi` / `clock` / `dns` / `tcp`（errno，116 表示超时）/ `tls`（wolfSSL 错误码）/ `tls_timeout` / `read` / `http`（状态码）/ `memory`。
+- 固件页显示示例：「检查失败：加密握手失败（wolfSSL -188，可用 48/40 KB）」。
+- 每次手动检查和下载失败都会重写 `/.crosspoint/net_last.txt`，内容包括 fw、what、stage、code、heap、max、clock、rssi、ip、utc、uptime_ms。
+- STATE metrics 带 `net_stage` 和 `net_code`。
+- NTP 改用 `ntp.aliyun.com`、`cn.pool.ntp.org`、`time.cloudflare.com`。

@@ -430,3 +430,15 @@ and watch the serial log:
 - After any crash, `crash_report.txt` now contains `Heap at … ms: free=…
   min=… largest=…` (and `Out of memory (operator new failed).` when that was
   the cause).
+
+## 2.7.9
+
+The TLS fix enables SHA-384/512 in wolfSSL, which every handshake to the API needs (see firmware-ota.md).
+
+| | 2.7.8 | 2.7.9 |
+|---|---|---|
+| `.iram0.text` | 86,678 | 86,678 |
+| `.dram0.bss` | 46,688 | 46,840 |
+| flash used | 3,360,528 B image | 3,369,189 B |
+
+Diagnostics add about 150 B of static state. The SHA-512 context is a transient allocation during a handshake.

@@ -88,7 +88,7 @@ scheduled by `ProjectStickHost` on every page (2.7.1):
 
 One request needs no binding and no credential, only Wi-Fi (2.7.1):
 
-- `GET /api/v1/public/firmware/latest?channel=stable` on a manual 「检查更新」
+- `GET /api/v1/public/firmware/version?channel=stable` on a manual 「检查更新」 (2.7.9: the answer is only `{"v":"x.y.z"}`; `&full=1` adds `n`/`h`/`u` and is fetched only for a newer version; every outcome is written to `/.crosspoint/net_last.txt` and STATE metrics carry `net_stage`/`net_code`)
   (Settings > System > Firmware update), then a direct download of the
   published image (see OTA below). The answer carries `version`, `url` (or
   `bin_url`), `sha256`, `bytes`, `notes`; the device compares `version` with
