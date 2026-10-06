@@ -303,8 +303,8 @@ interrupt registered as IRAM-safe (`ESP_INTR_FLAG_IRAM`). In this firmware:
 ### Stacks
 
 Not shrunk: there are no hardware high-water marks yet. STATE `stack_min` now
-reports the least headroom of `loopTask` (8 KB), `ProjectStickSync` (8 KB,
-static) and `nimble_host` (8 KB). Shrink a stack only after field reports show
+reports the least headroom of `loopTask` (8 KB), the sync worker (8 KB,
+static; task `StickSync` since 2.7.6, read by handle) and `nimble_host` (8 KB). Shrink a stack only after field reports show
 its headroom stays above ~2 KB across transfers, firmware installs and cloud
 jobs.
 
