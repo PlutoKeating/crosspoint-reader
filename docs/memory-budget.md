@@ -330,6 +330,49 @@ Release ELF (`riscv32-esp-elf-size -A`, both built in this tree; 2.7.4 from
 | Hebrew and Arabic glyphs in the Ubuntu 10/12 and Noto Sans 8 faces | `.flash.rodata` ≈ −87 KB |
 | SD-card fonts, screenshot combo, tilt events, Home launcher, dead utilities | flash; one map lookup per measured string; no Home page render on the way to Settings |
 
+## 2.7.6: back to hardware-validated placements (2.7.4/2.7.5 boot-looped on an X3)
+
+A real X3 flashed with 2.7.5 looped (boot screen → black → reboot) and the
+trial rolled back to 2.7.2. No crash report existed because only a panic
+wrote one; watchdog resets counted toward the rollback silently. The cause
+is not confirmed on hardware; 2.7.6 removes the two unvalidated hardware
+changes of 2.7.4 and adds the diagnostics to tell next time:
+
+- **Heap functions back in IRAM** (`CONFIG_HEAP_PLACE_FUNCTION_INTO_FLASH`
+  off). With them in flash, the Wi-Fi/BLE/coex OSI allocation wrappers IDF
+  keeps in IRAM (`calloc/zalloc/realloc_internal_wrapper`,
+  `esp_coex_common_malloc_internal_wrapper`, `malloc`/`free`) called into
+  flash — forbidden by the option's own help (fault on any NVS/otadata write
+  with a radio active). A definite defect.
+- **BLE controller back in ROM/IRAM** (`CONFIG_BT_CTRL_RUN_IN_FLASH_ONLY`
+  off): unvalidated, stalls BLE during flash writes. Pending a hardware test.
+- FreeRTOS non-ISR and ring-buffer functions stay in flash (IDF keeps the ISR
+  variants in IRAM). The IRAM→flash call edges of the 2.7.6 ELF are identical
+  to 2.7.3's (`objdump` of `.iram0.text`, every `jalr`/`jr` into 0x42xxxxxx).
+- **X3 strip rendering off** (`Uc8253X3Driver::supportsStripSource()` false,
+  freeink-sdk 023881a): per-strip partial windows narrower than the panel
+  were never exercised on hardware (the simulator does not run this driver).
+  Cards render through the framebuffer again, and
+  `GfxRenderer::releaseFrameBuffer()` is a no-op without strip support, so
+  the 52 KB framebuffer stays resident and the reacquire/restart path never
+  runs on X3. The strip code stays for a hardware test.
+
+| | 2.7.3 | 2.7.5 | 2.7.6 |
+|---|---|---|---|
+| `.iram0.text` | 87,264 | 70,390 | 86,968 |
+| `.dram0.data` | 17,649 | 17,353 | 17,697 |
+| `.dram0.bss` | 49,600 | 46,552 | 46,656 |
+| `_heap_start` | 0x3FCA5CA0 | 0x3FCA0DB0 | 0x3FCA4F70 |
+| heap vs 2.7.3 | — | +19.9 KB | +3.4 KB |
+| framebuffer while a card shows | resident | freed (52 KB) | resident |
+
+Net: about 3.4 KB more heap than 2.7.3 (removed features, smaller buffers),
+instead of 2.7.4's estimated +72 KB with a card on screen. Both disabled
+gains can come back one at a time after a hardware test behind the trial
+rollback (strip path first, ideally with a USB serial capture of a
+`gh_release_rc` build); the heap never goes to flash while Wi-Fi/BLE are in
+use.
+
 ## Where the RAM goes
 
 Static, from `riscv32-esp-elf-size -A` on the release ELF (2.4.2 → 2.4.3):

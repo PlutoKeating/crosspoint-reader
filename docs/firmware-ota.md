@@ -160,6 +160,7 @@ fw4 操作（仅已绑定模式）
 | 每次启动（`setup()` 最早阶段） | 运行在旧槽 → 记为回滚（`bootloader_rollback`）；上一次是 panic/看门狗复位 → 失败次数 +1；达到 3 次 → 切回旧槽并重启（`repeated_crash`）。掉电、欠压复位和深睡唤醒不计入。计数写入 NVS 后即向 bootloader 标记镜像有效，之后由应用层计数负责 |
 | 运行中（主循环） | 任意一次 StockStick API 返回 HTTP 状态 → 确认；手机经蓝牙完成一次签名的 `sync` 操作（2.6.0）→ 确认（`phone_ok`）；同一次 Wi-Fi 连接期间，API 请求周期在传输层失败（每 30 秒最多计 1 次，Wi-Fi 断开即清零）累计 ≥ 5 次且首末相隔 ≥ 5 分钟 → 回滚（`cloud_unreachable`）；从未联网且运行满 2 分钟 → 确认；超过 60 分钟仍无结论 → 确认。刷写进行中不做判定 |
 | 正常进入深度睡眠 | 视为健康，确认 |
+| 每次试运行启动 | 本次复位原因（`panic`、`int_wdt`、`task_wdt`、`wdt`、`brownout`、`lockup`；上电、软件重启和深睡唤醒不记）追加到 NVS 键 `rsn`（2.7.6）。回滚原因带上这串记录，例如 `repeated_crash:task_wdt,task_wdt,panic` |
 | 下一次同步 | 回滚结果作为事件 `firmware_rolled_back`（`payload.detail` = "<版本> <原因>"）上报：优先由手机经蓝牙 STATE 的 `ota_outcome` 中继到 `/api/v1/miniapp/studio/devices/state`，否则随下一次注册心跳 |
 
 `verifyRollbackLater()` 返回 true，Arduino 不再在 `initArduino()` 中自动确认镜像，而是由
@@ -169,6 +170,7 @@ PENDING_VERIFY 状态下的**任何**复位都当作失败；若把确认推迟�
 因此 bootloader 只负责 `onBoot()` 之前就崩溃的镜像，之后交给上表的应用层策略。出厂 bootloader
 若不支持回滚，则完全依靠应用层计数。试运行期间设置中的 SD 卡更新和在线安装都会拒绝，
 避免覆盖回滚目标分区；恢复模式不受此限制。
+2.7.6 起，panic、CPU 锁死、中断/任务/RTC 看门狗和欠压复位都会在下次启动时写 SD 卡根目录的 `crash_report.txt`（复位原因、最近日志、堆采样）；此前只有 panic 才写，看门狗导致的启动循环没有任何记录（2.7.5 即如此）。崩溃界面仍只在 panic 后显示。
 在全局构造阶段就崩溃、且 bootloader 不支持回滚的镜像无法自救，只能用恢复模式或 USB 刷机，
 因此每次发布都必须先在真机上完成验证清单。
 

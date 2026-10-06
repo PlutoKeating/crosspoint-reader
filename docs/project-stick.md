@@ -226,11 +226,12 @@ and `ProjectStickHost::tickBle` (applies queued work, on every page).
   every 2 s while connected and every 10 min otherwise; alert polls are only
   requested inside the A-share trading window and the store is saved only when
   an alert or the trading-day flag changed; boot hashes each program file once.
-- Streamed cards (2.7.4): on the X3 `StudioFrame::stream` sends the card from
-  the SD card to the panel in strips of 72 columns with the overlays drawn
-  into each strip, and the 52 KB framebuffer is freed while the card shows
-  (memory-budget.md "2.7.4"). The framebuffer comes back for the status
-  screen, the firmware screen, every other page and sleep.
+- Streamed cards (2.7.4, **disabled since 2.7.6**): `StudioFrame::stream`
+  can send a card from the SD card to the panel in strips with the overlays
+  drawn into each strip, freeing the 52 KB framebuffer while it shows. The X3
+  driver reports no strip support since 2.7.6 (2.7.4/2.7.5 boot-looped on a
+  real X3; memory-budget.md "2.7.6"), so cards render through the resident
+  framebuffer until the path is validated on hardware.
 - `StudioFrame::render` (2.6.4) holds the frame lock only while choosing the
   file and offset; the SD read and pixel loop run unlocked on the render task.
   Before, every repaint stalled the UI loop for hundreds of milliseconds and a
@@ -378,8 +379,8 @@ register failure (these need a provisioned device token).
 - Studio frames and programs stream directly to SD; seen alerts and pending
   events have explicit caps (32 each). Firmware from the phone or the
   download streams to SD the same way, one 32 KB block at a time.
-- A card on screen holds no framebuffer (2.7.4): it is streamed from SD in
-  4.7 KB strips; pages that draw get the framebuffer back first.
+- The framebuffer stays resident on X3 (2.7.6): `releaseFrameBuffer()` is a
+  no-op on panels without strip support.
 - NimBLE is deinitialised (host and controller heap freed) for a cloud request
   when the heap is below what a TLS handshake needs, for a retry after a
   transport failure, and for a whole firmware install; it is restored with the
