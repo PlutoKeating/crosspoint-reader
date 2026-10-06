@@ -330,7 +330,8 @@ project_stick::WifiNeeds ProjectStickHost::wifiNeeds(const uint32_t nowMs) const
   needs.heartbeatDue = canJoin && service_.hasCredential() && !inactive_ && !service_.phoneSyncFresh() &&
                        project_stick::registrationDue(nowMs, lastRegisterMs_);
   needs.alertWindow = canJoin && service_.hasCredential() && !inactive_ && service_.inAlertWindow();
-  needs.trialPending = canJoin && (ota_trial::active() || ota_trial::hasPendingOutcome());
+  needs.trialPending = canJoin && project_stick::trialNeedsWifi(ota_trial::active(), ota_trial::hasPendingOutcome(),
+                                                                service_.hasCredential());
   return needs;
 }
 

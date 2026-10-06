@@ -61,6 +61,19 @@ inline PhoneLinkAction phoneLinkAction(const PhoneLinkInputs& in) {
   return in.userInitiated ? PhoneLinkAction::Disconnect : PhoneLinkAction::Defer;
 }
 
+// Whether an open firmware trial or an unreported install outcome needs the
+// radio. Both are settled through the cloud only with a credential: a trial
+// confirms on an API answer (register), an outcome is flushed as an event.
+// Without one (cred 0: the 2.6.x credential loss, waiting for the phone's
+// `token` heal) nothing the radio could do settles them: the trial confirms
+// offline after its uptime window and the outcome waits for the phone's
+// `sync`. Wanting Wi-Fi for them anyway kept the radio up indefinitely on
+// such a device (2.7.6 field report: Wi-Fi 在线, heap 19/16 KB, no phone
+// could connect).
+inline bool trialNeedsWifi(bool trialActive, bool outcomePending, bool credential) {
+  return credential && (trialActive || outcomePending);
+}
+
 constexpr uint32_t WIFI_IDLE_GRACE_MS = 20000;  // unwanted this long -> power down
 constexpr uint32_t WIFI_JOIN_HOLD_MS = 60000;   // the phone reads `connected` after a BLE join
 constexpr uint32_t WIFI_JOB_WAIT_MS = 20000;    // a worker job waits this long for the link

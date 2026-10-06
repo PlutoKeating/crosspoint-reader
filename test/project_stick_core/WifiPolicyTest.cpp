@@ -108,3 +108,22 @@ TEST(PhoneLinkPolicy, OnDeviceJobBringsWifiUpWithThePhoneLinked) {
   n.pageHold = true;  // the firmware or Wi-Fi page is open
   EXPECT_TRUE(wifiWanted(n));
 }
+
+// 2.7.6 field report: a device without a cloud token kept Wi-Fi up forever for
+// an install outcome nothing could report, starving NimBLE of heap.
+TEST(WifiPolicy, TrialNeedsWifiOnlyWithACredential) {
+  using project_stick::trialNeedsWifi;
+  EXPECT_FALSE(trialNeedsWifi(true, false, false));
+  EXPECT_FALSE(trialNeedsWifi(false, true, false));
+  EXPECT_FALSE(trialNeedsWifi(true, true, false));
+  EXPECT_TRUE(trialNeedsWifi(true, false, true));
+  EXPECT_TRUE(trialNeedsWifi(false, true, true));
+  EXPECT_FALSE(trialNeedsWifi(false, false, true));
+}
+
+TEST(WifiPolicy, CredentialLossLeavesTheRadioOff) {
+  project_stick::WifiNeeds n;  // bound, cred 0, saved network, no phone, night
+  n.trialPending = project_stick::trialNeedsWifi(false, true, false);
+  EXPECT_FALSE(project_stick::wifiWanted(n));
+  EXPECT_TRUE(project_stick::wifiShouldPowerOff(n, 30000, 0));
+}
