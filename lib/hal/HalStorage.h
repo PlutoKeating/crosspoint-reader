@@ -38,6 +38,11 @@ class HalStorage {
   bool remove(const char* path);
   bool rename(const char* oldPath, const char* newPath);
   bool rmdir(const char* path);
+  // Creates `path` (which must not exist) with `size` bytes in one contiguous
+  // run of clusters (SdFat preAllocate, as FatFile::createContiguous does; no
+  // data is written). False, with nothing left behind, when the card has no
+  // such run. Used once per transfer area (2.7.10).
+  bool createContiguous(const char* path, uint64_t size);
 
   bool openFileForRead(const char* moduleName, const char* path, HalFile& file);
   bool openFileForRead(const char* moduleName, const std::string& path, HalFile& file);
@@ -90,6 +95,9 @@ class HalFile : public Print {
   size_t write(const void* buf, size_t count);
   size_t write(uint8_t b) override;
   bool rename(const char* newPath);
+  // Whether the file's clusters form one run; also lets SdFat skip the FAT
+  // for seeks and writes inside it from then on.
+  bool isContiguous();
   bool isDirectory() const;
   void rewindDirectory();
   bool close();

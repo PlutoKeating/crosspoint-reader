@@ -100,6 +100,16 @@ bool HalStorage::rename(const char* oldPath, const char* newPath) {
 
 bool HalStorage::rmdir(const char* path) { HAL_STORAGE_WRAPPED_CALL(rmdir, path); }
 
+bool HalStorage::createContiguous(const char* path, const uint64_t size) {
+  StorageLock lock;
+  FsFile file = SDCard.open(path, O_RDWR | O_CREAT | O_EXCL);
+  if (!file) return false;
+  const bool ok = file.preAllocate(size) && file.isContiguous();
+  file.close();
+  if (!ok) SDCard.remove(path);
+  return ok;
+}
+
 bool HalStorage::openFileForRead(const char* moduleName, const char* path, HalFile& file) {
   StorageLock lock;  // ensure thread safety for the duration of this function
   FsFile fsFile;
@@ -163,6 +173,13 @@ int HalFile::read() { HAL_FILE_WRAPPED_CALL(read, ); }
 size_t HalFile::write(const void* buf, size_t count) { HAL_FILE_WRAPPED_CALL(write, buf, count); }
 size_t HalFile::write(uint8_t b) { HAL_FILE_WRAPPED_CALL(write, b); }
 bool HalFile::rename(const char* newPath) { HAL_FILE_WRAPPED_CALL(rename, newPath); }
+bool HalFile::isContiguous() {
+  HalStorage::StorageLock lock;
+  assert(impl != nullptr);
+  // contiguousRange() walks the cluster chain once and sets SdFat's
+  // contiguous flag; a reopened file does not carry it.
+  return impl->file.isContiguous() || impl->file.contiguousRange(nullptr, nullptr);
+}
 bool HalFile::isDirectory() const { HAL_FILE_FORWARD_CALL(isDirectory, ); }  // already thread-safe, no need to wrap
 void HalFile::rewindDirectory() { HAL_FILE_WRAPPED_CALL(rewindDirectory, ); }
 bool HalFile::close() { HAL_FILE_WRAPPED_CALL(close, ); }
