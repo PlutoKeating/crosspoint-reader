@@ -11,7 +11,6 @@
 #include "GfxRenderer.h"
 #include "MappedInputManager.h"
 #include "RenderLock.h"
-#include "util/ScreenshotInfo.h"
 
 class Activity {
   friend class ActivityManager;
@@ -62,7 +61,6 @@ class Activity {
   // See StickTakeover: whether a phone's delivery may replace this page.
   virtual StickTakeover stickTakeover() const { return StickTakeover::Allowed; }
   virtual bool handleHomeGesture() { return false; }
-  virtual ScreenshotInfo getScreenshotInfo() const { return {}; }
 
   // Start a new activity without destroying the current one
   // Note: requestUpdate() will be invoked automatically once resultHandler finishes
