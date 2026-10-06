@@ -143,6 +143,7 @@ class ProjectStickHost {
   uint32_t lastStateRefreshMs_ = 0;
   bool stateLinkWasConnected_ = false;
   uint32_t lastPowerCheckMs_ = 0;
+  uint32_t lastHeapSampleMs_ = 0;
   uint32_t lastTakeoverMs_ = 0;
 #ifdef SIMULATOR
   bool simulatorAlertPollPending_ = false;

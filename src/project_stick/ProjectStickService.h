@@ -94,6 +94,9 @@ class ProjectStickService {
   bool isBound() const;
   // True when the device holds a cloud credential (a bound physical device).
   bool hasCredential() const;
+  // Records the current largest free heap block for the `heap_largest_min`
+  // metric (UI loop, every few seconds).
+  static void sampleHeap();
   std::string deviceId() const;
   // Stores the credential a phone delivered over BLE setup (protocol 3):
   // device token, owner and bound=true. A registration already in flight

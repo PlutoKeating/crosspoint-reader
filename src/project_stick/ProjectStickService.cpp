@@ -98,6 +98,27 @@ bool apiBlockedNow() {
 // read server-side. Shared by the UI-side and worker service instances.
 std::atomic<uint32_t> lastTlsHeap{0}, lastTlsMaxAlloc{0};
 std::atomic<uint8_t> lastNetFailureCode{0};
+// Smallest largest-free-block seen since boot (2.7.4 telemetry: how
+// fragmented the heap got), sampled from the UI loop.
+std::atomic<uint32_t> lowestLargestBlock{UINT32_MAX};
+
+// Least stack headroom (bytes) of the tasks that run our code: the Arduino
+// loop (UI and BLE requests), the sync worker (cloud jobs, transfer pump) and
+// the NimBLE host (GATT callbacks). 0 when none can be read.
+uint32_t minimumStackHeadroom() {
+#ifndef SIMULATOR
+  uint32_t lowest = UINT32_MAX;
+  for (const char* name : {"loopTask", "ProjectStickSync", "nimble_host"}) {
+    if (TaskHandle_t task = xTaskGetHandle(name)) {
+      const uint32_t free = uxTaskGetStackHighWaterMark(task);
+      if (free < lowest) lowest = free;
+    }
+  }
+  return lowest == UINT32_MAX ? 0 : lowest;
+#else
+  return 0;
+#endif
+}
 
 // Firmware identity and capabilities sent with registration.
 void describeFirmware(JsonDocument& request) {
@@ -119,6 +140,11 @@ void describeMetrics(JsonObject metrics) {
   metrics["heap_free"] = ESP.getFreeHeap();
   metrics["heap_min"] = ESP.getMinFreeHeap();
   metrics["heap_max_alloc"] = ESP.getMaxAllocHeap();
+  // heap_min above is already the minimum since boot; these two complete the
+  // picture for 2.7.4's memory work: the most fragmented the heap got and the
+  // tightest task stack.
+  if (const uint32_t lowest = lowestLargestBlock.load(); lowest != UINT32_MAX) metrics["heap_largest_min"] = lowest;
+  if (const uint32_t stack = minimumStackHeadroom()) metrics["stack_min"] = stack;
   metrics["uptime_ms"] = millis();
   metrics["wifi_rssi"] = WiFi.status() == WL_CONNECTED ? WiFi.RSSI() : 0;
   metrics["wifi_on"] = WiFi.getMode() != WIFI_MODE_NULL ? 1 : 0;  // Wi-Fi is on demand since 2.7.2
@@ -137,6 +163,16 @@ void describeMetrics(JsonObject metrics) {
   }
 }
 
+}  // namespace
+
+void ProjectStickService::sampleHeap() {
+  const uint32_t largest = ESP.getMaxAllocHeap();
+  uint32_t seen = lowestLargestBlock.load();
+  while (largest < seen && !lowestLargestBlock.compare_exchange_weak(seen, largest)) {
+  }
+}
+
+namespace {
 // Unix seconds when the system clock is trusted, else from the server clock, else 0.
 int64_t trustedUnixNow(const project_stick::ShanghaiTime& fallback) {
   const std::time_t wall = std::time(nullptr);

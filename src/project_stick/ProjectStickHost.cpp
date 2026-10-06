@@ -80,6 +80,10 @@ bool ProjectStickHost::requestCloudSync(const bool manual) {
 
 void ProjectStickHost::tick(const uint32_t nowMs) {
   if (!begun_) return;
+  if (nowMs - lastHeapSampleMs_ >= 5000) {
+    lastHeapSampleMs_ = nowMs;
+    ProjectStickService::sampleHeap();
+  }
   tickPower(nowMs);
   service_.syncClock();
   tickBle(nowMs);
