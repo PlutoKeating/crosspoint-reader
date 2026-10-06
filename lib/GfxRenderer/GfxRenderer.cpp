@@ -1700,27 +1700,6 @@ int GfxRenderer::getTextAdvanceX(const int fontId, const char* text, EpdFontFami
   text = resolveVisualText(text, visual, BidiUtils::BidiBaseDir::AUTO);
 
   const auto fontIt = fontMap.find(resolvedFontId);
-    if (fontIt == fontMap.end()) {
-      LOG_ERR("GFX", "Font %d not found", resolvedFontId);
-      return 0;
-    }
-    const auto& font = fontIt->second;
-    while (uint32_t cp = utf8NextCodepoint(reinterpret_cast<const uint8_t**>(&text))) {
-      // RTL vowel marks (niqqud/harakat) are zero-advance overlays in drawText — no width.
-      if (BidiUtils::isTransparentMark(cp)) {
-        continue;
-      }
-      int32_t advFP = sdIt->second->getAdvance(cp, styleIdx);
-      if (advFP == 0 && !utf8IsCombiningMark(cp)) {
-        const EpdGlyph* glyph = font.getGlyph(cp, style);
-        advFP = glyph ? glyph->advanceX : 0;
-      }
-      widthFP += isSupSub ? (advFP + 1) / 2 : advFP;
-    }
-    return fp4::toPixel(widthFP);
-  }
-
-  const auto fontIt = fontMap.find(resolvedFontId);
   if (fontIt == fontMap.end()) {
     LOG_ERR("GFX", "Font %d not found", resolvedFontId);
     return 0;
