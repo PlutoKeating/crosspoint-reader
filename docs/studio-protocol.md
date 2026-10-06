@@ -226,16 +226,41 @@ The stream (encrypted as one CTR stream from offset 0) is the SSP1 header
 is `header = 0`, `size = 52272`, `hash` = its digest, and only that record.
 
 - **Device side** (`lib/ProjectStick/StudioTransfer`, `src/project_stick/StudioReceiver`):
-  the Assembler writes the header to `incoming.bin`, resolves the frame
-  digests (`frames[].sha256`), looks each up in the kept program files
-  (active, saved program, last visual: those are the frame library, so a held
-  frame is copied, never written twice) and announces `need` (PROGRESS state
-  2, STATUS `need`, frame i = bit i % 8 of byte i / 8). Records are staged in
-  `record.z` and inflated with uzlib (1 KB dictionary, static); each frame
-  must be exactly 52,272 bytes with the header's digest (`frame_mismatch`).
-  Held frames are copied in order between records. `commit` hands the rebuilt
-  file to `StudioFrame::commit()` (full SHA-256 check, install, receipts as
-  before).
+  the Assembler writes the header, resolves the frame digests
+  (`frames[].sha256`), looks each up in the frame slots and in the kept
+  content (active, saved program, last visual, the backup state's) and
+  announces `need` (PROGRESS state 2, STATUS `need`, frame i = bit i % 8 of
+  byte i / 8). Records are staged in `record.z` and inflated with uzlib (1 KB
+  dictionary, static); each frame must be exactly 52,272 bytes with the
+  header's digest (`frame_mismatch`). Held frames are taken in order between
+  records. `commit` hands the transfer to `StudioFrame::commit()` (full
+  SHA-256 check, install, receipts as before).
+- **Frame slots** (2.7.10, `lib/ProjectStick/FrameSlots`,
+  `src/project_stick/FrameStore`): the card has two preallocated areas,
+  created once at the first idle housekeeping with no phone connected (the
+  status screen shows 「正在准备存储」; one attempt per boot) and never deleted:
+  `frames.bin`, 128 slots × 52,736 bytes (a frame rounded up to 103 sectors,
+  one contiguous cluster run, 6,750,208 bytes) with `frames.idx` (per slot:
+  SHA-256 of the frame it holds, an allocation stamp, valid flag; 5,136
+  bytes), and `firmware.area` (6,553,600 bytes, see fw4 below). A transfer
+  writes the SSP1 header to `incoming.ssp` behind a slot table and each new
+  frame to a slot: a free one, else the least recently stored one no kept
+  content references (those are pinned). A slot loses its index entry before
+  it is overwritten and gets the new digest once the frame is complete, then
+  the record names it. A frame the device holds in a slot is referenced, not
+  copied: only read to continue the transfer's SHA-256. `commit` renames the
+  record to `<hash>.ssp`; rendering, the boot check and the plan parser read
+  frames through its slot table. `<hash>.ssp`: `"SSPS"`, u16 version 1, u16
+  frames, u32 header bytes, u32 frames done, u16 slot per frame, the SSP1
+  header. Content of 2.7.9 and earlier (`<hash>.bin`, the whole SSP1 file)
+  stays readable; a frame held only there is copied into a slot once.
+  Garbage collection removes records and files nothing keeps; their slots
+  stay valid as a cache until evicted. Without the areas, without enough
+  unpinned slots for the transfer's frames, or without heap for the 5.5 KB
+  index, a transfer is one whole file (`incoming.bin` → `<hash>.bin`) as
+  before. No raw sector writes: the frame writes are 512-byte, sector-aligned
+  writes into the preallocated file, which SdFat sends straight to the card
+  (no cache, no FAT lookups or allocation, no directory updates).
 - **Flow control:** the host callback never blocks. In-order writes are
   decrypted into up to 16 510-byte slots (heap, allocated at `begin4`, at least 4 or `insufficient_memory`, freed when the transfer ends; static until 2.7.1); a duplicate or out-of-order write
   is dropped (a gap triggers an immediate notification with error 2,
@@ -250,14 +275,50 @@ is `header = 0`, `size = 52272`, `hash` = its digest, and only that record.
   reception. The inflater and the frame digests live only while receiving. The UI loop's
   `tick()` only reports the outcome (`displayed`/`scheduled`) and pending
   progress.
-- **Link:** on connect and on `begin4` the device asks for 2M PHY, 251-byte
-  link-layer packets and a 7.5–15 ms interval; 30–50 ms after the transfer.
-- **Resume:** the partial (`incoming.json` + `incoming.bin`) resumes at frame
+- **Link:** since 2.7.10 the device asks for 251-byte link-layer packets (DLE)
+  once per connection and, once the first PROGRESS of a transfer is out
+  (state 1), ONE connection update: 15–30 ms, latency 0, 6 s supervision
+  timeout (`lib/ProjectStick/LinkTuning.h`). A phone whose link drops within
+  10 s of that request is not asked again until the device restarts (four
+  phones remembered). The PHY is the phone's choice. 2.7.0–2.7.9 also
+  requested a 2M-only PHY and a 7.5–15 ms interval with a 4 s supervision
+  timeout on connect and again on `begin4`; on the field X3 (Android 16,
+  WeChat) the link died about 4.2 s after every `begin4`, before the first
+  PROGRESS. The log names every GAP connection-update, PHY and data-length
+  event.
+- **Prompt answers:** `begin4` is answered with PROGRESS state 1 (and the
+  resume offset) at once for fresh, resumed and single-frame transfers;
+  `commit` with state 3 at once, while the writer drains the queue and
+  installs. Commit, install and refresh never run on the NimBLE host task or
+  under the BLE state mutex, and the BLE callbacks read StudioFrame's state
+  from copies published under a lock never held across card access (2.7.9's
+  callbacks could wait for an SD write behind StudioFrame's lock).
+- **Commit after a link loss:** a `commit` the phone sent stays valid when the
+  link drops before the writer reached it (ATT delivered every chunk before
+  it): the writer drains the queue and installs instead of aborting. The
+  phone's next `begin4` for the same task gets state 3, then 4/5 once the
+  frame is shown; a different task is `device_busy` until the install is
+  done. (A field X3 kept a complete `incoming.bin` while `state.json` stayed
+  unchanged: the disconnect's abort ran before the queued commit.)
+- **Reconnect:** a link loss mid-transfer queues an abort that keeps the
+  partial and wakes the writer at once; a `begin4` arriving while that abort
+  is still pending is accepted (the writer aborts first, then starts the
+  resume) instead of being refused as `device_busy` (2.7.9).
+- **Diagnostics:** Settings › 蓝牙 「最近传输」 shows the stage
+  (header/frames/commit/firmware), the outcome (`ok`, `ok_after_link_loss`,
+  the failure code or `link_lost`), seconds since, and how many ms the first
+  PROGRESS took after `begin4`/`fw4`; 「连接参数」 shows the result of the
+  connection update (status · interval in ms) or 「已停用（请求后断开过）」 for a
+  phone that dropped after it. The log has `begin4 … in N ms` and
+  `First PROGRESS N ms after begin`.
+- **Resume:** the partial (`incoming.json` + `incoming.ssp` with its slots,
+  or `incoming.bin`; `incoming.json` `slots` says which) resumes at frame
   boundaries: once the header is complete the phone continues at offset
-  `header` with the remaining `need` (frames already in `incoming.bin` are
-  dropped from it); a single frame either is complete (commit without data)
-  or restarts. `StudioFrame::start(..., resumeLimit)` rehashes the prefix and
-  overwrites anything past it.
+  `header` with the remaining `need` (frames already received are dropped
+  from it); a single frame either is complete (commit without data) or
+  restarts. `StudioFrame::start(..., resumeLimit)` rehashes the prefix and
+  overwrites anything past it. A whole-file partial of 2.7.9 resumes as a
+  whole file.
 - **Link reuse:** after a transfer ends and the phone has read the outcome,
   the next STATUS read at least 2 s later starts a fresh session (new N) on
   the same connection.
@@ -270,7 +331,24 @@ is `header = 0`, `size = 52272`, `hash` = its digest, and only that record.
 
 Measured with the official 17-frame plan (892,146 bytes): the full stream is
 41,919 bytes; with one changed card it is 6,054 bytes (the other 16 frames are
-copied on the device). Host tests drive the receiver with the mini program's
+held on the device; since 2.7.10 referenced in their slots, before copied).
+
+Card work per import, simulator counters (`SimIoStats`; a 17-frame,
+890,955-byte program with noisy frames, 2.7.9 path vs frame slots):
+
+| import | 2.7.9 path: writes / sectors / reads | slots: writes / sectors / reads |
+| --- | --- | --- |
+| fresh, 17 frames | 2,262 / 4,462 / 493 KB | 2,317 / 2,782 / 498 KB |
+| one changed frame | 1,797 / 3,565 / 874 KB | 188 / 220 / 880 KB |
+| resumed mid-stream | 2,279 / 4,493 / 915 KB | 2,335 / 2,814 / 926 KB |
+| single frame | 144 / 171 / 29 KB | 149 / 176 / 34 KB |
+
+The reads of a changed-card import are the held frames hashed for the
+transfer SHA-256 (they were read to be copied before). Sectors count every
+512-byte sector a write touches; the slot path writes whole aligned sectors,
+and on the card it also skips the FAT and directory updates of a growing file.
+
+Host tests drive the receiver with the mini program's
 vectors (`test/project_stick_core/BleV4Vectors.h`, from
 `gen_ble_v4_vectors.py`) and, with `STUDIO_V4_DEMO_SSP`/`STUDIO_V4_DEMO_DIR`,
 with that full-size plan.
@@ -278,7 +356,9 @@ with that full-size plan.
 The simulator has no radio; `/.crosspoint/studio/import.v4` +
 `import.v4.json` (`{task, hash, size, header[, stop_at]}`) feed a decrypted
 stream through the same StudioReceiver/StudioFrame path at boot (test hook;
-`stop_at` interrupts and resumes).
+`stop_at` interrupts and resumes). The simulator creates the transfer areas
+before the imports (`STICK_SIM_NO_AREAS=1`: the whole-file path) and logs the
+SD operations they took.
 
 ## Firmware over BLE (op `fw4`, since 2.7.4)
 
@@ -319,9 +399,19 @@ stream (CTR key mac(K,"enc|N"), counter N, seeked to the resume offset):
   and the shared SD install routine (`firmware_install::installFromSd`: trial
   guard, descriptor check, flash, trial arm) runs; `restarting` precedes the
   restart. A failure restores the radio and reports the reason.
+- **Firmware area** (2.7.10): with `firmware.area` on the card (6,553,600
+  bytes, created with the frame slots) the image is written to its first
+  `size` bytes instead of growing `firmware.tmp`; the fw4 checkpoint reads
+  `"<sha> <size> <raw done> <stream offset> area"`. Validation, flashing, the
+  descriptor check and hashing take the image length (an SD-card `.bin` is
+  still the whole file). The area is never deleted; a finished or rejected
+  image only loses `firmware.meta`. The free-space refusal then only needs
+  room for the block stage.
 - The Wi-Fi path (Settings 「检查更新」) and the SD path end in the same routine.
-  The Wi-Fi download writes `firmware.tmp` with `firmware.meta` = `"<sha> <size>"`
-  and resumes with `Range`; a partial of the other kind is restarted.
+  The Wi-Fi download writes `firmware.area` with `firmware.meta` =
+  `"<sha> <size> area <bytes stored>"` (updated after every 256 KB flush), or
+  `firmware.tmp` with `"<sha> <size>"` without the area, and resumes with
+  `Range`; a partial of the other kind or place is restarted.
 - Simulator: `/.crosspoint/studio/import.fw4` (the decrypted record stream) +
   `import.fw4.json` (`{sha256, size[, stop_at]}`) runs the receiver at boot.
 

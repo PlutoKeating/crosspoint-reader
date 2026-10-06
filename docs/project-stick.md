@@ -232,7 +232,8 @@ and `ProjectStickHost::tickBle` (applies queued work, on every page).
   within 512 bytes).
 - `fw4` (bound mode only, 2.7.4; replaces `ota`): the phone streams the
   firmware image itself over the protocol 4 session, block-compressed, straight
-  to `firmware.tmp` on the SD card with block-boundary resume; at the end the
+  to the preallocated `firmware.area` on the SD card (2.7.10; `firmware.tmp`
+  on a card without it) with block-boundary resume; at the end the
   device verifies it and runs the SD install (studio-protocol.md "Firmware
   over BLE"). STATUS `ota` reports `verifying`/`installing`/`restarting` or
   `failed`, and bound STATUS carries `fw` so the phone can confirm the new

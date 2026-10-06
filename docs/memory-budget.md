@@ -442,3 +442,28 @@ The TLS fix enables SHA-384/512 in wolfSSL, which every handshake to the API nee
 | flash used | 3,360,528 B image | 3,369,189 B |
 
 Diagnostics add about 150 B of static state. The SHA-512 context is a transient allocation during a handshake.
+
+## 2.7.10
+
+Transfer fixes and frame slots (studio-protocol.md "Frame slots"); the hard
+limits were: no larger BLE packets (payload ≤ 504), the chunk queue stays 16
+slots allocated at `begin4`, static RAM at most 1 KB above 2.7.9.
+
+| | 2.7.9 (measured) | 2.7.10 |
+|---|---|---|
+| `.iram0.text` | 86,676 | 86,678 |
+| `.dram0.data` | 17,705 | 17,809 |
+| `.dram0.bss` | 46,832 | 47,080 |
+| static RAM (data + bss) | 64,537 | 64,889 (+352) |
+| OTA image | 3,382,368 B | 3,394,656 B |
+
+- Static: link tuning (four blocked peers, the connection-update result), the
+  last-transfer record, StudioFrame's published copies (snapshot, partial,
+  offsets) and a few flags. No new static buffers: the frame-slot code hashes
+  through a 512 B heap block per call.
+- Heap, only while a transfer writes to slots: `frame_store::Incoming`
+  (~5.5 KB: the 128-entry index inline, three file handles, a SHA context),
+  allocated only when the largest free block exceeds it by 8 KB; otherwise the
+  transfer takes the whole-file path. Freed at commit or abort.
+- Stack: `frame_slots::Index` is never on a stack (an empty index is
+  serialized directly).

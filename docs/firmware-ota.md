@@ -107,14 +107,15 @@ python3 scripts/firmware_release.py --build --notes RELEASE_NOTES.md \
 fw4 操作（仅已绑定模式）
   0. 拒绝：版本不比当前新 / 大小不在 100,000~6,553,600 / sha 格式错 → invalid_target；
      正在传输 → device_busy；试运行中 → trial_active；电量 < 30% 且未充电 → low_battery；
-     SD 空间不足 → insufficient_storage
+     SD 空间不足 → insufficient_storage（有固件区时只需容纳块暂存文件）
   1. 停 Wi‑Fi（最多等 10 秒），分配接收队列（不足 → insufficient_memory）
-  2. 打开 /.crosspoint/studio/firmware.tmp：同一 sha 的半截文件按 firmware.meta
-     "<sha> <字节> <已写原始字节> <流偏移>" 从块边界续传（重算前缀哈希），否则重建
+  2. 打开 /.crosspoint/studio/firmware.area（2.7.10 起，预分配 6.25 MB 连续区，镜像占其前
+     <字节>；卡上没有时用 firmware.tmp）：同一 sha、同一位置的半截按 firmware.meta
+     "<sha> <字节> <已写原始字节> <流偏移> [area]" 从块边界续传（重算前缀哈希），否则重来
   3. 每条记录（32 KB 原始块，raw deflate）解压后立即写 SD 并更新 SHA-256 与 firmware.meta
-  4. 收齐后比对 SHA-256（不一致删除半截文件 → checksum_mismatch）
+  4. 收齐后比对 SHA-256（不一致丢弃半截：删除 firmware.meta/firmware.tmp，固件区本身保留 → checksum_mismatch）
   5. PROGRESS state 3 通知手机（此时蓝牙仍连着）→ STATUS ota=verifying → 释放蓝牙 →
-     installing → installFromSd → restarting → 重启；失败则恢复蓝牙并报原因
+     installing → installFromSd（按镜像长度）→ restarting → 重启；失败则恢复蓝牙并报原因
 ```
 
 设置里确认安装：
@@ -128,12 +129,13 @@ fw4 操作（仅已绑定模式）
          （仍未结束则 device_busy）。不需要绑定，也不需要设备令牌（2.7.1 起）
       2. 断开已连接的手机（2.7.3 起，STATUS 先给出 net_busy），释放 BLE（TLS 与刷写需要 NimBLE
          占用的内存），持有电源锁，屏幕切换为升级进度页
-      3. 下载到 /.crosspoint/studio/firmware.tmp
-         · firmware.meta 记录 "<sha> <字节>"；同一镜像的半截文件以 Range 续传（206）
-         · 每写约 256 KB 刷新一次 SD 文件，掉电后续传偏移以文件实际大小为准
+      3. 下载到 /.crosspoint/studio/firmware.area（2.7.10 起；卡上没有固件区时为 firmware.tmp）
+         · 固件区：firmware.meta 记录 "<sha> <字节> area <已存字节>"，每写约 256 KB 刷新后更新，
+           掉电后从记录的字节续传；firmware.tmp：记录 "<sha> <字节>"，续传偏移以文件实际大小为准
+         · 同一镜像的半截以 Range 续传（206）
          · 服务器忽略 Range（返回 200）时从头下载；403/404/410/416 直接失败
-      4. 大小 + SHA-256 → 描述符与安装策略
-      5. installFromSd：写入另一 OTA 槽（同一时间只允许一个安装），写完后读回整个分区计算 SHA-256 比对
+      4. 大小 + SHA-256（只算镜像长度）→ 描述符与安装策略
+      5. installFromSd（按镜像长度；SD 卡 .bin 仍为整个文件）：写入另一 OTA 槽（同一时间只允许一个安装），写完后读回整个分区计算 SHA-256 比对
       6. 切换启动槽之前写入试运行记录 → 切换 otadata → 重启（刷写失败时保留半截下载以便续传）
 ```
 
