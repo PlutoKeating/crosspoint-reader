@@ -443,7 +443,7 @@ void loop() {
   // to idle power saving (lower clock, longer delay) and the e-paper keeps the
   // card. Nothing here powers the device off: there is no inactivity sleep.
   static unsigned long lastActivityTime = millis();
-  if (gpio.wasAnyPressed() || gpio.wasAnyReleased() || gpio.wasTouchActivity() || halTiltSensor.hadActivity() ||
+  if (gpio.wasAnyPressed() || gpio.wasAnyReleased() || gpio.wasTouchActivity() ||
       activityManager.needsFullPower() ||
       PROJECT_STICK_HOST.busy()) {  // a phone link, a transfer, a cloud job or a firmware update
     lastActivityTime = millis();
