@@ -1,5 +1,6 @@
 #include "StickFirmware.h"
 
+#include <cstdio>
 #include <cstring>
 
 namespace stick_fw {
@@ -134,6 +135,26 @@ BootAction decideOnBoot(TrialRecord& record, const char* runningSlot, bool abnor
   }
   if (abnormalReset && ++record.attempts >= MAX_TRIAL_FAILURES) return BootAction::RollbackNow;
   return BootAction::Continue;
+}
+
+bool appendResetReason(char* list, size_t size, const char* name) {
+  if (!list || size == 0 || !name || !*name) return false;
+  const size_t used = strnlen(list, size);
+  if (used >= size) return false;  // not terminated: leave it alone
+  const size_t extra = (used ? 1 : 0) + strlen(name);
+  if (used + extra + 1 > size) return false;
+  if (used) list[used] = ',';
+  memcpy(list + used + (used ? 1 : 0), name, strlen(name) + 1);
+  return true;
+}
+
+void formatTrialReason(char* out, size_t size, const char* reason, const char* list) {
+  if (!out || size == 0) return;
+  if (!list || !*list) {
+    snprintf(out, size, "%s", reason ? reason : "");
+  } else {
+    snprintf(out, size, "%s:%s", reason ? reason : "", list);
+  }
 }
 
 HealthDecision evaluateHealth(const HealthInputs& inputs) {

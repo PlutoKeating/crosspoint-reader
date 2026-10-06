@@ -123,11 +123,19 @@ namespace HalSystem {
 
 void begin() {
   // This is mostly for the first boot, we need to initialize the panic info and logs to empty state
-  // If we reboot from a panic state, we want to keep the panic info until we successfully dump it to the SD card, use
-  // `clearPanic()` to clear it after dumping
-  if (!isRebootFromPanic()) {
+  // If we reboot from a panic or watchdog, we want to keep the logs until we successfully dump them to the SD
+  // card, use `clearPanic()` to clear them after dumping
+  if (!isAbnormalReboot()) {
     clearPanic();
   } else {
+    // Only a panic writes the message and the stack; after a watchdog or
+    // brownout reset they hold whatever RTC memory kept, so start them empty.
+    if (!isRebootFromPanic()) {
+      panicMessage[0] = '\0';
+      panicException.magic = 0;
+      for (size_t i = 0; i < MAX_PANIC_STACK_DEPTH; i++) panicStack[i].sp = 0;
+    }
+    panicMessage[sizeof(panicMessage) - 1] = '\0';
     // Panic reboot: preserve logs and panic info, but clamp logHead in case the
     // panic occurred before begin() ever ran (e.g. in a static constructor).
     // If logHead was out of range, logMessages is also garbage — clear it so
@@ -139,7 +147,10 @@ void begin() {
 }
 
 void checkPanic() {
-  if (isRebootFromPanic()) {
+  // Watchdog and brownout resets get a report too: they leave no panic
+  // message, but the reset reason, the last logs and the heap sample are what
+  // diagnoses a boot loop (2.7.5 rolled back without any report).
+  if (isAbnormalReboot()) {
     auto panicInfo = getPanicInfo(true);
     auto file = Storage.open("/crash_report.txt", O_WRITE | O_CREAT | O_TRUNC);
     if (file) {
@@ -190,7 +201,8 @@ std::string getPanicInfo(bool full) {
     std::string info;
 
     info += "CrossPoint version: " CROSSPOINT_VERSION;
-    info += "\n\nPanic reason: " + std::string(panicMessage);
+    info += "\nReset reason: " + std::string(resetReasonName());
+    info += "\n\nPanic reason: " + std::string(panicMessage[0] ? panicMessage : "(none: not a panic)");
     if (panicException.magic == EXCEPTION_MAGIC) {
       static const char* const CAUSES[] = {"Instruction address misaligned",
                                            "Instruction access fault",
@@ -243,6 +255,57 @@ std::string getPanicInfo(bool full) {
 bool isRebootFromPanic() {
   const auto resetReason = esp_reset_reason();
   return resetReason == ESP_RST_PANIC || resetReason == ESP_RST_CPU_LOCKUP;
+}
+
+bool isAbnormalReboot() {
+  switch (esp_reset_reason()) {
+    case ESP_RST_PANIC:
+    case ESP_RST_CPU_LOCKUP:
+    case ESP_RST_INT_WDT:
+    case ESP_RST_TASK_WDT:
+    case ESP_RST_WDT:
+    case ESP_RST_BROWNOUT:
+      return true;
+    default:
+      return false;
+  }
+}
+
+const char* resetReasonName() {
+  switch (esp_reset_reason()) {
+    case ESP_RST_POWERON:
+      return "power_on";
+    case ESP_RST_EXT:
+      return "external";
+    case ESP_RST_SW:
+      return "software";
+    case ESP_RST_PANIC:
+      return "panic";
+    case ESP_RST_INT_WDT:
+      return "int_wdt";
+    case ESP_RST_TASK_WDT:
+      return "task_wdt";
+    case ESP_RST_WDT:
+      return "wdt";
+    case ESP_RST_DEEPSLEEP:
+      return "deep_sleep";
+    case ESP_RST_BROWNOUT:
+      return "brownout";
+    case ESP_RST_SDIO:
+      return "sdio";
+    case ESP_RST_USB:
+      return "usb";
+    case ESP_RST_JTAG:
+      return "jtag";
+    case ESP_RST_EFUSE:
+      return "efuse";
+    case ESP_RST_PWR_GLITCH:
+      return "power_glitch";
+    case ESP_RST_CPU_LOCKUP:
+      return "lockup";
+    default:
+      return "unknown";
+  }
 }
 
 }  // namespace HalSystem

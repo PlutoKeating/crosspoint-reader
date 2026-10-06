@@ -137,6 +137,15 @@ struct TrialRecord {
 // `abnormalReset` whether the previous run ended in a panic or watchdog. Updates `record.attempts`.
 BootAction decideOnBoot(TrialRecord& record, const char* runningSlot, bool abnormalReset);
 
+// Reset reasons of the trial boots, kept so a rollback can say why, e.g.
+// "repeated_crash:task_wdt,task_wdt,panic". Appends `name` to the
+// comma-separated `list` (capacity `size`, NUL included) only when it fits
+// whole; returns whether it was added.
+bool appendResetReason(char* list, size_t size, const char* name);
+
+// "<reason>:<list>", or just `reason` when the list is empty, truncated to fit.
+void formatTrialReason(char* out, size_t size, const char* reason, const char* list);
+
 // Health policy for a trial boot. Any HTTP response from the StockStick API
 // proves Wi-Fi, DNS, TLS and the cloud client work, so the build is confirmed.
 // Failed API cycles while Wi-Fi stays connected count against it (at most one

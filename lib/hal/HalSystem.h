@@ -26,4 +26,8 @@ void sampleHeap();
 // heap information (2.2.2 crash: bad_alloc in the UI loop).
 void installOutOfMemoryHandler();
 bool isRebootFromPanic();
+// Panic, CPU lockup, interrupt/task/RTC watchdog or brownout: the reboots
+// that get a crash_report.txt (a crash screen only follows a panic).
+bool isAbnormalReboot();
+const char* resetReasonName();
 }  // namespace HalSystem

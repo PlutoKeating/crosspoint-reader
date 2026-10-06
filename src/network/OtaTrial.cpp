@@ -34,6 +34,37 @@ uint32_t lastFailureMs = 0;
 char trialVersion[33] = {};
 std::atomic<bool> outcomePending{false};  // read by the sync task, written by the main loop
 
+void copyString(char* dest, size_t size, const char* src);
+
+// Short names stored per trial boot and relayed in the rollback reason.
+const char* resetName(esp_reset_reason_t reason) {
+  switch (reason) {
+    case ESP_RST_PANIC:
+      return "panic";
+    case ESP_RST_INT_WDT:
+      return "int_wdt";
+    case ESP_RST_TASK_WDT:
+      return "task_wdt";
+    case ESP_RST_WDT:
+      return "wdt";
+    case ESP_RST_BROWNOUT:
+      return "brownout";
+    case ESP_RST_CPU_LOCKUP:
+      return "lockup";
+    default:
+      return nullptr;  // power-on, software restart, deep-sleep wake: not interesting
+  }
+}
+
+// Appends this boot's reset reason (if notable) to the trial's list in NVS.
+void recordResetReason(Preferences& prefs, esp_reset_reason_t reason) {
+  const char* name = resetName(reason);
+  if (!name) return;
+  char list[48] = {};
+  copyString(list, sizeof(list), prefs.getString("rsn", "").c_str());
+  if (stick_fw::appendResetReason(list, sizeof(list), name)) prefs.putString("rsn", list);
+}
+
 bool abnormalReset(esp_reset_reason_t reason) {
   switch (reason) {
     case ESP_RST_PANIC:
@@ -70,6 +101,16 @@ void saveOutcome(Preferences& prefs, bool rolledBack, const char* reason) {
 void finishTrial(Preferences& prefs) {
   prefs.putBool("armed", false);
   prefs.putUChar("tries", 0);
+  if (prefs.isKey("rsn")) prefs.remove("rsn");
+}
+
+// The outcome reason with the trial boots' reset reasons appended.
+void saveOutcomeWithResets(Preferences& prefs, bool rolledBack, const char* reason) {
+  char list[48] = {};
+  copyString(list, sizeof(list), prefs.getString("rsn", "").c_str());
+  char why[64];
+  stick_fw::formatTrialReason(why, sizeof(why), reason, list);
+  saveOutcome(prefs, rolledBack, why);
 }
 
 void rollBackNow(const char* reason) {
@@ -87,7 +128,7 @@ void rollBackNow(const char* reason) {
     markRunningValid();
     return;
   }
-  saveOutcome(prefs, true, reason);
+  saveOutcomeWithResets(prefs, true, reason);
   finishTrial(prefs);
   prefs.end();
   LOG_ERR("OTA", "Rolling back to %s: %s", target->label, reason);
@@ -128,18 +169,21 @@ void onBoot() {
       return;
     case stick_fw::BootAction::RolledBack:
       LOG_ERR("OTA", "Trial image did not stay booted; running previous slot %s", record.previousSlot);
-      saveOutcome(prefs, true, "bootloader_rollback");
+      recordResetReason(prefs, reason);
+      saveOutcomeWithResets(prefs, true, "bootloader_rollback");
       finishTrial(prefs);
       prefs.end();
       markRunningValid();
       return;
     case stick_fw::BootAction::RollbackNow:
       prefs.putUChar("tries", record.attempts);
+      recordResetReason(prefs, reason);
       prefs.end();
       rollBackNow("repeated_crash");
       return;
     case stick_fw::BootAction::Continue:
       prefs.putUChar("tries", record.attempts);
+      recordResetReason(prefs, reason);
       // The app-level counter now owns the trial. A bootloader with rollback
       // enabled would otherwise abort a PENDING_VERIFY image on *any* reset
       // (power loss, brownout, one panic), overriding the 3-failure rule; it
@@ -168,6 +212,7 @@ bool arm(const esp_partition_t* target, const char* targetVersion) {
   prefs.putString("target", target->label);
   prefs.putString("ver", version);
   prefs.putUChar("tries", 0);
+  if (prefs.isKey("rsn")) prefs.remove("rsn");
   prefs.putBool("armed", true);
   // Read back: put*() cannot distinguish an empty value from a failed write.
   const bool ok = prefs.getString("prev", "") == running->label && prefs.getString("target", "") == target->label &&

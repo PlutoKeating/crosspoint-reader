@@ -48,7 +48,7 @@ struct Outcome {
   bool pending = false;
   bool rolledBack = false;
   char version[33] = {};
-  char reason[48] = {};
+  char reason[64] = {};  // e.g. "repeated_crash:task_wdt,task_wdt,panic"
 };
 Outcome pendingOutcome();
 // Cheap check (no NVS access) used by frequent polls.

@@ -167,3 +167,22 @@ TEST(StickFirmware, VersionOrder) {
   EXPECT_FALSE(isNewerVersion("2.6.5", "2.7.1"));  // never offers a downgrade
   EXPECT_TRUE(isNewerVersion("2.7.1", "2.7.1-main-deadbee"));  // dev build of the same numbers
 }
+
+TEST(StickFirmware, TrialResetReasons) {
+  char list[24] = {};
+  EXPECT_TRUE(appendResetReason(list, sizeof(list), "task_wdt"));
+  EXPECT_TRUE(appendResetReason(list, sizeof(list), "panic"));
+  EXPECT_STREQ(list, "task_wdt,panic");
+  EXPECT_FALSE(appendResetReason(list, sizeof(list), "brownout_long"));  // would not fit whole
+  EXPECT_STREQ(list, "task_wdt,panic");
+  EXPECT_FALSE(appendResetReason(list, sizeof(list), ""));
+
+  char out[48];
+  formatTrialReason(out, sizeof(out), "repeated_crash", list);
+  EXPECT_STREQ(out, "repeated_crash:task_wdt,panic");
+  formatTrialReason(out, sizeof(out), "bootloader_rollback", "");
+  EXPECT_STREQ(out, "bootloader_rollback");
+  char tiny[8];
+  formatTrialReason(tiny, sizeof(tiny), "repeated_crash", list);
+  EXPECT_EQ(strlen(tiny), 7u);  // truncated, still terminated
+}
