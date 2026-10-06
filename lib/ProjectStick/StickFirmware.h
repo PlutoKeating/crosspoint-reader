@@ -89,6 +89,23 @@ InstallVerdict checkInstall(IdentifyResult identity, const ImageInfo& image, con
 const char* installVerdictName(InstallVerdict verdict);
 
 // ---------------------------------------------------------------------------
+// Version order
+//
+// The device decides by itself whether a published firmware is newer than the
+// one it runs (Settings > Firmware update needs only Wi-Fi: no binding, no
+// device record on the server). Versions are `major.minor.patch` with an
+// optional `-suffix` (rc, branch or variant builds). Numeric fields compare as
+// numbers; with equal numbers a version without a suffix is newer than one
+// with a suffix, and two suffixed versions are considered equal.
+// ---------------------------------------------------------------------------
+
+// Returns <0, 0 or >0 like strcmp. Missing fields count as 0; anything that
+// is not a digit or '.' ends the numeric part.
+int compareVersions(const char* a, const char* b);
+// True only when `offered` is strictly newer than `running`.
+inline bool isNewerVersion(const char* offered, const char* running) { return compareVersions(offered, running) > 0; }
+
+// ---------------------------------------------------------------------------
 // Trial boot
 //
 // Before rebooting into a new image the installer arms a trial record in NVS.

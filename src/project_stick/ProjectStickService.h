@@ -14,9 +14,10 @@
 
 // The device's remaining cloud link (docs/studio-protocol.md "Cloud
 // requests"). Content arrives over BLE only; the cloud is used by bound
-// devices for the register heartbeat, trading-hours alerts, events and
-// firmware downloads. A device without a device token (unbound, or the
-// website simulator) makes no requests at all.
+// devices for the register heartbeat, trading-hours alerts and events. A
+// device without a device token (unbound, or the website simulator) makes no
+// device API requests. The firmware catalogue and image downloads are public
+// and need only Wi-Fi (Settings > Firmware update works unbound).
 class ProjectStickService {
  public:
   using SyncResult = project_stick::SyncResult;
@@ -40,7 +41,7 @@ class ProjectStickService {
     size_t bytes = 0;
   };
   struct FirmwareOffer {
-    enum class Status : uint8_t { UpdateAvailable, UpToDate, Unbound, Failed, InstallFailed };
+    enum class Status : uint8_t { UpdateAvailable, UpToDate, Failed, InstallFailed };
     Status status = Status::Failed;
     // Why a check failed (shown on the firmware screen); httpStatus for Server.
     project_stick::NetFailure failure = project_stick::NetFailure::None;
@@ -48,6 +49,8 @@ class ProjectStickService {
     FirmwareTarget target;
     std::string notes;
   };
+  // Asks the public catalogue (no binding, no credential: Wi-Fi is enough)
+  // and compares the published version with the running one.
   FirmwareOffer checkFirmware();
   // Downloads (resumable), verifies and flashes `target`, then restarts. Only
   // returns on failure; progress and errors go to firmware_update.
@@ -114,9 +117,9 @@ class ProjectStickService {
   bool validFirmwareTarget(const FirmwareTarget& target) const;
   DownloadResult downloadFirmware(const FirmwareTarget& target);
   bool requestPost(const std::string& path, const std::string& body, std::string& response, int& status);
-  bool fetchJson(const std::string& url, std::string& response, size_t maxBytes);
-  bool fetchAuthenticated(const std::string& url, const std::function<bool(const uint8_t*, size_t)>& onData);
-  // HTTP status of the last fetchAuthenticated (-1 transport failure, 429 while backing off).
+  bool fetchJson(const std::string& url, std::string& response, size_t maxBytes, bool withCredential = true);
+  bool fetch(const std::string& url, const std::function<bool(const uint8_t*, size_t)>& onData, bool withCredential);
+  // HTTP status of the last fetch (-1 transport failure, 429 while backing off).
   int lastFetchStatus = 0;
   // Outcome of the last request, for user-facing errors.
   project_stick::NetFailure lastFailure = project_stick::NetFailure::None;

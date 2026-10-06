@@ -27,4 +27,9 @@ void fail(const char* error);
 void reset();
 Snapshot snapshot();
 
+// Whether external power is charging the battery, published by the main loop
+// (which owns the fuel gauge's I2C bus) for the install guard on the worker.
+void setExternalPower(bool charging);
+bool externalPower();
+
 }  // namespace firmware_update

@@ -44,6 +44,23 @@ const char* checkFailureText(const ProjectStickService::FirmwareOffer& offer, ch
       return tr(STR_OTA_CHECK_FAILED);
   }
 }
+
+// Why an install stopped (firmware_update error codes from installFirmware).
+const char* installFailureText(const char* error) {
+  if (strcmp(error, "low_battery") == 0) return tr(STR_OTA_LOW_BATTERY);
+  if (strcmp(error, "trial_active") == 0) return tr(STR_OTA_TRIAL_BUSY);
+  if (strcmp(error, "device_busy") == 0) return tr(STR_OTA_FAIL_DEVICE_BUSY);
+  if (strcmp(error, "download_failed") == 0) return tr(STR_OTA_FAIL_DOWNLOAD);
+  if (strcmp(error, "checksum_mismatch") == 0) return tr(STR_OTA_FAIL_CHECKSUM);
+  // A file that passed the hash but is not a valid image for the flasher.
+  if (strncmp(error, "BAD_", 4) == 0) return tr(STR_OTA_FAIL_CHECKSUM);
+  // Image identity verdicts (stick_fw::installVerdictName).
+  for (const char* verdict :
+       {"NOT_STOCKSTICK_IMAGE", "WRONG_CHIP", "UNSUPPORTED_BOARD", "BELOW_MINIMUM_BUILD", "VERSION_MISMATCH"}) {
+    if (strcmp(error, verdict) == 0) return tr(STR_OTA_FAIL_IMAGE);
+  }
+  return tr(STR_OTA_FAILED);
+}
 }  // namespace
 
 void FirmwareUpdateActivity::onEnter() {
@@ -146,8 +163,10 @@ void FirmwareUpdateActivity::loop() {
   }
   if (!confirmPressSeen || !mappedInput.wasReleased(MappedInputManager::Button::Confirm)) return;
   confirmPressSeen = false;
-  if (state == State::Idle ||
-      (state == State::Result && offer.status != ProjectStickService::FirmwareOffer::Status::UpdateAvailable)) {
+  using Status = ProjectStickService::FirmwareOffer::Status;
+  if (state == State::Result && offer.status == Status::InstallFailed && !offer.target.url.empty()) {
+    startInstall();  // retry the same image; a partial download resumes
+  } else if (state == State::Idle || (state == State::Result && offer.status != Status::UpdateAvailable)) {
     startCheck();
   } else if (state == State::Result) {
     state = State::Confirming;
@@ -214,10 +233,10 @@ void FirmwareUpdateActivity::render(RenderLock&&) {
         confirmLabel = tr(STR_OTA_INSTALL);
       } else if (offer.status == Status::UpToDate) {
         message = tr(STR_OTA_UP_TO_DATE);
-      } else if (offer.status == Status::Unbound) {
-        message = tr(STR_OTA_NEED_BINDING);
       } else if (offer.status == Status::InstallFailed) {
-        message = strcmp(progress.error, "low_battery") == 0 ? tr(STR_OTA_LOW_BATTERY) : tr(STR_OTA_FAILED);
+        message = installFailureText(progress.error);
+        // The offer is still valid: the same key retries (a download resumes).
+        if (!offer.target.url.empty()) confirmLabel = tr(STR_OTA_INSTALL);
       } else {
         message = checkFailureText(offer, line, sizeof(line));
       }
@@ -235,7 +254,7 @@ void FirmwareUpdateActivity::render(RenderLock&&) {
           message = tr(STR_OTA_RESTARTING);
           break;
         case firmware_update::Phase::Failed:
-          message = strcmp(progress.error, "low_battery") == 0 ? tr(STR_OTA_LOW_BATTERY) : tr(STR_OTA_FAILED);
+          message = installFailureText(progress.error);
           confirmLabel = tr(STR_OTA_CHECK);
           break;
         default:

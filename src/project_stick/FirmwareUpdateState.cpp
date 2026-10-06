@@ -2,6 +2,7 @@
 
 #include <freertos/FreeRTOS.h>
 
+#include <atomic>
 #include <cstring>
 
 namespace firmware_update {
@@ -9,6 +10,7 @@ namespace firmware_update {
 namespace {
 portMUX_TYPE stateMux = portMUX_INITIALIZER_UNLOCKED;
 Snapshot state;
+std::atomic<bool> charging{false};
 
 void copy(char* dest, size_t size, const char* src) {
   strncpy(dest, src ? src : "", size - 1);
@@ -68,5 +70,8 @@ Snapshot snapshot() {
   taskEXIT_CRITICAL(&stateMux);
   return copyOfState;
 }
+
+void setExternalPower(const bool value) { charging.store(value, std::memory_order_relaxed); }
+bool externalPower() { return charging.load(std::memory_order_relaxed); }
 
 }  // namespace firmware_update

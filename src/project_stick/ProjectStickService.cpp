@@ -26,6 +26,7 @@
 #include <Memory.h>
 #include <ProjectStickApiBackoff.h>
 #include <SecureHttpClient.h>
+#include <StickFirmware.h>
 #include <esp_system.h>
 #include <mbedtls/sha256.h>
 
@@ -548,7 +549,8 @@ bool ProjectStickService::requestPost(const std::string& path, const std::string
   return false;
 }
 
-bool ProjectStickService::fetchJson(const std::string& url, std::string& response, size_t maxBytes) {
+bool ProjectStickService::fetchJson(const std::string& url, std::string& response, size_t maxBytes,
+                                    const bool withCredential) {
   // Same policy as requestPost: one retry, for transport failures only.
   for (uint8_t attempt = 0; attempt < 2; ++attempt) {
     response.clear();
@@ -558,7 +560,7 @@ bool ProjectStickService::fetchJson(const std::string& url, std::string& respons
       break;
     }
     response.reserve(std::min<size_t>(maxBytes, 4096));
-    const bool ok = fetchAuthenticated(url, [&response, maxBytes](const uint8_t* data, size_t length) {
+    const auto collect = [&response, maxBytes](const uint8_t* data, size_t length) {
       if (length > maxBytes - response.size()) return false;
       // std::string growth throws (abort under -fno-exceptions): stop the
       // transfer instead when the doubled buffer would not fit.
@@ -566,8 +568,8 @@ bool ProjectStickService::fetchJson(const std::string& url, std::string& respons
       if (needed > response.capacity() && !heapFits(std::max(needed, response.capacity() * 2))) return false;
       response.append(reinterpret_cast<const char*>(data), length);
       return true;
-    });
-    if (ok) return true;
+    };
+    if (fetch(url, collect, withCredential)) return true;
     if (lastFetchStatus > 0 || lastFailure == project_stick::NetFailure::Clock || memorySkipped) break;
     if (attempt == 0 && !lendRadioAfterFailure("GET")) delay(500);
   }
@@ -576,15 +578,18 @@ bool ProjectStickService::fetchJson(const std::string& url, std::string& respons
 }
 
 
-bool ProjectStickService::fetchAuthenticated(const std::string& url,
-                                             const std::function<bool(const uint8_t*, size_t)>& onData) {
+// One GET. With `withCredential` it carries the device bearer and is refused
+// without one (device API); without, it is an anonymous request to a public
+// endpoint that any device may make (the firmware catalogue).
+bool ProjectStickService::fetch(const std::string& url, const std::function<bool(const uint8_t*, size_t)>& onData,
+                                const bool withCredential) {
   std::string deviceToken;
-  {
+  if (withCredential) {
     ProjectStickStateLock lock(projectStickStateMutex);
     deviceToken = PROJECT_STICK_STORE.deviceToken;
   }
   lastFetchStatus = 0;
-  if (deviceToken.empty()) return false;  // no credential, no cloud requests
+  if (withCredential && deviceToken.empty()) return false;  // no credential, no device API requests
   if (!trustedClockReady()) {
     LOG_ERR("STICK", "GET skipped: no trusted time (NTP unreachable)");
     recordOutcome(false, 0);
@@ -603,7 +608,7 @@ bool ProjectStickService::fetchAuthenticated(const std::string& url,
   if (!http.begin(url)) return false;
   // Pinned-root client; the ESP-IDF HTTP client (and the mbedTLS TLS stack it
   // pulls in) is not linked.
-  http.addHeader("Authorization", "Bearer " + deviceToken);
+  if (withCredential) http.addHeader("Authorization", "Bearer " + deviceToken);
   const int status = http.GET([this, &onData](const uint8_t* data, size_t length) {
     if (http.getStatus() != 200) return true;
     return onData(data, length);
@@ -839,6 +844,8 @@ constexpr char FIRMWARE_META[] = "/.crosspoint/studio/firmware.meta";
 constexpr size_t MAX_FIRMWARE_BYTES = 0x640000;
 constexpr size_t MIN_FIRMWARE_BYTES = 100000;
 constexpr uint8_t MIN_OTA_BATTERY_PERCENT = 30;
+// How long an install waits for a running content transfer to finish.
+constexpr uint32_t TRANSFER_WAIT_MS = 30000;
 
 size_t fileSize(const char* path) {
   HalFile file;
@@ -866,17 +873,26 @@ void ProjectStickService::installFirmware(const FirmwareTarget& target) {
     firmware_update::fail("trial_active");
     return;
   }
-  if (!hasCredential() || !validFirmwareTarget(target)) {
+  // No binding or device token is needed: the image comes from the public
+  // catalogue and is identified by its hash and its embedded descriptor.
+  if (!validFirmwareTarget(target)) {
     firmware_update::fail("invalid_target");
     return;
   }
-  if (powerManager.getBatteryPercentage() < MIN_OTA_BATTERY_PERCENT) {
+  // A flash must not die half way: below 30 % only while external power is
+  // charging the battery (published by the main loop, which owns the gauge).
+  if (powerManager.getBatteryPercentage() < MIN_OTA_BATTERY_PERCENT && !firmware_update::externalPower()) {
     firmware_update::fail("low_battery");
     return;
   }
-  if (StudioFrame::instance().busy()) {
-    firmware_update::fail("device_busy");
-    return;
+  // A content transfer owns the SD card and the radio; give it time to finish
+  // instead of refusing right away.
+  for (uint32_t waited = 0; StudioFrame::instance().busy(); waited += 250) {
+    if (waited >= TRANSFER_WAIT_MS) {
+      firmware_update::fail("device_busy");
+      return;
+    }
+    delay(250);
   }
   // TLS and the flash writer need the heap NimBLE holds: release it for the
   // whole install (a success restarts; a failure restores it with the lease).
@@ -999,17 +1015,24 @@ ProjectStickService::DownloadResult ProjectStickService::downloadFirmware(const 
   return fileSize(FIRMWARE_TEMP) == size ? DownloadResult::Complete : DownloadResult::Retry;
 }
 
+// Settings > Firmware update. Needs Wi-Fi only: the public catalogue endpoint
+// takes no credential, and the device itself decides whether the published
+// version is newer than the one it runs. Nothing here reads or changes the
+// binding, whatever the server answers.
 ProjectStickService::FirmwareOffer ProjectStickService::checkFirmware() {
   FirmwareOffer offer;
-  if (!hasCredential()) {
-    offer.status = FirmwareOffer::Status::Unbound;
+  if (baseUrl.empty()) {  // builds without a cloud (the website simulator) never ask
+    offer.failure = project_stick::NetFailure::Network;
     return offer;
   }
   RadioLease lease(*this);
   HttpBurst burst(http);
   std::string response;
-  if (!fetchJson(baseUrl + "/api/v2/device/firmware/latest?device_id=" + deviceId() + "&channel=stable", response,
-                 4096)) {
+  if (!fetchJson(baseUrl + "/api/v1/public/firmware/latest?channel=stable", response, 6144, false)) {
+    if (lastFetchStatus == 404) {  // nothing published on this channel
+      offer.status = FirmwareOffer::Status::UpToDate;
+      return offer;
+    }
     offer.failure = lastFailure == project_stick::NetFailure::None ? project_stick::NetFailure::Network : lastFailure;
     offer.httpStatus = lastFailureStatus;
     return offer;
@@ -1019,17 +1042,22 @@ ProjectStickService::FirmwareOffer ProjectStickService::checkFirmware() {
     offer.failure = project_stick::NetFailure::Server;
     return offer;
   }
-  if (doc["latest"].isNull()) {
-    offer.status = FirmwareOffer::Status::UpToDate;
+  offer.target.version = doc["version"] | "";
+  offer.target.url = doc["url"] | "";
+  if (offer.target.url.empty()) offer.target.url = doc["bin_url"] | "";
+  offer.target.sha256 = doc["sha256"] | "";
+  offer.target.bytes = doc["bytes"] | size_t(0);
+  offer.notes = (doc["notes"] | "");
+  if (offer.notes.size() > 600) offer.notes.resize(600);
+  if (!validFirmwareTarget(offer.target)) {
+    LOG_ERR("OTA", "Catalogue answer is not installable (version=%s)", offer.target.version.c_str());
+    offer.failure = project_stick::NetFailure::Server;
     return offer;
   }
-  offer.target.version = doc["latest"]["version"] | "";
-  offer.target.url = doc["latest"]["url"] | "";
-  offer.target.sha256 = doc["latest"]["sha256"] | "";
-  offer.target.bytes = doc["latest"]["bytes"] | size_t(0);
-  offer.notes = doc["latest"]["notes"] | "";
-  offer.status = validFirmwareTarget(offer.target) ? FirmwareOffer::Status::UpdateAvailable
-                                                   : FirmwareOffer::Status::Failed;
+  const bool newer = stick_fw::isNewerVersion(offer.target.version.c_str(), CROSSPOINT_VERSION);
+  LOG_INF("OTA", "Catalogue offers %s, running %s: %s", offer.target.version.c_str(), CROSSPOINT_VERSION,
+          newer ? "update available" : "up to date");
+  offer.status = newer ? FirmwareOffer::Status::UpdateAvailable : FirmwareOffer::Status::UpToDate;
   return offer;
 }
 

@@ -105,6 +105,26 @@ const char* installVerdictName(InstallVerdict verdict) {
   return "?";
 }
 
+int compareVersions(const char* a, const char* b) {
+  if (!a) a = "";
+  if (!b) b = "";
+  // Up to four numeric fields; a field stops at '.', the suffix or the end.
+  for (uint8_t field = 0; field < 4; ++field) {
+    uint32_t left = 0, right = 0;
+    while (*a >= '0' && *a <= '9') left = left * 10 + static_cast<uint32_t>(*a++ - '0');
+    while (*b >= '0' && *b <= '9') right = right * 10 + static_cast<uint32_t>(*b++ - '0');
+    if (left != right) return left < right ? -1 : 1;
+    const bool moreLeft = *a == '.', moreRight = *b == '.';
+    if (moreLeft) ++a;
+    if (moreRight) ++b;
+    if (!moreLeft && !moreRight) break;
+  }
+  // Equal numbers: a plain release outranks any suffixed build of it.
+  const bool suffixLeft = *a != '\0', suffixRight = *b != '\0';
+  if (suffixLeft == suffixRight) return 0;
+  return suffixLeft ? -1 : 1;
+}
+
 BootAction decideOnBoot(TrialRecord& record, const char* runningSlot, bool abnormalReset) {
   if (!record.armed) return BootAction::None;
   if (runningSlot && strcmp(runningSlot, record.previousSlot) == 0) {

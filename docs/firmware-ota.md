@@ -85,7 +85,7 @@ python3 scripts/firmware_release.py --build --notes RELEASE_NOTES.md \
 | 入口 | 发起方 | 路径 |
 |---|---|---|
 | 小程序设备详情（手机在设备旁） | 所有者 | 蓝牙协议 3 操作 `ota`（`version`、`url`、`sha256`、`bytes`，证明 `ota3|N|version|sha256|bytes|url`，仅已绑定模式）→ 设备排队安装 |
-| 设备「设置 → 系统 → 固件更新」 | 设备（已绑定） | `GET /api/v2/device/firmware/latest` → 确认 → 直接下载目录 `url` 并安装 |
+| 设备「设置 → 系统 → 固件更新」 | 设备（无需绑定，联网即可，2.7.1 起） | `GET /api/v1/public/firmware/latest?channel=stable`（不带凭据）→ 设备本地比较版本 → 确认 → 直接下载 `url` 到 SD 卡、校验、刷写并重启 |
 | 设备「SD 卡固件更新」 | 用户 | 选择 `/` 或 `/firmware` 下的 `.bin`；只接受适用于本机的 StockStick 镜像，并启用试运行 |
 | 恢复模式（按住左侧键开机） | 用户 | 同上但不做描述符限制，用于救砖；只有 StockStick 镜像启用试运行 |
 | USB / 网页刷机 | 开发者 | 不经过试运行，视为可信镜像 |
@@ -99,7 +99,8 @@ python3 scripts/firmware_release.py --build --notes RELEASE_NOTES.md \
   └─ 后台任务 installFirmware(version, url, sha256, bytes)
       0. 新固件仍在试运行时拒绝安装（trial_active）
       1. 目标校验：URL 必须在 <API 基址>/firmware/ 下、SHA-256 格式、大小在 100 KB~分区上限；
-         电量 ≥ 30%；Studio 未在接收
+         电量 ≥ 30%，或正在外接电源充电（2.7.1 起）；Studio 正在接收内容时最多等待 30 秒
+         （仍未结束则 device_busy）。不需要绑定，也不需要设备令牌（2.7.1 起）
       2. 暂停 BLE（TLS 与刷写需要 NimBLE 占用的内存），持有电源锁，屏幕切换为升级进度页
       3. 下载到 /.crosspoint/studio/firmware.tmp
          · firmware.meta 记录 "<sha> <字节>"；同一镜像的半截文件以 Range 续传（206）
@@ -111,8 +112,16 @@ python3 scripts/firmware_release.py --build --notes RELEASE_NOTES.md \
 ```
 
 任一步失败都会记入 `firmware_update`（原因如 `download_failed`、`checksum_mismatch`、`VERSION_MISMATCH`、
-`BELOW_MINIMUM_BUILD`、`low_battery`），屏幕与蓝牙 STATUS `ota` 都能看到，BLE 恢复广播；
-半截下载保留供同一镜像再次安装时续传，校验失败的文件会被删除。
+`BELOW_MINIMUM_BUILD`、`low_battery`、`trial_active`、`device_busy`），屏幕与蓝牙 STATUS `ota` 都能看到，BLE 恢复广播；
+半截下载保留供同一镜像再次安装时续传，校验失败的文件会被删除。2.7.1 起固件更新页按原因显示
+具体文案（下载中断可续传、校验失败、电量不足、试运行中、正在接收内容、镜像不适用），
+安装失败后同一按键直接重试同一镜像。
+
+设备端检查更新（2.7.1 起）：`ProjectStickService::checkFirmware()` 不带凭据请求公开目录接口，
+用 `stick_fw::compareVersions()` 在本机比较版本（数字段按数值比较；数字相同时不带后缀的正式版
+高于带后缀的构建），只在目录版本严格更新时提示。未绑定的设备同样可用；这条路径上的任何响应
+都不会改动绑定状态。蓝牙触发的升级由 `ProjectStickHost` 在任意页面受理，升级开始后屏幕自动
+切到进度页（见 project-stick.md "Page-independent host"）。
 
 ## 6. 试运行与自动回滚
 
@@ -141,7 +150,7 @@ PENDING_VERIFY 状态下的**任何**复位都当作失败；若把确认推迟�
 
 | 接口 | 语义 |
 |---|---|
-| `GET /api/v2/device/firmware/latest?channel=stable\|beta` | 设备端检查更新；`latest` 含 `version`、`url`、`sha256`、`bytes`、`notes` |
+| `GET /api/v1/public/firmware/latest?channel=stable\|beta` | 公开的最新版本指针，设备端检查更新（2.7.1 起，不带凭据）与官网模拟器共用；含 `version`、`url`（或 `bin_url`）、`sha256`、`bytes`、`notes`，无发布时 404 |
 | `GET <API 基址>/firmware/<version>/stockstick-<version>.bin` | 网站静态托管的镜像，支持 `Range`；设备不带凭据直接下载 |
 | `POST /api/v2/device/events` | 回滚事件 `firmware_rolled_back` |
 | `POST /api/v2/device/register` | 以新 `firmware_version` 注册即表示升级完成 |

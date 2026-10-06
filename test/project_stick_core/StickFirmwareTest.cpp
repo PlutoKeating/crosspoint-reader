@@ -143,3 +143,27 @@ TEST(StickFirmware, HealthPolicy) {
   in.everOnline = true;
   EXPECT_EQ(evaluateHealth(in), HealthDecision::Wait);
 }
+
+TEST(StickFirmware, VersionOrder) {
+  EXPECT_GT(compareVersions("2.7.1", "2.7.0"), 0);
+  EXPECT_LT(compareVersions("2.7.0", "2.7.1"), 0);
+  EXPECT_EQ(compareVersions("2.7.1", "2.7.1"), 0);
+  EXPECT_GT(compareVersions("2.10.0", "2.9.9"), 0);  // numeric, not lexical
+  EXPECT_GT(compareVersions("3.0.0", "2.99.99"), 0);
+  EXPECT_EQ(compareVersions("2.7", "2.7.0"), 0);  // missing fields are 0
+  EXPECT_GT(compareVersions("2.7.0.1", "2.7.0"), 0);
+  // A release is newer than a suffixed build with the same numbers.
+  EXPECT_GT(compareVersions("2.7.1", "2.7.1-rc.abc123"), 0);
+  EXPECT_LT(compareVersions("2.7.1-main-deadbee", "2.7.1"), 0);
+  EXPECT_EQ(compareVersions("2.7.1-rc.1", "2.7.1-slim"), 0);
+  // The numbers decide before the suffix does.
+  EXPECT_GT(compareVersions("2.7.2-rc.1", "2.7.1"), 0);
+  EXPECT_LT(compareVersions("2.7.0", "2.7.1-rc.1"), 0);
+  EXPECT_EQ(compareVersions(nullptr, ""), 0);
+  EXPECT_GT(compareVersions("1.0.0", "garbage"), 0);
+
+  EXPECT_TRUE(isNewerVersion("2.7.1", "2.6.5"));
+  EXPECT_FALSE(isNewerVersion("2.7.1", "2.7.1"));
+  EXPECT_FALSE(isNewerVersion("2.6.5", "2.7.1"));  // never offers a downgrade
+  EXPECT_TRUE(isNewerVersion("2.7.1", "2.7.1-main-deadbee"));  // dev build of the same numbers
+}
