@@ -333,10 +333,25 @@ Release ELF (`riscv32-esp-elf-size -A`, both built in this tree; 2.7.4 from
 ## 2.7.6: back to hardware-validated placements (2.7.4/2.7.5 boot-looped on an X3)
 
 A real X3 flashed with 2.7.5 looped (boot screen → black → reboot) and the
-trial rolled back to 2.7.2. No crash report existed because only a panic
-wrote one; watchdog resets counted toward the rollback silently. The cause
-is not confirmed on hardware; 2.7.6 removes the two unvalidated hardware
-changes of 2.7.4 and adds the diagnostics to tell next time:
+trial rolled back to 2.7.2. **Root cause (from the user's
+`crash_report.txt`):** `assert failed: xTaskGetHandle tasks.c:2864
+(strlen( pcNameToQuery ) < 16)` on the loop task about 5.6 s after every
+boot. The 2.7.4 stack telemetry looked tasks up by name, and
+`"ProjectStickSync"` is 16 characters (configMAX_TASK_NAME_LEN is 16,
+including the terminator); the first phone-state refresh panicked. Heap was
+fine (free 145 KB, largest block 114 KB). 2.7.6 reads stack headroom from
+task handles, shortens the task names (`StickSync`, `UiRender`) and checks
+them against configMAX_TASK_NAME_LEN at compile time.
+
+The same log shows `[BLE] Start failed at init (code=0)` on every boot of
+2.7.5: NimBLE never started (code 0 was the controller status, IDLE). The
+likely cause is `CONFIG_BT_CTRL_RUN_IN_FLASH_ONLY` (2.7.4), reverted below;
+2.7.6 also records which call failed (`nvs_flash_init`,
+`controller_init`, `controller_enable` or `host_init`) with its esp_err_t,
+so a remaining failure names itself.
+
+Besides the fix, 2.7.6 removes the unvalidated hardware changes of 2.7.4 and
+adds diagnostics:
 
 - **Heap functions back in IRAM** (`CONFIG_HEAP_PLACE_FUNCTION_INTO_FLASH`
   off). With them in flash, the Wi-Fi/BLE/coex OSI allocation wrappers IDF
@@ -359,7 +374,7 @@ changes of 2.7.4 and adds the diagnostics to tell next time:
 
 | | 2.7.3 | 2.7.5 | 2.7.6 |
 |---|---|---|---|
-| `.iram0.text` | 87,264 | 70,390 | 86,968 |
+| `.iram0.text` | 87,264 | 70,390 | 86,678 |
 | `.dram0.data` | 17,649 | 17,353 | 17,697 |
 | `.dram0.bss` | 49,600 | 46,552 | 46,656 |
 | `_heap_start` | 0x3FCA5CA0 | 0x3FCA0DB0 | 0x3FCA4F70 |
