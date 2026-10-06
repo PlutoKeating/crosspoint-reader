@@ -165,6 +165,14 @@ radio stays off while a phone is linked (background jobs wait for it to
 leave); a BLE Wi-Fi join or scan and an on-device firmware job still bring it
 up (studio-protocol.md "Cloud jobs and a linked phone").
 
+Since 2.7.7 an open firmware trial and an unreported install outcome want
+the radio only when the device holds a cloud credential
+(`project_stick::trialNeedsWifi`): without one (cred 0, waiting for the
+phone's `token` heal) the cloud cannot settle either, the trial confirms
+offline after its uptime window and the outcome waits for the phone's
+`sync`. 2.7.6 kept Wi-Fi up indefinitely on such a device (field report:
+Wi-Fi 在线, heap 19/16 KB, no phone connection ever accepted).
+
 ## BLE setup (protocol 3, since 2.3.0)
 
 The wire protocol is defined in Project.StockStick
@@ -179,6 +187,17 @@ and `ProjectStickHost::tickBle` (applies queued work, on every page).
   complete name `StockStick-XXXX` (first four hex digits of the device id) is
   in the scan response, because it does not fit next to the UUID. Same in both
   modes.
+- Link diagnostics (since 2.7.7): a GAP event listener (registered on every
+  start, since `ble_gap_init` clears the list) counts every connect
+  completion the host saw, the ones that failed at link level with the HCI
+  status of the last one and the free heap at that moment, the ones refused
+  because a phone was already linked, and the last disconnect reason
+  (NimBLE code, 0x200 + HCI reason). Settings › 蓝牙 shows them as
+  「连接尝试」 and 「最近断开原因」; 「连接次数」 still counts accepted links
+  only. The advertising watchdog adopts a link the stack holds but
+  `onConnect` never recorded instead of restarting the stack under it. The
+  default PHY preference is 1M|2M (2.7.x asked for 2M only); each link
+  still requests 2M.
 - Radio lifecycle (`studio_ble::tick`, UI loop): a failed start (low heap,
   controller or host init, advertising) is recorded and retried with backoff
   (5 s … 60 s); an advertising watchdog restarts advertising, then the stack,
