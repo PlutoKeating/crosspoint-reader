@@ -72,7 +72,7 @@ A single `ActivityManager` owns the render task and manages an activity stack:
 │                                                          │
 │  Activity Stack:                                         │
 │  ┌──────────┬──────────┬──────────┐    ┌──────────┐     │
-│  │ Home     │ Settings │ Wifi     │    │ Keyboard │     │
+│  │ Stick    │ Settings │ Wifi     │    │ Keyboard │     │
 │  │ (stack)  │ (stack)  │ (stack)  │    │ (current)│     │
 │  └──────────┴──────────┴──────────┘    └──────────┘     │
 │   stackActivities[]                    currentActivity   │
@@ -116,7 +116,7 @@ activityManager.goToSettings();
 activityManager.replaceActivity(std::make_unique<MyActivity>(renderer, mappedInput));
 ```
 
-`replaceActivity()` destroys the current activity and clears the stack. Use it for top-level navigation (home, reader, settings, etc.).
+`replaceActivity()` destroys the current activity and clears the stack. Use it for top-level navigation (the StockStick page, which is home, and Settings).
 
 ### 3. Replace Subactivity Pattern
 
@@ -234,7 +234,7 @@ class SettingsActivity : public Activity {
 public:
   SettingsActivity(GfxRenderer& r, MappedInputManager& m)
       : Activity("Settings", r, m) {}
-  // Use finish() to go back, activityManager.goHome() to go home
+  // Use finish() to go back, activityManager.goHome() for the StockStick page (home)
 };
 ```
 
@@ -447,7 +447,7 @@ that does not override `ownsFrameBuffer()` (`ActivityManager::acquireFrameBuffer
 - It comes back white; a page always draws its whole screen anyway.
 - If the heap has no 52 KB block, the render is skipped and retried on the
   next loop; after `FRAMEBUFFER_WAIT_MS` (5 s) with no live work
-  (`PROJECT_STICK_HOST.busy()`), the device reboots to Home.
+  (`PROJECT_STICK_HOST.busy()`), the device reboots to the StockStick page.
 - A page that overrides `ownsFrameBuffer()` (ProjectStick, Sleep) calls
   `activityManager.acquireFrameBuffer()` or `renderer.ensureFrameBuffer()`
   itself before it draws into the framebuffer.

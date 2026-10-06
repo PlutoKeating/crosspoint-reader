@@ -17,14 +17,14 @@ detection is kept so other panels can be added later.
 
 The firmware identity lives in `platformio.ini` (`version`, `build`) and is embedded in every image; see
 [firmware-ota.md](firmware-ota.md) for release and upgrade rules. The UI is
-built in Simplified Chinese; other languages load from SD-card packs.
+built in Simplified Chinese (the only UI language since 2.7.5).
 
 ## Runtime flow
 
-1. Cold boots, ordinary restarts, and quick-resume wakeups open
-   `ProjectStickActivity` by default. Recovery firmware mode, crash reporting,
-   and explicit silent-restart targets retain their dedicated routes; holding
-   Back during boot opens the system menu (StockStick / Settings) instead.
+1. Cold boots, ordinary and silent restarts, and quick-resume wakeups open
+   `ProjectStickActivity`, the device's home (there is no launcher since
+   2.7.5). Recovery firmware mode and crash reporting keep their dedicated
+   routes; holding Back during boot opens Settings instead.
 2. The activity opens immediately. `ProjectStickHost` (ticked from the main
    loop, see "Page-independent host" below) reconnects to saved Wi-Fi networks
    in the background (last network first, 15 s per attempt, exponential backoff
@@ -286,8 +286,8 @@ only Wi-Fi.
 ## X3 controls
 
 All StockStick strings come from the built-in Simplified Chinese catalogue
-(`lib/I18n/translations/chinese.yaml`); an SD-card language pack can override
-them (see [i18n.md](i18n.md)).
+(`lib/I18n/translations/chinese.yaml`); the firmware is Chinese-only since
+2.7.5 (see [i18n.md](i18n.md)).
 
 - Every key hint on the device, on every screen, comes from one
   implementation (`src/components/StickOverlays.cpp`, since 2.2.2); the
@@ -302,7 +302,7 @@ them (see [i18n.md](i18n.md)).
     edge, centred on the key, with a small solid triangle pointing at it.
     Themes reserve 56 px per side as `sideButtonHintsWidth`.
 - On the StockStick page any key action pops up the hints and they hide after
-  5 seconds without one. Front labels: 返回 / Wi-Fi / – / 换一张 (the last one
+  5 seconds without one. Front labels (2.7.5): 设置 / – / – / 换一张 (the last one
   only while a Studio card is shown). On a Studio card the side pills are thumb-down 没啥用
   (left) and 有用 thumb-up (right). Hints never show while locked; since
   2.6.1 they show right after an unlock and then run the same 5 s countdown.
@@ -335,8 +335,12 @@ them (see [i18n.md](i18n.md)).
   (`没啥用！那试试下一条` / `有用！那就去执行`) and clears after 2.2 s. The
   front-right key selects the next card without feedback (local only, no
   cloud request).
-- Without a Studio frame, Back opens the system menu (StockStick / Settings)
-  and Confirm opens Wi-Fi selection; the front-right key is unassigned.
+- The StockStick page is the device's home (2.7.5: no Home launcher). Its
+  front-left key (Back) opens Settings, and Settings' Back returns here;
+  holding Back at boot opens Settings directly. Confirm is unassigned (the
+  card page's Wi-Fi key was removed in 2.7.5: Wi-Fi comes from the phone over
+  BLE, or Settings > Wi-Fi 网络). Without a Studio frame the front-right key is
+  unassigned too.
 
 ## Desktop and web simulator
 

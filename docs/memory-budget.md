@@ -260,9 +260,10 @@ and comes back, white, before any page that needs it
 `ownsFrameBuffer()`). Without it every drawing and display call is a no-op.
 If the heap cannot give 52,272 contiguous bytes back, the render is retried
 each loop; after 5 s, with no transfer, cloud job or firmware update running,
-the device reboots to Home (the framebuffer is the first allocation at boot).
+the device reboots to the StockStick page (the framebuffer is the first allocation at boot).
 Sleep rebuilds the card into the framebuffer (the moon and the quick-resume
-frame need it); the screenshot combo cannot capture a streamed card.
+frame need it). The serial `CMD:SCREENSHOT` answers `SCREENSHOT_UNAVAILABLE`
+while a streamed card is shown (the POWER+DOWN combo was removed in 2.7.5).
 
 Verify on the device: STATE `metrics.heap_free` / `heap_max_alloc` on the card
 page should be ≈ 50 KB higher than on a UI page; `heap_largest_min` shows
@@ -306,6 +307,28 @@ reports the least headroom of `loopTask` (8 KB), `ProjectStickSync` (8 KB,
 static) and `nimble_host` (8 KB). Shrink a stack only after field reports show
 its headroom stays above ~2 KB across transfers, firmware installs and cloud
 jobs.
+
+## 2.7.5: removed features (flash, a little RAM)
+
+Release ELF (`riscv32-esp-elf-size -A`, both built in this tree; 2.7.4 from
+`dist/firmware/2.7.4`):
+
+| Section | 2.7.4 | 2.7.5 |
+|---|---|---|
+| `.iram0.text` | 70,390 | 70,390 |
+| `.dram0.data` | 17,361 | 17,353 |
+| `.dram0.bss` | 47,064 | 46,552 (−512) |
+| `_heap_start` | 0x3FCA0FC0 | 0x3FCA0DB0 (+528 B heap) |
+| `.flash.text` | 1,417,474 | 1,402,266 (−15,208) |
+| `.flash.rodata` | 1,916,376 | 1,825,816 (−90,560) |
+| `firmware.bin` | 3,434,560 | 3,328,784 (−105,776) |
+
+| Removed | Where the saving shows |
+|---|---|
+| SD language packs, pack loader, language picker | `.bss`: the 182-entry override table and pack identity in `I18n`; a loaded pack (up to 32 KB of heap) can no longer exist |
+| MiniBidi / BiDi in the renderer | flash; the call-time shaping allocations (2.7.4) are gone |
+| Hebrew and Arabic glyphs in the Ubuntu 10/12 and Noto Sans 8 faces | `.flash.rodata` ≈ −87 KB |
+| SD-card fonts, screenshot combo, tilt events, Home launcher, dead utilities | flash; one map lookup per measured string; no Home page render on the way to Settings |
 
 ## Where the RAM goes
 

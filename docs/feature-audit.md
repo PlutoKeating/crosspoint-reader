@@ -1,6 +1,9 @@
-# Feature audit (firmware 2.7.4)
+# Feature audit (firmware 2.7.4, decisions applied in 2.7.5)
 
-Report only: nothing below has been removed unless it says so. Each row says
+Written for 2.7.4 as a report. The user's decision (2026-10-07): remove
+everything marked Remove, remove the language packs, remove the Home
+launcher, keep X4 support. Those removals shipped in 2.7.5 and are marked
+**Done in 2.7.5** below; everything else is unchanged. Each row says
 what the feature is for in StockStick (a Xteink X3 that shows Studio cards
 delivered by the mini program over BLE), what it costs, and a recommendation.
 "Flash" is program size (the app slot is 6.25 MB, the 2.7.4 image is about
@@ -17,30 +20,30 @@ translations. See RELEASE_NOTES.md.
 | Page | What it does in StockStick | Cost | Recommendation |
 |---|---|---|---|
 | StockStick (`ProjectStickActivity`) | The product: the card, key hints, bubbles, notices, keyguard, setup QR, status screen | — | Keep |
-| Home (`HomeActivity`) | Launcher with two entries: StockStick and 设置 | small | Keep for now. It only exists to reach Settings; a Back on the card page could open Settings directly and the launcher could go (one less page, one less framebuffer render on the way to Settings) |
+| Home (`HomeActivity`) | Launcher with two entries: StockStick and 设置 | small | **Done in 2.7.5**: removed. The StockStick page is home; its Back key opens Settings, Settings' Back returns, holding Back at boot opens Settings |
 | Boot splash (`BootActivity`) | Logo + "正在启动" + version on a cold boot; quick resume after the power-key sleep skips it | small | Keep (first boot, SD-error and crash boots need something on screen) |
 | Sleep (`SleepActivity`) | Moon marker over the card, saves the quick-resume frame | small | Keep |
 | Crash report (`CrashActivity`) | After a panic: shows the stored panic reason once | small | Keep: the only on-device trace of a field crash (the coredump partition and `crash_report.txt` are for us, this is for the user) |
 | Full-screen message | Only "SD card error" at boot | tiny | Keep |
 | Confirmation (`ConfirmationActivity`, `OptionPopup`) | Firmware-update confirmations | small | Keep |
-| Wi-Fi selection + on-device keyboard (`WifiSelectionActivity`, `KeyboardEntryActivity`) | Scan, pick, type a password with four keys | ~1 page + keyboard layout | Keep the page (no-phone path), but it has two entry points: the card page's Confirm key ("Wi-Fi") and Settings > Wi-Fi 网络. Recommend dropping the card-page key: Wi-Fi is normally pushed by the phone over BLE, and the key invites accidental scans |
-| Settings (`SettingsActivity`) | Wi-Fi 网络, 蓝牙, 固件更新, SD 卡固件更新, 语言 | small | Keep |
+| Wi-Fi selection + on-device keyboard (`WifiSelectionActivity`, `KeyboardEntryActivity`) | Scan, pick, type a password with four keys | ~1 page + keyboard layout | Keep the page (no-phone path), but it has two entry points: the card page's Confirm key ("Wi-Fi") and Settings > Wi-Fi 网络. Recommend dropping the card-page key: Wi-Fi is normally pushed by the phone over BLE, and the key invites accidental scans. **Done in 2.7.5**: the card-page key is gone |
+| Settings (`SettingsActivity`) | Wi-Fi 网络, 蓝牙, 固件更新, SD 卡固件更新 (语言 removed in 2.7.5) | small | Keep |
 | Bluetooth (`BluetoothActivity`) | Turns the BLE radio off/on | small | Keep (privacy, airplane use) |
 | Firmware update (`FirmwareUpdateActivity`) | Online check and install (Wi-Fi only, streams to SD, then the SD install) | — | Keep: the upgrade path for devices without the mini program |
 | SD firmware update + picker (`SdFirmwareUpdateActivity`, `FirmwarePickerActivity`) | Installs a `.bin` from the SD card | small | Keep (recovery path; the BLE and Wi-Fi paths end in the same SD install) |
-| Language (`LanguageSelectActivity`) | Built-in Chinese, optional SD language packs | small | Keep |
+| Language (`LanguageSelectActivity`) | Built-in Chinese, optional SD language packs | small | **Done in 2.7.5**: removed with the packs (Chinese-only firmware) |
 
 ## Device features without a page
 
 | Feature | Where | Status | Recommendation |
 |---|---|---|---|
-| Screenshot (POWER + DOWN → BMP in `/screenshots/`) | `ScreenshotUtil`, main loop | Reader-era. Since 2.7.4 it cannot capture a card (cards are streamed, there is no framebuffer to save); it still works on UI pages | Remove (support asks users for photos; it also writes to the SD card behind the user's back), or make it re-render the card first |
+| Screenshot (POWER + DOWN → BMP in `/screenshots/`) | `ScreenshotUtil`, main loop | Reader-era. Since 2.7.4 it cannot capture a card (cards are streamed, there is no framebuffer to save); it still works on UI pages | **Done in 2.7.5**: removed (the serial command below stays) |
 | Serial `CMD:SCREENSHOT` | main loop | Same limitation; answers `SCREENSHOT_UNAVAILABLE` on a card | Keep (debug builds only would be better: `gh_release` has no serial log anyway) |
-| Tilt sensor (`HalTiltSensor`) | main loop | Reader page-turn by tilting; StockStick only uses "tilted" as an activity signal (keeps full CPU speed) and powers it down for sleep | Remove the tilt events; keep only the power-down (saves a poll per loop) |
+| Tilt sensor (`HalTiltSensor`) | main loop | Reader page-turn by tilting; StockStick only uses "tilted" as an activity signal (keeps full CPU speed) and powers it down for sleep | **Done in 2.7.5**: tilt events removed; the HAL only stands the IMU by at boot and powers it down for sleep |
 | Touch / X4 Pro home gesture | `HalGPIO`, `ActivityManager::loop` | X4 Pro only (the X3 has no touch panel) | Remove with X4 support (below) |
-| X4 board support (`FREEINK_DEVICE_X4=1`, SSD1677 driver, X4 layouts) | every build env | StockStick ships on the X3 only; cards are 528 × 792 and never render on the X4. SKILL.md currently keeps X3/X4 runtime detection on purpose | Product decision: an X3-only build drops the SSD1677 driver, the X4 LUTs and every X4 branch (flash, less code to keep correct). Keep while X4 units are used for testing |
-| SD-card fonts (`lib/EpdFont/SdCardFont*`, `GfxRenderer::sdCardFonts_`) | renderer | Nothing registers an SD font any more (reader feature); the lookup still runs per glyph draw | Remove (flash; one map lookup per text draw) |
-| Language packs + 31 translations | `/.crosspoint/lang/*.lang`, `scripts/build_lang_pack.py` | Chinese is built in; the other 31 exist only as packs a user would have to copy to the SD card. The fonts cover Latin/Cyrillic/CJK; Arabic and Hebrew packs also pull in MiniBidi | Decide product scope: if only Chinese (+ English) ship, drop the other translations and MiniBidi (flash; translator upkeep) |
+| X4 board support (`FREEINK_DEVICE_X4=1`, SSD1677 driver, X4 layouts) | every build env | StockStick ships on the X3 only; cards are 528 × 792 and never render on the X4. SKILL.md currently keeps X3/X4 runtime detection on purpose | Product decision: an X3-only build would drop the SSD1677 driver, the X4 LUTs and every X4 branch. **Decided 2026-10-07: keep X4 support** |
+| SD-card fonts (`lib/EpdFont/SdCardFont*`, `GfxRenderer::sdCardFonts_`) | renderer | Nothing registers an SD font any more (reader feature); the lookup still runs per glyph draw | **Done in 2.7.5**: removed with the .cpfont tooling |
+| Language packs + 31 translations | `/.crosspoint/lang/*.lang`, `scripts/build_lang_pack.py` | Chinese is built in; the other 31 exist only as packs a user would have to copy to the SD card. The fonts cover Latin/Cyrillic/CJK; Arabic and Hebrew packs also pull in MiniBidi | **Done in 2.7.5**: packs, the loader, the picker, MiniBidi and the 31 translations removed; english.yaml stays as a checked reference only; the built-in faces dropped their Hebrew/Arabic glyphs |
 | Built-in fonts | `lib/EpdFont/builtinFonts` | Noto Sans SC 10/12/13 (≈ 7 MB of source, the bulk of `.flash.rodata`), Ubuntu 10/12 regular+bold, Noto Sans 8 | Audit sizes actually drawn: Noto Sans SC 12 is used by fallback text only; merging 12 into 13 would save roughly a third of the CJK font flash |
 | Wolfssl trace hook (`WolfSslLog.cpp`) | network | Debug only | Keep (compiled out unless wolfSSL is the TLS backend) |
 | Coredump partition (64 KB) | `partitions.csv` | Written on a panic, read back by us | Keep |
@@ -51,8 +54,8 @@ translations. See RELEASE_NOTES.md.
 | Item | Status | Recommendation |
 |---|---|---|
 | `自带外部字体` (bundled external fonts), `自带预览书籍` (bundled preview books) | Factory reader content on the card; no firmware code reads either folder | Tell users they can delete them; the firmware should never need them |
-| `/screenshots/` | Created only by the screenshot combo | Goes away with the screenshot feature |
-| `/.crosspoint/lang/` | Optional language packs | Keep with the language feature |
+| `/screenshots/` | Created only by the screenshot combo | Nothing writes it since 2.7.5; users can delete it |
+| `/.crosspoint/lang/` | Optional language packs | Unused since 2.7.5; users can delete it |
 | `/.crosspoint/studio/`, `project_stick.json`, `ble.json`, `settings.json`, `firmware.*` | Product state | Keep |
 | `/.crosspoint/sleep_frame.bin` | Quick-resume frame, deleted on boot | Keep |
 
@@ -63,12 +66,12 @@ translations. See RELEASE_NOTES.md.
 | `lib/ProjectStick` | protocol, policies, transfer, fw4 (host-tested) | Keep |
 | `lib/GfxRenderer`, `lib/EpdFont`, `lib/Utf8`, `lib/I18n` | all drawing and text | Keep (minus SD fonts, above) |
 | `lib/InflateReader`, `lib/uzlib` | compressed built-in fonts; BLE frame and firmware streams | Keep both (two inflaters: the font path could move to uzlib, saving one) |
-| `lib/MiniBidi` | RTL language packs only | Remove with the RTL packs |
-| `lib/JsonParser` (`StreamingJsonParser`) | nothing in `src/` | Remove (dead since the reader went) |
-| `lib/Serialization` (`BufferedFile`) | nothing in `src/` | Remove (dead) |
-| `lib/FsHelpers` | language packs, firmware picker, theme, screenshots | Keep |
+| `lib/MiniBidi` | RTL language packs only | **Done in 2.7.5**: removed |
+| `lib/JsonParser` (`StreamingJsonParser`) | nothing in `src/` | **Done in 2.7.5**: removed |
+| `lib/Serialization` (`BufferedFile`) | nothing in `src/` | **Done in 2.7.5**: removed (`PersistableStore` and `ObfuscationUtils` in the same folder stay) |
+| `lib/FsHelpers` | firmware picker, UI theme | Keep |
 | `lib/Memory` | no-throw allocation, build scratch | Keep (`BuildScratch` loans are reader-era; no caller lends the framebuffer any more) |
-| `src/util/UrlUtils`, `src/util/StringUtils`, `src/util/TaskWatchdog.h` | nothing | Remove (dead) |
+| `src/util/UrlUtils`, `src/util/StringUtils`, `src/util/TaskWatchdog.h` | nothing | **Done in 2.7.5**: removed |
 
 Dead code costs no RAM (the linker drops unreferenced functions) and little
 flash, but it is code that still has to compile in both the firmware and the

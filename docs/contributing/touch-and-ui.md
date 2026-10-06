@@ -139,7 +139,7 @@ Three gestures are handled once, for every screen. Activities must not add their
 | Gesture | Trigger | Where it is handled |
 |---|---|---|
 | Back | Right-swipe starting in the left 25% of the screen | Folded into `Button::Back`, so the existing `wasPressed(Button::Back)` in your activity already fires |
-| Home | Up-swipe starting in the bottom 14% | `ActivityManager::loop()`; pops to Home (activities can override via `handleHomeGesture()`) |
+| Home | Up-swipe starting in the bottom 14% | `ActivityManager::loop()`; returns to the StockStick page, which is home (activities can override via `handleHomeGesture()`) |
 | Menu | Down-swipe starting in the top 14% | Activities that have a menu check `wasMenuGesture()` themselves (the reader does this) |
 
 Because the back gesture arrives as `Button::Back`, most button-era activities gain back-swipe support with zero changes. That is the bar to aim for: bridge helpers should make touch an additive layer over the button flow, not a second input state machine.

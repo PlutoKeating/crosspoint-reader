@@ -67,7 +67,6 @@ python3 scripts/firmware_release.py --build --notes RELEASE_NOTES.md \
 | `stockstick-<version>.bin` | OTA / SD 卡 / 恢复模式镜像 |
 | `stockstick-<version>.elf` | 崩溃栈符号，内部保留，不发布 |
 | `manifest.json` | 版本、构建号、板型、芯片、字节数、SHA-256、提交、说明 |
-| `lang/*.lang` | 与本构建匹配的 SD 卡语言包 |
 | `catalogue.json` | 管理后台固件目录的登记内容 |
 
 脚本会拒绝：版本不符合目录格式、构建号未递增、描述符与配置或 HEAD 不一致、镜像超出分区。
@@ -191,7 +190,6 @@ PENDING_VERIFY 状态下的**任何**复位都当作失败；若把确认推迟�
 - 2.0.0 移除了电子书阅读器；旧 `settings.json` 中与阅读相关的字段在加载时被忽略，
   `.crosspoint/epub_*` 等阅读缓存不再使用，可以手动删除。
 - 设备出厂 bootloader 是否启用回滚未经确认；应用层回滚在两种情况下都工作。
-- SD 语言包中的文案若改变了 `printf` 转换说明（如把 `%02u` 换成 `%s`），该条目被忽略并显示内置文案。
 - 2.7.4 起固件经蓝牙传输（每块独立压缩，约 3.4 MB 的镜像传输量明显更小；可断点续传）。旧固件（`ota` < 4）
   仍由小程序发协议 3 的 `ota`，设备自己经 Wi‑Fi 下载；设备端「检查更新」始终经 Wi‑Fi。
 

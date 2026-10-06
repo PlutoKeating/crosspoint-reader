@@ -14,7 +14,7 @@ graph TD
     D --> E[Activities layer]
     D --> F[State and settings]
     E --> G[Reader flows]
-    E --> H[Home/Library/Settings flows]
+    E --> H[StockStick page and Settings flows]
     E --> I[Network/Web server flows]
     G --> J[lib/Epub parsing + layout + hyphenation]
     J --> K[SD cache in .crosspoint]
@@ -34,8 +34,8 @@ flowchart TD
     D --> E[Init display and fonts]
     E --> F{Special boot route?}
     F -->|Recovery or panic| G[Enter recovery/crash activity]
-    F -->|Explicit silent target| H[Enter Home or Reader activity]
-    F -->|Normal boot/wake| P[Enter ProjectStick activity]
+    F -->|Back held at boot| H[Enter Settings]
+    F -->|Normal boot, wake or silent restart| P[Enter ProjectStick activity]
     G --> I[Main loop]
     H --> I
     P --> I
@@ -58,11 +58,11 @@ Some flows use `src/activities/ActivityWithSubactivity.h` to host nested activit
 
 Top-level activity groups:
 
-- `src/activities/home/`: home and library navigation
+- `src/activities/home/`: the crash report screen (there is no Home launcher since 2.7.5: the StockStick page is home)
 - `src/activities/reader/`: EPUB/XTC/TXT reading flows
 - `src/activities/settings/`: settings menus and configuration
 - `src/activities/network/`: Wi-Fi selection, AP/STA mode, file transfer server
-- `src/activities/project_stick/`: the default Project.Stick product surface
+- `src/activities/project_stick/`: the StockStick page, the device's home
 - `src/activities/boot_sleep/`: boot and sleep transitions
 
 ## Reader and content pipeline

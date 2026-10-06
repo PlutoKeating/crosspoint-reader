@@ -55,7 +55,7 @@ find src -name "*.cpp" -o -name "*.h" | xargs clang-format -i
 * Flash: 16MB (Instruction storage and static data)
 * Display: X3 792x528 E-Ink, UC8253 (cards are portrait 528x792; X4 800x480 is still detected at runtime)
   * Framebuffer: 52,272 bytes on the X3 (792 × 528 ÷ 8)
-* Storage: SD Card (StockStick content, Studio frames, OTA staging, language packs)
+* Storage: SD Card (StockStick content, Studio frames, OTA staging)
 * OTA slots: two app partitions of 6,553,600 bytes each; the partition table cannot change over OTA, so every change must check the final image size.
 
 ### The Resource Protocol
@@ -142,7 +142,7 @@ These flags in `platformio.ini` fundamentally affect firmware behavior:
   * lib/I18n/: Internationalization (translations in `translations/*.yaml`, generated string tables)
 * src/activities/: UI logic using the Activity Lifecycle (onEnter, loop, onExit)
 * freeink-sdk/: Low-level SDK (EInkDisplay, InputManager, BatteryMonitor, SDCardManager)
-* .crosspoint/: SD state (settings, project_stick.json identity/binding state, studio/ frames and OTA staging, lang/ packs)
+* .crosspoint/: SD state (settings, project_stick.json identity/binding state, studio/ frames and OTA staging)
 
 ### Hardware Abstraction Layer (HAL)
 
@@ -721,11 +721,10 @@ Tested in all 4 orientations with 5MB+ files.
 ### Modifying Generated Content Workflow
 
 **To add/modify translations (i18n)**:
-1. Add the key to `lib/I18n/translations/chinese.yaml` (the only compiled catalogue and the key reference) and
-   English text to `english.yaml` (fallback for SD packs). See `docs/i18n.md`.
+1. Add the key to `lib/I18n/translations/chinese.yaml` (the only catalogue: the firmware is Chinese-only since
+   2.7.5, no SD language packs) and English reference text to `english.yaml`. See `docs/i18n.md`.
 2. The build runs `scripts/gen_i18n.py`; it fails if source references a key missing from `chinese.yaml`.
-3. Other languages ship as SD packs: `python3 scripts/build_lang_pack.py`.
-4. **Commit** source YAML files only; `I18nKeys.h`, `I18nStrings.h`, `I18nStrings.cpp` are generated and gitignored.
+3. **Commit** source YAML files only; `I18nKeys.h`, `I18nStrings.h`, `I18nStrings.cpp` are generated and gitignored.
 
 **To use translated strings in code**:
 ```cpp

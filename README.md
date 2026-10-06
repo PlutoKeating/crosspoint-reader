@@ -14,7 +14,7 @@ StockStick 是投资者专用的墨水屏陪伴设备。本仓库是运行在 Xt
 - **同步**：Wi-Fi 自动重连与 TLS 连接复用；BLE 协议 2 离线加密传输；设备绑定、归属变更与清理。
 - **固件升级**：单一来源的版本号与构建号、镜像内置描述符、断点续传 OTA、试运行与自动回滚、
   设备端检查更新、SD 卡与恢复模式刷机。详见 [docs/firmware-ota.md](docs/firmware-ota.md)。
-- **多语言**：内置简体中文，其它语言以 SD 卡语言包加载。详见 [docs/i18n.md](docs/i18n.md)。
+- **界面语言**：只有内置简体中文（2.7.5 起移除了 SD 卡语言包）。详见 [docs/i18n.md](docs/i18n.md)。
 - **硬件**：X3 为产品目标，保留 X3/X4 运行时识别。
 
 生产 API：`https://stockstick.plutokeating.beer`（`/api/v2/device`，设备 Bearer 凭证，固定根证书）。
@@ -52,7 +52,7 @@ cmake -S test -B build/test && cmake --build build/test && ctest --test-dir buil
 ```
 
 主机单元测试覆盖 StockStick 同步与调度、Studio 播放计划、固件描述符/安装策略/试运行策略、
-语言包解析与内置文案字形覆盖。模拟器不执行真实刷写、BLE 或功耗测试。
+内置文案与字形覆盖。模拟器不执行真实刷写、BLE 或功耗测试。
 
 ## 文档
 
@@ -63,7 +63,7 @@ cmake -S test -B build/test && cmake --build build/test && ctest --test-dir buil
 | [docs/firmware-ota.md](docs/firmware-ota.md) | 版本管理、发布、OTA、试运行与回滚 |
 | [docs/project-stick.md](docs/project-stick.md) | StockStick 同步、存储与按键行为 |
 | [docs/studio-protocol.md](docs/studio-protocol.md) | Studio 画面、播放计划与 BLE 协议 |
-| [docs/i18n.md](docs/i18n.md) | 多语言与语言包 |
+| [docs/i18n.md](docs/i18n.md) | 界面文案 |
 | [docs/activity-manager.md](docs/activity-manager.md) | 页面（Activity）框架 |
 | [docs/troubleshooting.md](docs/troubleshooting.md) | 故障排查 |
 | [docs/contributing/](docs/contributing/) | 继承自上游的开发者指南（架构、调试） |
