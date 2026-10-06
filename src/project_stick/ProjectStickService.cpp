@@ -32,6 +32,15 @@
 #include <esp_system.h>
 #include <mbedtls/sha256.h>
 
+#include "ProjectStickBackgroundSync.h"
+
+#ifndef SIMULATOR
+// Arduino's loop task (cores/esp32/main.cpp) and the NimBLE host's stack
+// high-water mark (nimble_port_freertos.c; 0 when the host is not running).
+extern TaskHandle_t loopTaskHandle;
+extern "C" UBaseType_t nimble_port_freertos_get_hs_hwm(void);
+#endif
+
 #include <algorithm>
 #include <atomic>
 #include <cctype>
@@ -107,13 +116,17 @@ std::atomic<uint32_t> lowestLargestBlock{UINT32_MAX};
 // the NimBLE host (GATT callbacks). 0 when none can be read.
 uint32_t minimumStackHeadroom() {
 #ifndef SIMULATOR
+  // By handle, never by name: xTaskGetHandle() asserts when the queried name
+  // is not shorter than configMAX_TASK_NAME_LEN, and "ProjectStickSync" was
+  // exactly 16 characters, which panicked 2.7.4/2.7.5 on every boot once the
+  // phone-state refresh ran.
   uint32_t lowest = UINT32_MAX;
-  for (const char* name : {"loopTask", "ProjectStickSync", "nimble_host"}) {
-    if (TaskHandle_t task = xTaskGetHandle(name)) {
-      const uint32_t free = uxTaskGetStackHighWaterMark(task);
-      if (free < lowest) lowest = free;
-    }
-  }
+  auto consider = [&lowest](uint32_t free) {
+    if (free > 0 && free < lowest) lowest = free;
+  };
+  if (loopTaskHandle) consider(uxTaskGetStackHighWaterMark(loopTaskHandle));
+  if (TaskHandle_t worker = PROJECT_STICK_BACKGROUND_SYNC.handle()) consider(uxTaskGetStackHighWaterMark(worker));
+  consider(nimble_port_freertos_get_hs_hwm());  // 0 while NimBLE is not running
   return lowest == UINT32_MAX ? 0 : lowest;
 #else
   return 0;

@@ -25,12 +25,12 @@ void ProjectStickBackgroundSync::begin() {
   service.begin();
 #ifdef SIMULATOR
   TaskHandle_t handle = nullptr;
-  xTaskCreate(&taskTrampoline, "ProjectStickSync", TASK_STACK_BYTES, this, 1, &handle);
+  xTaskCreate(&taskTrampoline, TASK_NAME, TASK_STACK_BYTES, this, 1, &handle);
 #else
   static StackType_t stack[TASK_STACK_BYTES];
   static StaticTask_t taskBuffer;
   TaskHandle_t handle =
-      xTaskCreateStatic(&taskTrampoline, "ProjectStickSync", TASK_STACK_BYTES, this, 1, stack, &taskBuffer);
+      xTaskCreateStatic(&taskTrampoline, TASK_NAME, TASK_STACK_BYTES, this, 1, stack, &taskBuffer);
 #endif
   if (handle == nullptr) LOG_ERR("STICK", "Background sync task was not created");
   taskENTER_CRITICAL(&stateMux);
@@ -43,6 +43,13 @@ void ProjectStickBackgroundSync::begin() {
 }
 
 bool ProjectStickBackgroundSync::requestSync() { return queue(WorkKind::Sync); }
+
+TaskHandle_t ProjectStickBackgroundSync::handle() const {
+  taskENTER_CRITICAL(&stateMux);
+  TaskHandle_t value = taskHandle;
+  taskEXIT_CRITICAL(&stateMux);
+  return value;
+}
 
 bool ProjectStickBackgroundSync::requestAlertPoll() { return queue(WorkKind::AlertPoll); }
 

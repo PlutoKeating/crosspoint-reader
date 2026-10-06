@@ -46,6 +46,12 @@ class ProjectStickBackgroundSync {
   // ESP-IDF FreeRTOS counts stack depth in bytes (StackType_t is uint8_t).
   // TLS handshakes run on this stack.
   static constexpr uint32_t TASK_STACK_BYTES = 8192;
+  // FreeRTOS keeps configMAX_TASK_NAME_LEN - 1 characters; never look the
+  // task up by name (xTaskGetHandle asserts on a name that long), use handle().
+  static constexpr char TASK_NAME[] = "StickSync";
+#ifdef configMAX_TASK_NAME_LEN  // the simulator's FreeRTOS shim has no such limit
+  static_assert(sizeof(TASK_NAME) <= configMAX_TASK_NAME_LEN, "task name too long for FreeRTOS");
+#endif
   static void taskTrampoline(void* context);
   [[noreturn]] void taskLoop();
   bool queue(WorkKind kind, const ProjectStickService::FirmwareTarget& target = {});
@@ -57,6 +63,12 @@ class ProjectStickBackgroundSync {
   ProjectStickService::FirmwareTarget pendingTarget;
   bool started = false;
   TaskHandle_t taskHandle = nullptr;
+
+ public:
+  // The worker task, or nullptr before begin(); for stack telemetry.
+  TaskHandle_t handle() const;
+
+ private:
 
   mutable std::mutex resultMutex;
   Result latestResult;

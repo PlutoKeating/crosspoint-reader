@@ -26,7 +26,11 @@ void ActivityManager::begin() {
 #else
   constexpr BaseType_t renderTaskCore = 0;
 #endif
-  xTaskCreatePinnedToCore(&renderTaskTrampoline, "ActivityManagerRender",
+  static constexpr char RENDER_TASK_NAME[] = "UiRender";
+#ifdef configMAX_TASK_NAME_LEN  // the simulator's FreeRTOS shim has no such limit
+  static_assert(sizeof(RENDER_TASK_NAME) <= configMAX_TASK_NAME_LEN, "task name too long for FreeRTOS");
+#endif
+  xTaskCreatePinnedToCore(&renderTaskTrampoline, RENDER_TASK_NAME,
                           8192,               // Stack size
                           this,               // Parameters
                           1,                  // Priority
