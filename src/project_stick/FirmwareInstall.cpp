@@ -23,7 +23,7 @@ uint32_t runningBuild() { return stick_fw::runningDescriptor().build; }
 
 uint32_t minimumInstallBuild() { return STOCKSTICK_FW_MIN_INSTALL_BUILD; }
 
-Candidate inspect(const char* path, const char* expectedVersion) {
+Candidate inspect(const char* path, const char* expectedVersion, const size_t imageLength) {
   Candidate candidate;
   uint8_t head[stick_fw::IDENTIFY_BYTES];
   size_t length = 0;
@@ -32,6 +32,7 @@ Candidate inspect(const char* path, const char* expectedVersion) {
     if (Storage.openFileForRead("FWINST", path, file)) {
       const int read = file.read(head, sizeof(head));
       length = read > 0 ? static_cast<size_t>(read) : 0;
+      if (imageLength && length > imageLength) length = imageLength;  // bytes past the image are not its own
     }
   }
   candidate.identity = stick_fw::identifyImage(head, length, candidate.info);
@@ -48,7 +49,7 @@ Candidate inspect(const char* path, const char* expectedVersion) {
 }
 
 InstallResult installFromSd(const char* path, const char* expectedVersion, const bool permissive,
-                            const ProgressFn onProgress, void* ctx) {
+                            const ProgressFn onProgress, void* ctx, const size_t length) {
   InstallResult result;
   // A trial image rolls back to the other slot; flashing it now would
   // overwrite the image the device returns to.
@@ -56,7 +57,7 @@ InstallResult installFromSd(const char* path, const char* expectedVersion, const
     result.error = "trial_active";
     return result;
   }
-  const Candidate candidate = inspect(path, expectedVersion);
+  const Candidate candidate = inspect(path, expectedVersion, length);
   result.verdict = candidate.verdict;
   const bool stockStick = candidate.identity == stick_fw::IdentifyResult::Ok;
   if (!candidate.ok() && !permissive) {
@@ -79,7 +80,8 @@ InstallResult installFromSd(const char* path, const char* expectedVersion, const
     return !c->stockStick || ota_trial::arm(dest, c->version.c_str());
   };
   // Re-validates the image file at flash time: SD is removable.
-  const auto flash = firmware_flash::flashFromSdPath(path, progress, &context, /*alreadyValidated=*/false, armTrial);
+  const auto flash =
+      firmware_flash::flashFromSdPath(path, progress, &context, /*alreadyValidated=*/false, armTrial, length);
   if (flash != firmware_flash::Result::OK) {
     ota_trial::disarm();  // the new image will not boot, so there is no trial
     result.error = firmware_flash::resultName(flash);

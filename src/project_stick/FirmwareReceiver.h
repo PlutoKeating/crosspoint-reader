@@ -41,6 +41,7 @@ class FirmwareReceiver final : public firmware_v4::Io {
  private:
   FirmwareReceiver() = default;
   void closeFiles();
+  bool inArea = false;  // the image goes to the preallocated firmware area
 
   firmware_v4::Assembler assembler;
   studio_v4::Error failure = studio_v4::Error::None;

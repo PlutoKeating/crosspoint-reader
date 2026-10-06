@@ -59,8 +59,11 @@ using BeforeSwitchCb = bool (*)(const esp_partition_t* dest, void* ctx);
 // the user the confirmation prompt) skip the redundant second pass. Defaults
 // to false so callers without prior validation (any future entry point) keep
 // the defense-in-depth check.
+//
+// `length`: the image's bytes at the start of the file; 0 for the whole file.
+// The preallocated firmware area (2.7.10) is larger than any image.
 Result flashFromSdPath(const char* sdPath, ProgressCb onProgress, void* ctx, bool alreadyValidated = false,
-                       BeforeSwitchCb beforeSwitch = nullptr);
+                       BeforeSwitchCb beforeSwitch = nullptr, size_t length = 0);
 
 // Full-image integrity check that mirrors the bootloader's verification:
 // header magic, segment table walk, XOR checksum, and SHA256 trailer (when
@@ -71,7 +74,7 @@ Result flashFromSdPath(const char* sdPath, ProgressCb onProgress, void* ctx, boo
 // skip the size-fits-partition check (e.g. when validating ahead of partition
 // lookup). Streams the file in CHUNK-sized reads; the file is rewound on
 // success so the caller can immediately reread it for flashing.
-Result validateImageFile(const char* sdPath, size_t partitionSize);
+Result validateImageFile(const char* sdPath, size_t partitionSize, size_t length = 0);
 
 const char* resultName(Result r);
 

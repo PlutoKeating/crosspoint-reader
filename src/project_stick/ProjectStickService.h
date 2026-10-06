@@ -172,7 +172,9 @@ class ProjectStickService {
     bool outer;
   };
   bool parseServerTime(const char* value);
-  bool hashFile(const std::string& path, std::string& result);
+  // SHA-256 of the file, or of its first `length` bytes (an image in the
+  // firmware area); 0: the whole file.
+  bool hashFile(const std::string& path, std::string& result, size_t length = 0);
   bool flushEvents();
   void reportFirmwareOutcome();
 #ifdef SIMULATOR

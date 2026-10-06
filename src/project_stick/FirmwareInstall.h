@@ -15,7 +15,7 @@ struct Candidate {
 };
 
 // `expectedVersion` is the catalogue version for cloud installs, or nullptr.
-Candidate inspect(const char* path, const char* expectedVersion);
+Candidate inspect(const char* path, const char* expectedVersion, size_t imageLength = 0);
 
 uint32_t runningBuild();
 uint32_t minimumInstallBuild();
@@ -35,7 +35,9 @@ struct InstallResult {
   bool flashFailed = false;
 };
 using ProgressFn = void (*)(size_t written, size_t total, void* ctx);
+// `length`: the image's bytes at the start of `path` (the firmware area,
+// 2.7.10); 0 for the whole file (an SD-card .bin, unchanged).
 InstallResult installFromSd(const char* path, const char* expectedVersion, bool permissive, ProgressFn onProgress,
-                            void* ctx);
+                            void* ctx, size_t length = 0);
 
 }  // namespace firmware_install

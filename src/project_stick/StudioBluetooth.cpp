@@ -27,6 +27,7 @@
 
 #include "FirmwareInstall.h"
 #include "FirmwareReceiver.h"
+#include "FrameStore.h"
 #include "network/OtaTrial.h"
 
 #include <Arduino.h>
@@ -1481,8 +1482,11 @@ class PumpPriority {
 const char* firmwareRefusal(const size_t size) {
   if (ota_trial::active()) return "trial_active";
   if (powerManager.getBatteryPercentage() < 30 && !firmware_update::externalPower()) return "low_battery";
+  // The firmware area (2.7.10) is already allocated: only the block stage needs room.
+  const bool area = frame_store::firmwareAreaReady() && size <= frame_store::FIRMWARE_AREA_BYTES;
   uint64_t total = 0, used = 0;
-  if (StudioFrame::storageUsage(total, used) && (total <= used || total - used < uint64_t(size) + 65536))
+  if (StudioFrame::storageUsage(total, used) &&
+      (total <= used || total - used < (area ? 0 : uint64_t(size)) + 65536))
     return "insufficient_storage";
   return nullptr;
 }
@@ -1498,20 +1502,17 @@ void installReceivedFirmware(const std::string& version, const size_t size) {
   const bool lent = releaseRadio("firmware_install");
   firmware_update::setPhase(firmware_update::Phase::Installing);
   auto onProgress = +[](size_t written, size_t, void*) { firmware_update::setProgress(written); };
+  // By length: the image may be the first `size` bytes of the firmware area.
   const auto result = firmware_install::installFromSd(FirmwareReceiver::path(), version.c_str(), false, onProgress,
-                                                      nullptr);
+                                                      nullptr, size);
   if (!result.ok) {
     LOG_ERR("FWBLE", "Install of %s failed: %s", version.c_str(), result.error);
-    if (!result.flashFailed) {  // the image itself is wrong: no resume from it
-      Storage.remove(FirmwareReceiver::path());
-      Storage.remove("/.crosspoint/studio/firmware.meta");
-    }
+    if (!result.flashFailed) frame_store::discardFirmware();  // the image itself is wrong: no resume from it
     firmware_update::fail(result.error);
     if (lent) restoreRadio();
     return;
   }
-  Storage.remove(FirmwareReceiver::path());
-  Storage.remove("/.crosspoint/studio/firmware.meta");
+  frame_store::discardFirmware();
   firmware_update::setPhase(firmware_update::Phase::Restarting);
   LOG_INF("FWBLE", "Firmware %s installed over BLE, restarting", version.c_str());
   delay(1500);

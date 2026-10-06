@@ -2,31 +2,39 @@
 
 #include <Logging.h>
 
+#include "FrameStore.h"
+
 #include <cstdio>
 #include <cstring>
 
 using studio_v4::Error;
 
 namespace {
-constexpr const char* FIRMWARE_TEMP = "/.crosspoint/studio/firmware.tmp";
-// Shared with the on-device Wi-Fi download, which writes "<sha256> <size>";
-// a BLE transfer writes "<sha256> <size> <raw done> <stream offset>" after
-// every block. Either path restarts the other's partial.
-constexpr const char* FIRMWARE_META = "/.crosspoint/studio/firmware.meta";
+using frame_store::FIRMWARE_AREA;
+using frame_store::FIRMWARE_META;
+using frame_store::FIRMWARE_TEMP;
+// firmware.meta is shared with the on-device Wi-Fi download, which writes
+// "<sha256> <size>" (or "<sha256> <size> area <bytes>"); a BLE transfer writes
+// "<sha256> <size> <raw done> <stream offset> [area]" after every block (2.7.10
+// adds "area" when the image goes to the preallocated firmware area). Either
+// path restarts the other's partial.
+const char* currentPath = FIRMWARE_TEMP;
 constexpr const char* BLOCK_STAGE = "/.crosspoint/studio/firmware.z";
 // Rehash buffer for a resumed partial; only the pump task runs the receiver.
 uint8_t block[512];
 
-bool readMeta(std::string& sha, size_t& size, size_t& rawDone, size_t& streamOffset) {
+bool readMeta(std::string& sha, size_t& size, size_t& rawDone, size_t& streamOffset, bool& inArea) {
   HalFile file;
   if (!Storage.openFileForRead("FWBLE", FIRMWARE_META, file)) return false;
   char text[160] = {};
   const int read = file.read(text, sizeof(text) - 1);
   file.close();
   if (read <= 0) return false;
-  char hash[65] = {};
+  char hash[65] = {}, where[8] = {};
   unsigned long s = 0, raw = 0, offset = 0;
-  if (sscanf(text, "%64s %lu %lu %lu", hash, &s, &raw, &offset) != 4) return false;
+  const int fields = sscanf(text, "%64s %lu %lu %lu %7s", hash, &s, &raw, &offset, where);
+  if (fields < 4) return false;
+  inArea = fields == 5 && strcmp(where, "area") == 0;
   sha = hash;
   size = s;
   rawDone = raw;
@@ -40,7 +48,7 @@ FirmwareReceiver& FirmwareReceiver::instance() {
   return receiver;
 }
 
-const char* FirmwareReceiver::path() { return FIRMWARE_TEMP; }
+const char* FirmwareReceiver::path() { return currentPath; }
 
 void FirmwareReceiver::closeFiles() {
   if (output) output.close();
@@ -66,22 +74,28 @@ bool FirmwareReceiver::start(const std::string& sha256, const size_t imageSize) 
     return false;
   }
   Storage.mkdir("/.crosspoint/studio");
-  // Resume a partial of the same image at its last checkpoint (a block
-  // boundary); anything else starts over.
+  // The preallocated firmware area when the card has it (2.7.10): the image is
+  // its first `size` bytes, written without growing a file.
+  inArea = frame_store::firmwareAreaReady() && size <= frame_store::FIRMWARE_AREA_BYTES;
+  currentPath = inArea ? FIRMWARE_AREA : FIRMWARE_TEMP;
+  // Resume a partial of the same image, in the same place, at its last
+  // checkpoint (a block boundary); anything else starts over.
   std::string metaSha;
   size_t metaSize = 0, rawDone = 0, streamOffset = 0;
-  bool resume = readMeta(metaSha, metaSize, rawDone, streamOffset) && metaSha == sha && metaSize == size &&
-                rawDone > 0 && rawDone < size && rawDone % firmware_v4::BLOCK_BYTES == 0;
+  bool metaInArea = false;
+  bool resume = readMeta(metaSha, metaSize, rawDone, streamOffset, metaInArea) && metaSha == sha &&
+                metaSize == size && metaInArea == inArea && rawDone > 0 && rawDone < size &&
+                rawDone % firmware_v4::BLOCK_BYTES == 0;
   if (resume) {
     HalFile existing;
-    resume = Storage.openFileForRead("FWBLE", FIRMWARE_TEMP, existing) && existing.size() >= rawDone;
+    resume = Storage.openFileForRead("FWBLE", currentPath, existing) && existing.size() >= rawDone;
   }
   if (!resume) {
     rawDone = streamOffset = 0;
-    Storage.remove(FIRMWARE_TEMP);
-    Storage.remove(FIRMWARE_META);
+    frame_store::discardFirmware();
   }
-  output = Storage.open(FIRMWARE_TEMP, O_RDWR | O_CREAT);
+  output = Storage.open(currentPath, inArea ? O_RDWR : O_RDWR | O_CREAT);
+  if (inArea && output && !output.isContiguous()) LOG_ERR("FWBLE", "Firmware area is fragmented");
   if (!output || !assembler.begin(*this, size, digest, rawDone, streamOffset)) {
     failure = output ? assembler.error() : Error::StorageFailure;
     closeFiles();
@@ -120,8 +134,7 @@ bool FirmwareReceiver::feed(const uint8_t* data, const size_t length) {
     if (assembler.error() == Error::ChecksumMismatch) {
       // The image cannot be trusted: no resume from it.
       closeFiles();
-      Storage.remove(FIRMWARE_TEMP);
-      Storage.remove(FIRMWARE_META);
+      frame_store::discardFirmware();
     }
     return false;
   }
@@ -174,8 +187,8 @@ bool FirmwareReceiver::checkpoint(const size_t rawDone, const size_t streamOffse
   HalFile meta;
   if (!Storage.openFileForWrite("FWBLE", FIRMWARE_META, meta)) return false;
   char text[160];
-  const int length = snprintf(text, sizeof(text), "%s %u %u %u", sha.c_str(), (unsigned)size, (unsigned)rawDone,
-                              (unsigned)streamOffset);
+  const int length = snprintf(text, sizeof(text), "%s %u %u %u%s", sha.c_str(), (unsigned)size, (unsigned)rawDone,
+                              (unsigned)streamOffset, inArea ? " area" : "");
   const bool ok = length > 0 && meta.write(reinterpret_cast<const uint8_t*>(text), length) == size_t(length);
   meta.close();
   return ok;

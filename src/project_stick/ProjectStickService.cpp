@@ -989,9 +989,11 @@ void ProjectStickService::syncClock() {
 #endif
 }
 
-bool ProjectStickService::hashFile(const std::string& path, std::string& result) {
+bool ProjectStickService::hashFile(const std::string& path, std::string& result, const size_t length) {
   HalFile file;
   if (!Storage.openFileForRead("STICK", path, file)) return false;
+  if (length > file.size()) return false;
+  size_t left = length ? length : file.size();
   auto buffer = makeUniqueNoThrow<uint8_t[]>(IO_CHUNK);
   if (!buffer) {
     LOG_ERR("STICK", "OOM: SHA-256 buffer");
@@ -1000,13 +1002,14 @@ bool ProjectStickService::hashFile(const std::string& path, std::string& result)
   mbedtls_sha256_context context;
   mbedtls_sha256_init(&context);
   mbedtls_sha256_starts(&context, 0);
-  while (file.available()) {
-    const int count = file.read(buffer.get(), IO_CHUNK);
+  while (left) {
+    const int count = file.read(buffer.get(), std::min<size_t>(IO_CHUNK, left));
     if (count <= 0) {
       mbedtls_sha256_free(&context);
       return false;
     }
     mbedtls_sha256_update(&context, buffer.get(), static_cast<size_t>(count));
+    left -= static_cast<size_t>(count);
   }
   uint8_t digest[32];
   mbedtls_sha256_finish(&context, digest);
@@ -1133,8 +1136,9 @@ bool ProjectStickService::applyBleBinding(const std::string& deviceToken, const 
 
 
 namespace {
-constexpr char FIRMWARE_TEMP[] = "/.crosspoint/studio/firmware.tmp";
-constexpr char FIRMWARE_META[] = "/.crosspoint/studio/firmware.meta";
+using frame_store::FIRMWARE_AREA;
+using frame_store::FIRMWARE_META;
+using frame_store::FIRMWARE_TEMP;
 // Both OTA slots in partitions.csv are 0x640000 bytes.
 constexpr size_t MAX_FIRMWARE_BYTES = 0x640000;
 constexpr size_t MIN_FIRMWARE_BYTES = 100000;
@@ -1148,6 +1152,46 @@ size_t fileSize(const char* path) {
   const size_t size = file.size();
   file.close();
   return size;
+}
+// The Wi-Fi download's image (2.7.10): the preallocated firmware area when
+// the card has it, else firmware.tmp. In the area the file size says nothing,
+// so firmware.meta carries the bytes stored: "<sha256> <size> area <bytes>".
+struct DownloadFile {
+  bool area = false;
+  const char* path = FIRMWARE_TEMP;
+  std::string meta;  // "<sha256> <size>"
+};
+DownloadFile downloadFileFor(const std::string& sha256, size_t bytes) {
+  DownloadFile file;
+  file.area = frame_store::firmwareAreaReady() && bytes <= frame_store::FIRMWARE_AREA_BYTES;
+  file.path = file.area ? FIRMWARE_AREA : FIRMWARE_TEMP;
+  file.meta = sha256 + " " + std::to_string(bytes);
+  return file;
+}
+std::string readMetaText() {
+  HalFile metaFile;
+  char stored[128] = {};
+  if (Storage.openFileForRead("STUDIO", FIRMWARE_META, metaFile)) {
+    const int read = metaFile.read(stored, sizeof(stored) - 1);
+    stored[read > 0 ? read : 0] = '\0';
+  }
+  metaFile.close();
+  return stored;
+}
+bool writeMetaText(const std::string& text) {
+  HalFile metaFile;
+  Storage.mkdir("/.crosspoint/studio");
+  const bool ok = Storage.openFileForWrite("STUDIO", FIRMWARE_META, metaFile) &&
+                  metaFile.write(reinterpret_cast<const uint8_t*>(text.data()), text.size()) == text.size();
+  metaFile.close();
+  return ok;
+}
+// Bytes of the image already stored (0 when the meta names another image).
+size_t storedBytes(const DownloadFile& file) {
+  if (!file.area) return fileSize(FIRMWARE_TEMP);
+  const std::string text = readMetaText(), prefix = file.meta + " area ";
+  if (text.compare(0, prefix.size(), prefix) != 0) return 0;
+  return static_cast<size_t>(strtoul(text.c_str() + prefix.size(), nullptr, 10));
 }
 }  // namespace
 
@@ -1205,26 +1249,23 @@ void ProjectStickService::installFirmware(const FirmwareTarget& target) {
 
   firmware_update::setPhase(firmware_update::Phase::Verifying);
   std::string downloadedHash;
-  if (fileSize(FIRMWARE_TEMP) != target.bytes || !hashFile(FIRMWARE_TEMP, downloadedHash) ||
+  const DownloadFile image = downloadFileFor(target.sha256, target.bytes);
+  if (storedBytes(image) != target.bytes || !hashFile(image.path, downloadedHash, target.bytes) ||
       downloadedHash != target.sha256) {
-    Storage.remove(FIRMWARE_TEMP);
-    Storage.remove(FIRMWARE_META);
+    frame_store::discardFirmware();
     return fail("checksum_mismatch");
   }
   firmware_update::setPhase(firmware_update::Phase::Installing);
-  // The same SD install as Settings > SD-card update and firmware over BLE.
+  // The same SD install as Settings > SD-card update and firmware over BLE,
+  // by length (the area is larger than the image).
   auto onProgress = +[](size_t written, size_t, void*) { firmware_update::setProgress(written); };
-  const auto installed =
-      firmware_install::installFromSd(FIRMWARE_TEMP, target.version.c_str(), false, onProgress, nullptr);
+  const auto installed = firmware_install::installFromSd(image.path, target.version.c_str(), false, onProgress,
+                                                         nullptr, target.bytes);
   if (!installed.ok) {
-    if (!installed.flashFailed) {  // the image itself is wrong: do not resume it
-      Storage.remove(FIRMWARE_TEMP);
-      Storage.remove(FIRMWARE_META);
-    }
+    if (!installed.flashFailed) frame_store::discardFirmware();  // the image itself is wrong: do not resume it
     return fail(installed.error);
   }
-  Storage.remove(FIRMWARE_TEMP);
-  Storage.remove(FIRMWARE_META);
+  frame_store::discardFirmware();
   firmware_update::setPhase(firmware_update::Phase::Restarting);
   delay(1500);  // lets the UI and the phone see the restarting state
   ESP.restart();
@@ -1237,39 +1278,36 @@ void ProjectStickService::installFirmware(const FirmwareTarget& target) {
 ProjectStickService::DownloadResult ProjectStickService::downloadFirmware(const FirmwareTarget& target) {
   // A partial download survives errors, power loss and reboots: it is keyed on
   // the image (hash + size), and a later install of the same image resumes it.
-  const std::string meta = target.sha256 + " " + std::to_string(target.bytes);
+  const DownloadFile image = downloadFileFor(target.sha256, target.bytes);
   {
-    HalFile metaFile;
-    char stored[128] = {};
-    if (Storage.openFileForRead("STUDIO", FIRMWARE_META, metaFile)) {
-      const int read = metaFile.read(stored, sizeof(stored) - 1);
-      stored[read > 0 ? read : 0] = '\0';
-    }
-    metaFile.close();
-    if (meta != stored || fileSize(FIRMWARE_TEMP) > target.bytes) {
-      Storage.remove(FIRMWARE_TEMP);
-      Storage.mkdir("/.crosspoint/studio");
-      if (!Storage.openFileForWrite("STUDIO", FIRMWARE_META, metaFile) ||
-          metaFile.write(reinterpret_cast<const uint8_t*>(meta.data()), meta.size()) != meta.size()) {
-        return DownloadResult::Retry;
-      }
-      metaFile.close();
+    const std::string stored = readMetaText();
+    const bool same = image.area ? stored.compare(0, image.meta.size() + 6, image.meta + " area ") == 0
+                                 : stored == image.meta && fileSize(FIRMWARE_TEMP) <= target.bytes;
+    if (!same) {
+      frame_store::discardFirmware();
+      if (!writeMetaText(image.area ? image.meta + " area 0" : image.meta)) return DownloadResult::Retry;
     }
   }
+  auto noteStored = [&](size_t bytes) {
+    if (image.area) writeMetaText(image.meta + " area " + std::to_string(bytes));
+  };
 
   HttpBurst burst(http);
   const size_t size = target.bytes;
   constexpr size_t FLUSH_INTERVAL = 256 * 1024;  // bounds what power loss can discard
   for (uint8_t attempt = 0; attempt < 4; ++attempt) {
-    // The file on SD is the source of truth: a short write or an aborted pass
-    // may have stored more (or fewer) bytes than the last callback counted.
-    size_t offset = fileSize(FIRMWARE_TEMP);
+    // What the card holds is the source of truth: a short write or an aborted
+    // pass may have stored more (or fewer) bytes than the last callback
+    // counted. (In the area: what the meta recorded after a flush.)
+    size_t offset = storedBytes(image);
+    if (offset > size) offset = 0;
     if (offset == size) return DownloadResult::Complete;
     firmware_update::setProgress(offset);
     if (offset > 0) LOG_INF("OTA", "Resuming firmware download at %u/%u", (unsigned)offset, (unsigned)size);
     if (!trustedClockReady()) return DownloadResult::Retry;
-    HalFile output = Storage.open(FIRMWARE_TEMP, O_WRONLY | O_CREAT | O_APPEND);
-    if (!output) return DownloadResult::Retry;
+    HalFile output = image.area ? Storage.open(FIRMWARE_AREA, O_RDWR)
+                                : Storage.open(FIRMWARE_TEMP, O_WRONLY | O_CREAT | O_APPEND);
+    if (!output || (image.area && !output.seek(offset))) return DownloadResult::Retry;
     if (!http.begin(target.url)) return DownloadResult::Fatal;
     if (offset > 0) http.addHeader("Range", "bytes=" + std::to_string(offset) + "-");
     bool restartFromZero = false;
@@ -1288,6 +1326,7 @@ ProjectStickService::DownloadResult ProjectStickService::downloadFirmware(const 
       unflushed += length;
       if (unflushed >= FLUSH_INTERVAL) {
         output.flush();  // persists the directory entry size for resume
+        noteStored(offset);
         unflushed = 0;
       }
       firmware_update::setProgress(offset);
@@ -1295,6 +1334,7 @@ ProjectStickService::DownloadResult ProjectStickService::downloadFirmware(const 
     });
     output.flush();
     output.close();
+    noteStored(offset);
     ota_trial::noteApiResult(status, WiFi.status() == WL_CONNECTED);
     if (status != 200 && status != 206) {
       recordOutcome(true, status);
@@ -1302,16 +1342,19 @@ ProjectStickService::DownloadResult ProjectStickService::downloadFirmware(const 
     }
     if (restartFromZero) {
       LOG_INF("OTA", "Server ignored Range; restarting download");
-      Storage.remove(FIRMWARE_TEMP);
+      if (image.area)
+        noteStored(0);
+      else
+        Storage.remove(FIRMWARE_TEMP);
       continue;
     }
     // Withdrawn image or unsatisfiable range: resuming cannot help.
     if (status == 403 || status == 404 || status == 410 || status == 416) return DownloadResult::Fatal;
-    LOG_INF("OTA", "Firmware download pass: status=%d stored %u/%u", status, (unsigned)fileSize(FIRMWARE_TEMP),
+    LOG_INF("OTA", "Firmware download pass: status=%d stored %u/%u", status, (unsigned)storedBytes(image),
             (unsigned)size);
     if (attempt < 3) delay(1000UL << attempt);
   }
-  return fileSize(FIRMWARE_TEMP) == size ? DownloadResult::Complete : DownloadResult::Retry;
+  return storedBytes(image) == size ? DownloadResult::Complete : DownloadResult::Retry;
 }
 
 // Settings > Firmware update. Needs Wi-Fi only: the public catalogue endpoint

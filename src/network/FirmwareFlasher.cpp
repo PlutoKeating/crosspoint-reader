@@ -91,14 +91,15 @@ Result feedHashAndChecksum(HalFile& file, size_t length, uint8_t* xorAccum, mbed
 }
 }  // namespace
 
-Result validateImageFile(const char* sdPath, size_t partitionSize) {
+Result validateImageFile(const char* sdPath, size_t partitionSize, size_t length) {
   HalFile file;
   if (!Storage.openFileForRead("FLASH", sdPath, file) || !file) {
     LOG_ERR("FLASH", "validate: open failed: %s", sdPath);
     return Result::OPEN_FAIL;
   }
 
-  const size_t fileSize = file.fileSize();
+  // An image in the firmware area is its first `length` bytes.
+  const size_t fileSize = length ? (length <= file.fileSize() ? length : 0) : file.fileSize();
   if (fileSize < MIN_FIRMWARE_SIZE) {
     LOG_ERR("FLASH", "validate: too small: %u", static_cast<unsigned>(fileSize));
     file.close();
@@ -250,7 +251,7 @@ void sha256Finish(mbedtls_sha256_context* ctx, uint8_t* out) {
 bool installInProgress() { return installing.load(); }
 
 Result flashFromSdPath(const char* sdPath, ProgressCb onProgress, void* ctx, bool alreadyValidated,
-                       BeforeSwitchCb beforeSwitch) {
+                       BeforeSwitchCb beforeSwitch, size_t length) {
   InstallGuard guard;
   if (!guard.acquired) {
     LOG_ERR("FLASH", "another install is in progress");
@@ -270,7 +271,7 @@ Result flashFromSdPath(const char* sdPath, ProgressCb onProgress, void* ctx, boo
   // prompt), skip the redundant integrity scan. We still keep the partition
   // lookup so the rest of the flashing path stays unchanged.
   if (!alreadyValidated) {
-    const Result validateRes = validateImageFile(sdPath, dest->size);
+    const Result validateRes = validateImageFile(sdPath, dest->size, length);
     if (validateRes != Result::OK) {
       LOG_ERR("FLASH", "image validation failed: %s", resultName(validateRes));
       return validateRes;
@@ -283,7 +284,11 @@ Result flashFromSdPath(const char* sdPath, ProgressCb onProgress, void* ctx, boo
     return Result::OPEN_FAIL;
   }
 
-  const size_t firmwareSize = file.fileSize();
+  const size_t firmwareSize = length ? (length <= file.fileSize() ? length : 0) : file.fileSize();
+  if (firmwareSize == 0) {
+    file.close();
+    return Result::TOO_SMALL;
+  }
   LOG_INF("FLASH", "src=%s size=%u dest=%s @0x%x partsize=%u", sdPath, static_cast<unsigned>(firmwareSize), dest->label,
           static_cast<unsigned>(dest->address), static_cast<unsigned>(dest->size));
 
