@@ -66,7 +66,7 @@ built in Simplified Chinese; other languages load from SD-card packs.
 
 Until 2.7.0 everything a phone asks for over BLE was applied by
 `ProjectStickActivity`: the radio (`studio_ble::tick`) ran on every page, but
-bind, `sync`, `unbind`, Wi-Fi join/scan, `ota`, the STATE refresh and the setup
+bind, `sync`, `unbind`, Wi-Fi join/scan, `ota` (now `fw4`), the STATE refresh and the setup
 key of an unbound device only existed while the StockStick page was open. On
 Home or in Settings a phone could connect and nothing it sent was executed.
 
@@ -76,7 +76,8 @@ in `setup()` after the display, ticked from the main loop right after
 
 - BLE requests: `takeBinding`/`finishBinding`, `takeSyncRequest`,
   `takeUnbindRequest`, `takeWifiRequest` + join polling, `takeScanRequest` +
-  scan polling, `takeOtaRequest` + queueing on the worker (60 s deadline).
+  scan polling. A BLE firmware transfer (`fw4`, 2.7.4) runs entirely in
+  `studio_ble::pump()` on the sync worker.
 - STATE: rebuilt every 2 s while a phone is connected, every 10 min otherwise,
   and right after a `sync`.
 - STATUS `wifi.state` mirrors the real link: `connected` + SSID whenever Wi-Fi
@@ -159,7 +160,10 @@ network is saved (the device joins on demand); `wifi.state` stays
 `idle|connecting|connected|failed` and reflects the real link, so `idle` with
 `saved:true` is a healthy device. The status header shows 「在线」 when
 connected and 「Wi‑Fi 待机」 when a network is saved but the radio is down.
-The firmware page and a BLE `ota` bring the radio up themselves.
+The Wi-Fi and firmware pages bring the radio up themselves. Since 2.7.4 the
+radio stays off while a phone is linked (background jobs wait for it to
+leave); a BLE Wi-Fi join or scan and an on-device firmware job still bring it
+up (studio-protocol.md "Cloud jobs and a linked phone").
 
 ## BLE setup (protocol 3, since 2.3.0)
 
@@ -191,7 +195,7 @@ and `ProjectStickHost::tickBle` (applies queued work, on every page).
   `ProjectStickHost`; the page reads its state and one-shot events.
 - Unbound: setup mode keyed with K; bound: the secret delivered
   by `bind` (transfer protocol 4 `begin4`/DATA/`commit`, see studio-protocol.md,
-  plus `scan`/`wifi`/`ota`).
+  plus `scan`/`wifi`/`fw4`).
 - Each connection pins its key. After `bind` the live setup session keeps K
   until the phone disconnects, so the phone can bind and then push Wi-Fi in one
   connection; the next connection is in bound mode.
@@ -207,13 +211,13 @@ and `ProjectStickHost::tickBle` (applies queued work, on every page).
   connected; auto-connect stands aside; 20 s, errors `no_ap` /
   `wrong_password` / `timeout`) and an async scan (top 5 by RSSI, STATUS kept
   within 512 bytes).
-- `ota` (bound mode only): the phone names a catalogue image (`version`, `url`,
-  `sha256`, `bytes`); the host hands it to the background worker, which
-  downloads it over Wi-Fi and installs it (see [firmware-ota.md](firmware-ota.md)).
-  Only URLs under `<API base>/firmware/` are accepted. BLE pauses during the
-  download; STATUS `ota` reports `queued`/`downloading`/…/`failed` with the
-  error, and bound STATUS carries `fw` so the phone can confirm the new version
-  after the restart.
+- `fw4` (bound mode only, 2.7.4; replaces `ota`): the phone streams the
+  firmware image itself over the protocol 4 session, block-compressed, straight
+  to `firmware.tmp` on the SD card with block-boundary resume; at the end the
+  device verifies it and runs the SD install (studio-protocol.md "Firmware
+  over BLE"). STATUS `ota` reports `verifying`/`installing`/`restarting` or
+  `failed`, and bound STATUS carries `fw` so the phone can confirm the new
+  version after the restart. STATE `capabilities.ota` is 4.
 - Loop hygiene (2.6.3): the main loop sleeps 2 ms per iteration instead of a
   busy `yield()` whenever a page asks for no delay; the feedback-bubble check
   no longer takes the render lock (it used to wait out every e-paper refresh,
@@ -222,6 +226,11 @@ and `ProjectStickHost::tickBle` (applies queued work, on every page).
   every 2 s while connected and every 10 min otherwise; alert polls are only
   requested inside the A-share trading window and the store is saved only when
   an alert or the trading-day flag changed; boot hashes each program file once.
+- Streamed cards (2.7.4): on the X3 `StudioFrame::stream` sends the card from
+  the SD card to the panel in strips of 72 columns with the overlays drawn
+  into each strip, and the 52 KB framebuffer is freed while the card shows
+  (memory-budget.md "2.7.4"). The framebuffer comes back for the status
+  screen, the firmware screen, every other page and sleep.
 - `StudioFrame::render` (2.6.4) holds the frame lock only while choosing the
   file and offset; the SD read and pixel loop run unlocked on the render task.
   Before, every repaint stalled the UI loop for hundreds of milliseconds and a
@@ -363,7 +372,10 @@ register failure (these need a provisioned device token).
 - Every HTTP request completes before the next begins; one heartbeat burst
   (register, events) reuses the same TLS connection and closes it afterwards.
 - Studio frames and programs stream directly to SD; seen alerts and pending
-  events have explicit caps (32 each).
+  events have explicit caps (32 each). Firmware from the phone or the
+  download streams to SD the same way, one 32 KB block at a time.
+- A card on screen holds no framebuffer (2.7.4): it is streamed from SD in
+  4.7 KB strips; pages that draw get the framebuffer back first.
 - NimBLE is deinitialised (host and controller heap freed) for a cloud request
   when the heap is below what a TLS handshake needs, for a retry after a
   transport failure, and for a whole firmware install; it is restored with the

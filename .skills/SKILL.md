@@ -3,7 +3,7 @@
 Project: StockStick device firmware for the Xteink X3 (ESP32-C3), forked from CrossPoint Reader. X3/X4 runtime detection is kept.
 Mission: Reliable StockStick content display, BLE delivery and setup, and safe OTA on constrained hardware.
 Scope: see `SCOPE.md`. The ebook reader, web file transfer, OPDS, KOReader and Calibre were removed in 2.0.0; do not reintroduce them.
-Key docs: `docs/firmware-ota.md` (versioning, release, OTA, trial boot), `docs/project-stick.md`, `docs/studio-protocol.md`, `docs/memory-budget.md` (heap budget, OOM crash analysis), `docs/i18n.md`.
+Key docs: `docs/firmware-ota.md` (versioning, release, OTA, trial boot), `docs/project-stick.md`, `docs/studio-protocol.md`, `docs/memory-budget.md` (heap budget, OOM crash analysis, IRAM safety), `docs/feature-audit.md` (what every remaining feature is for), `docs/i18n.md`.
 
 ## Internal Testing Workflow (2026-09-29, overrides the push guidance below)
 
@@ -51,10 +51,10 @@ find src -name "*.cpp" -o -name "*.h" | xargs clang-format -i
 * MCU: ESP32-C3 (Single-core RISC-V @ 160MHz)
 * RAM: ~380KB usable (VERY LIMITED - primary project constraint)
   * **NO PSRAM**: ESP32-C3 has no PSRAM capability (unlike ESP32-S3)
-  * **Single Buffer Mode**: Only ONE 48KB framebuffer (not double-buffered)
+  * **Single Buffer Mode**: Only ONE framebuffer (not double-buffered), and since 2.7.4 none at all while a card shows (see "Framebuffer lifecycle" below)
 * Flash: 16MB (Instruction storage and static data)
-* Display: 800x480 E-Ink (Slow refresh, monochrome, 1-2s full update)
-  * Framebuffer: 48,000 bytes (800 × 480 ÷ 8)
+* Display: X3 792x528 E-Ink, UC8253 (cards are portrait 528x792; X4 800x480 is still detected at runtime)
+  * Framebuffer: 52,272 bytes on the X3 (792 × 528 ÷ 8)
 * Storage: SD Card (StockStick content, Studio frames, OTA staging, language packs)
 * OTA slots: two app partitions of 6,553,600 bytes each; the partition table cannot change over OTA, so every change must check the final image size.
 
@@ -107,7 +107,7 @@ find src -name "*.cpp" -o -name "*.h" | xargs clang-format -i
 These flags in `platformio.ini` fundamentally affect firmware behavior:
 
 ```cpp
--DEINK_DISPLAY_SINGLE_BUFFER_MODE=1  // Single framebuffer (saves 48KB RAM!)
+-DEINK_DISPLAY_SINGLE_BUFFER_MODE=1  // Single framebuffer (saves 52KB RAM!)
 -DARDUINO_USB_MODE=1                 // Enable USB CDC
 -DARDUINO_USB_CDC_ON_BOOT=1          // Serial available immediately at boot
 -DUSE_UTF8_LONG_NAMES=1              // SD card long filename support
@@ -124,6 +124,14 @@ These flags in `platformio.ini` fundamentally affect firmware behavior:
 
 **SINGLE_BUFFER_MODE implications**:
 - Only ONE framebuffer exists (not double-buffered)
+- **Framebuffer lifecycle (2.7.4)**: Studio cards are streamed from the SD card to the X3 panel in strips
+  (`StudioFrame::stream`, `HalDisplay::displayStrips`, `GfxRenderer::beginColumnStripTarget` for the overlays)
+  and the framebuffer is freed while a card shows (`renderer.releaseFrameBuffer()`). `ActivityManager` brings
+  it back (`ensureFrameBuffer`) before `onEnter()` and `render()` of every page that does not override
+  `ownsFrameBuffer()`; those that do (the card page, sleep) handle it themselves. Without a framebuffer every
+  drawing and display call is a no-op, so code outside an activity's `render()`/`onEnter()` that draws must
+  call `renderer.ensureFrameBuffer()` first and cope with `false`. Overlays drawn into a streamed card must be
+  deterministic within one repaint (the panel asks for each strip at least twice)
 - Grayscale rendering requires temporary buffer allocation (`renderer.storeBwBuffer()`)
 - Must call `renderer.restoreBwBuffer()` to free temporary buffers
 - See [lib/GfxRenderer/GfxRenderer.cpp:439-440](../lib/GfxRenderer/GfxRenderer.cpp) for malloc usage
@@ -232,16 +240,21 @@ static DRAM_ATTR uint32_t isrEventFlags = 0;
 | ISR → task (data) | `xQueueSendFromISR()` + `portYIELD_FROM_ISR()` |
 | ISR → task (signal) | `xSemaphoreGiveFromISR()` + `portYIELD_FROM_ISR()` |
 | Task → task | `xSemaphoreTake()` / mutex |
+| Simple flag (single writer ISR) | `volatile bool` + `portENTER_CRITICAL_ISR()` |
+
+**IRAM is scarce on purpose (2.7.4):** FreeRTOS non-ISR API, heap, ring buffer and the BLE controller run
+from flash (`platformio.ini` custom_sdkconfig, analysis in `docs/memory-budget.md` "IRAM → flash safety").
+Do not register an interrupt as IRAM-safe (`ESP_INTR_FLAG_IRAM`, `CONFIG_ARDUINO_ISR_IRAM`) and do not write
+flash (OTA, NVS bursts) with a phone linked without checking that analysis first.
 
 **NimBLE callbacks never touch the SD card.** `onRead`/`onWrite`/`onConnect` run on the `nimble_host` task; keep them to
 verification, crypto and queueing (`studio_ble` chunk queue, drained by `pump()` on the `StudioWriter` task). A FAT long-name open
 from a callback overflowed that task's stack in 2.4.3 (`docs/memory-budget.md`).
 
 **Phone- and cloud-driven work never lives in an activity.** Requests a phone queues over BLE (bind, sync, unbind, Wi-Fi,
-OTA), the STATE refresh, Wi-Fi auto-connect and the cloud heartbeat belong to `ProjectStickHost`, ticked from the main loop
+firmware over BLE `fw4`), the STATE refresh, Wi-Fi auto-connect and the cloud heartbeat belong to `ProjectStickHost`, ticked from the main loop
 on every page (`docs/project-stick.md` "Page-independent host"). Until 2.7.1 they ran inside `ProjectStickActivity`, so a
 phone could connect while the device sat in Settings and nothing it asked for was executed. Activities only render.
-| Simple flag (single writer ISR) | `volatile bool` + `portENTER_CRITICAL_ISR()` |
 
 #### RISC-V Alignment
 ESP32-C3 faults on unaligned multi-byte loads. Never cast a `uint8_t*` buffer to a wider pointer type and dereference it directly. Use `memcpy` for any unaligned read:

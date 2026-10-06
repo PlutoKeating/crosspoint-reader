@@ -199,6 +199,114 @@ STATE metrics now carry `tls_heap`/`tls_max` (heap right before the last TLS
 attempt) and `net` (last failure code) so the next field failure is readable
 server-side.
 
+## 2.7.4: about 72 KB more free heap while a card shows
+
+Static RAM, release ELF (`riscv32-esp-elf-size -A`, `nm` for `_heap_start`;
+both builds from this tree, 2.7.3 at `51a95b80`):
+
+| | 2.7.3 | 2.7.4 | Change |
+|---|---|---|---|
+| `.iram0.text` | 87,264 | 70,390 | −16,874 |
+| `.dram0.data` | 17,649 | 17,361 | −288 |
+| `.dram0.bss` | 49,600 | 47,064 | −2,536 |
+| `_heap_start` | `0x3FCA5CC0` | `0x3FCA0FC0` | heap starts 19,712 B lower: +19.7 KB heap at boot |
+| `firmware.bin` | 3,465,392 | 3,434,560 | −30,832 |
+
+Per step, in commit order (measured on the release ELF while the step was made;
+they add up to within ~300 B of the totals above, which are authoritative):
+
+| Step | What | RAM effect |
+|---|---|---|
+| Settings tabs removed (`145308e9`) | the Display/Controls settings, button remapping, the RoundedRaff theme, sleep-screen modes, 40 strings | `.dram0.bss` −128 B (settings fields, remap table); flash ≈ −40 KB |
+| IRAM → flash (`572527ad`) | FreeRTOS non-ISR API, ring buffer, heap functions, the BLE controller, unused driver ISRs | `.iram0.text` 87,266 → 70,390 (−16,876); heap +17.4 KB |
+| BiDi buffers (`1efeb059`) | MiniBidi's static shaping buffers become call-time allocations (RTL packs only) | `.dram0.bss` 49,432 → 47,024 (−2,408) |
+| Telemetry (`456ae8c2`) | `heap_largest_min`, `stack_min` | `.dram0.bss` +40 B |
+| Streamed cards (`74060167`) | no framebuffer while a card shows | heap +52,272 B while a card is on screen; +5,280 B transient during a card refresh |
+
+Free heap per state (static numbers measured, runtime **estimated** from them;
+the device reports the real ones in STATE `metrics`):
+
+| State | 2.7.3 | 2.7.4 |
+|---|---|---|
+| Card on screen, phone linked (Wi-Fi off) | ≈ 55–70 KB | ≈ +72 KB: +19.7 KB static, +52.3 KB framebuffer |
+| UI page (Settings, Wi-Fi, firmware) | as before | +19.7 KB (the framebuffer is back) |
+| Card refresh | — | strip block 4,752 + 528 B for the refresh only (72 columns; 24 or 8 when the heap is tight) |
+
+### Streamed cards
+
+Studio cards are pre-rendered portrait frames on the SD card (528 × 792, 1 =
+black). The X3 panel is landscape 792 × 528 and the renderer's Portrait
+orientation maps logical (x, y) to physical (y, 527 − x), so a strip of
+physical columns [x0, x0 + n) is exactly card rows [x0, x0 + n):
+`StudioFrame::stream()` reads the file front to back, eight rows at a time,
+transposes them into the strip (`lib/ProjectStick/CardStrip.h`, host-tested
+against the framebuffer render), then draws the overlays into the strip with
+the renderer's column strip target (`beginColumnStripTarget`: drawPixel and
+fillRect clip to the strip and use its stride; text, lines, rounded rects and
+polygons go through them). The X3 driver writes each strip through a PTL
+window in gate space, bottom row first (`Uc8253X3Driver::sendStrips`, the
+addressing of the hardware-proven grayscale strip writer, narrowed to the
+strip's byte columns), and runs `displayStart`/`displayFinish` unchanged, so
+the waveform choices (FAST for cards, HALF on a short power press, the boot
+full syncs and their settle passes) are the same as with a framebuffer. Each
+plane write (DTM2 before the waveform, DTM1 after, more on a full sync) asks
+for every strip again; the overlay inputs are captured once per repaint
+(`ProjectStickActivity::captureLayers`) so every pass gets the same pixels
+(the simulator checks this on every streamed refresh).
+
+The framebuffer is freed after a streamed card (`GfxRenderer::releaseFrameBuffer`)
+and comes back, white, before any page that needs it
+(`ActivityManager`: before `onEnter` and `render` unless the page
+`ownsFrameBuffer()`). Without it every drawing and display call is a no-op.
+If the heap cannot give 52,272 contiguous bytes back, the render is retried
+each loop; after 5 s, with no transfer, cloud job or firmware update running,
+the device reboots to Home (the framebuffer is the first allocation at boot).
+Sleep rebuilds the card into the framebuffer (the moon and the quick-resume
+frame need it); the screenshot combo cannot capture a streamed card.
+
+Verify on the device: STATE `metrics.heap_free` / `heap_max_alloc` on the card
+page should be ≈ 50 KB higher than on a UI page; `heap_largest_min` shows
+whether the heap ever fragmented below 52 KB (the framebuffer realloc needs
+one block that large; `Framebuffer unavailable … rebooting` in the log means it
+did). A card refresh should look and time like 2.7.3 (FAST, no flash).
+
+### IRAM → flash safety
+
+Code in flash cannot run while the flash cache is disabled (flash writes and
+erases: OTA, NVS, the coredump). What can run then is IRAM code reached from an
+interrupt registered as IRAM-safe (`ESP_INTR_FLAG_IRAM`). In this firmware:
+
+- Our IRAM code is the panic wrappers (`lib/hal/HalSystem.cpp`, which run
+  with the cache in whatever state the panic left) and the e-paper BUSY ISR
+  (`freeink-sdk/.../EpdBus.cpp`, `xSemaphoreGiveFromISR`). The ISR is attached
+  with `attachInterrupt`, whose GPIO ISR service is not IRAM-safe
+  (`CONFIG_ARDUINO_ISR_IRAM` is off): during a flash write it is held off and
+  runs afterwards. FreeRTOS keeps its `FromISR` API in IRAM; only the non-ISR
+  API moved (`CONFIG_FREERTOS_PLACE_FUNCTIONS_INTO_FLASH`).
+- Ring buffer and heap functions (`*_PLACE_FUNCTION(S)_INTO_FLASH`): no IRAM
+  ISR of ours calls them.
+- Driver ISR-in-IRAM options turned off: I2S, RMT, GPTimer (unused on the X3),
+  I2C master (RTC, IMU and fuel gauge are polled from tasks), esp_event posting
+  from IRAM ISRs (unused).
+- The BLE controller runs from flash (`CONFIG_BT_CTRL_RUN_IN_FLASH_ONLY`):
+  Bluetooth stalls while flash is written. The device releases NimBLE before
+  every flash write of its own (all three firmware paths, SD → flash). What
+  can still write flash with a phone linked is NVS: the trial-boot
+  confirmation (`ota_trial`, Preferences) when the phone's `sync` confirms an
+  image, and the Wi-Fi driver's PHY calibration on a BLE Wi-Fi join. Both are
+  single NVS page writes (milliseconds, an erase at worst ~100 ms), well under
+  the link supervision timeout.
+- `CONFIG_SPI_FLASH_ROM_IMPL` stays off (the ROM flash driver lacks IDF fixes
+  the OTA path relies on).
+
+### Stacks
+
+Not shrunk: there are no hardware high-water marks yet. STATE `stack_min` now
+reports the least headroom of `loopTask` (8 KB), `ProjectStickSync` (8 KB,
+static) and `nimble_host` (8 KB). Shrink a stack only after field reports show
+its headroom stays above ~2 KB across transfers, firmware installs and cloud
+jobs.
+
 ## Where the RAM goes
 
 Static, from `riscv32-esp-elf-size -A` on the release ELF (2.4.2 → 2.4.3):
@@ -215,7 +323,7 @@ hardware yet, see "Verify on the device"):
 
 | Consumer | Size | When | 2.4.3 |
 |---|---|---|---|
-| E-paper framebuffer (`FreeInkDisplay`, single-buffer mode) | 52,272 B (528 × 792 / 8) | always | unchanged (no async shadow on X3) |
+| E-paper framebuffer (`FreeInkDisplay`, single-buffer mode) | 52,272 B (528 × 792 / 8) | UI pages; freed while a streamed card shows (2.7.4) | unchanged (no async shadow on X3) |
 | Wi-Fi static RX buffers | 8 × ~1.6 KB ≈ 13 KB | while Wi-Fi is up | 4 buffers ≈ 6.5 KB (−6.5 KB) |
 | Wi-Fi dynamic RX / TX buffers | up to 32 + 32 × ~1.6 KB | bursts | capped at 16 + 16 (peak −~50 KB worst case) |
 | Wi-Fi TX A-MPDU buffers | per BA session | while associated | disabled |

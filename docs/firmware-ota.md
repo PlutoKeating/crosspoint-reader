@@ -84,22 +84,44 @@ python3 scripts/firmware_release.py --build --notes RELEASE_NOTES.md \
 
 | 入口 | 发起方 | 路径 |
 |---|---|---|
-| 小程序设备详情（手机在设备旁） | 所有者 | 蓝牙协议 3 操作 `ota`（`version`、`url`、`sha256`、`bytes`，证明 `ota3|N|version|sha256|bytes|url`，仅已绑定模式）→ 设备排队安装 |
+| 小程序设备详情（手机在设备旁） | 所有者 | 2.7.4 起：小程序下载镜像，经蓝牙协议 4 的 `fw4` 操作分块传给设备（证明 `fw4|device_id|N|epoch|version|sha256|size|time`，仅已绑定模式），设备随收随写 SD 卡，收齐后走 SD 卡安装。2.7.3 及以前：协议 3 操作 `ota`，设备自己经 Wi‑Fi 下载（2.7.4 起不再接受） |
 | 设备「设置 → 系统 → 固件更新」 | 设备（无需绑定，联网即可，2.7.1 起） | `GET /api/v1/public/firmware/latest?channel=stable`（不带凭据）→ 设备本地比较版本 → 确认 → 直接下载 `url` 到 SD 卡、校验、刷写并重启 |
 | 设备「SD 卡固件更新」 | 用户 | 选择 `/` 或 `/firmware` 下的 `.bin`；只接受适用于本机的 StockStick 镜像，并启用试运行 |
 | 恢复模式（按住左侧键开机） | 用户 | 同上但不做描述符限制，用于救砖；只有 StockStick 镜像启用试运行 |
 | USB / 网页刷机 | 开发者 | 不经过试运行，视为可信镜像 |
 
-2.7.2 起 Wi‑Fi 按需开启：固件更新页打开期间、收到蓝牙 `ota` 请求或排队了下载任务时，设备自行连接已保存的网络，任务最多等待 20 秒。有已保存网络时，检查更新不再弹出 Wi‑Fi 选择页。
+2.7.2 起 Wi‑Fi 按需开启：固件更新页打开期间或排队了下载任务时，设备自行连接已保存的网络，任务最多等待 20 秒。有已保存网络时，检查更新不再弹出 Wi‑Fi 选择页。2.7.4 起，手机连着设备时 Wi‑Fi 一直关闭（后台任务等手机断开），蓝牙固件传输期间同样关闭。
 
-2.7.3 起，检查更新和安装（包括蓝牙 `ota`）开始时，如果手机正通过蓝牙连着设备，设备会先在 STATUS 里给出 `net_busy`，约 0.4 秒后主动断开手机，并释放蓝牙协议栈。任务结束前设备不再广播，手机这段时间无法重连；升级时一直持续到重启。以前手机连着时蓝牙无法释放，内存不够建立 HTTPS 连接，检查会报「设备内存不足」，下一次又被设备自己的退避误报成「云端繁忙」。现在只有服务器真的返回 429 时才显示「云端繁忙」（附剩余秒数），手动检查不受设备自身退避的限制；内存不足的提示会给出当时的可用 KB 数。
+2.7.3 起，设备上的检查更新和安装开始时，如果手机正通过蓝牙连着设备，设备会先在 STATUS 里给出 `net_busy`，约 0.4 秒后主动断开手机，并释放蓝牙协议栈。任务结束前设备不再广播，手机这段时间无法重连；升级时一直持续到重启。以前手机连着时蓝牙无法释放，内存不够建立 HTTPS 连接，检查会报「设备内存不足」，下一次又被设备自己的退避误报成「云端繁忙」。现在只有服务器真的返回 429 时才显示「云端繁忙」（附剩余秒数），手动检查不受设备自身退避的限制；内存不足的提示会给出当时的可用 KB 数。
 
 ## 5. 设备端执行流程
 
-设备注册时上报 `firmware_version`、`firmware_build` 与能力 `ble: 3`、`ota: 3`、`panel: xteink_x3|xteink_x4`。
+设备注册与蓝牙 STATE 上报 `firmware_version`、`firmware_build` 与能力 `ble: 3`、`ota: 4`（2.7.4 起；3 表示设备自行下载的旧 `ota` 操作）、`panel: xteink_x3|xteink_x4`。
+
+三条路径最后都调用同一个 SD 卡安装例程 `firmware_install::installFromSd()`
+（`src/project_stick/FirmwareInstall.*`）：试运行保护 → 读取并校验镜像描述 → 刷写另一 OTA 槽并读回比对 →
+仅 StockStick 镜像启用试运行 → 失败时撤销试运行记录。它不负责重启，由调用方决定。
+
+蓝牙 `fw4`（2.7.4 起，详见 studio-protocol.md "Firmware over BLE"）：
 
 ```
-蓝牙 ota 操作 / 设置里确认安装
+fw4 操作（仅已绑定模式）
+  0. 拒绝：版本不比当前新 / 大小不在 100,000~6,553,600 / sha 格式错 → invalid_target；
+     正在传输 → device_busy；试运行中 → trial_active；电量 < 30% 且未充电 → low_battery；
+     SD 空间不足 → insufficient_storage
+  1. 停 Wi‑Fi（最多等 10 秒），分配接收队列（不足 → insufficient_memory）
+  2. 打开 /.crosspoint/studio/firmware.tmp：同一 sha 的半截文件按 firmware.meta
+     "<sha> <字节> <已写原始字节> <流偏移>" 从块边界续传（重算前缀哈希），否则重建
+  3. 每条记录（32 KB 原始块，raw deflate）解压后立即写 SD 并更新 SHA-256 与 firmware.meta
+  4. 收齐后比对 SHA-256（不一致删除半截文件 → checksum_mismatch）
+  5. PROGRESS state 3 通知手机（此时蓝牙仍连着）→ STATUS ota=verifying → 释放蓝牙 →
+     installing → installFromSd → restarting → 重启；失败则恢复蓝牙并报原因
+```
+
+设置里确认安装：
+
+```
+设置里确认安装
   └─ 后台任务 installFirmware(version, url, sha256, bytes)
       0. 新固件仍在试运行时拒绝安装（trial_active）
       1. 目标校验：URL 必须在 <API 基址>/firmware/ 下、SHA-256 格式、大小在 100 KB~分区上限；
@@ -112,8 +134,8 @@ python3 scripts/firmware_release.py --build --notes RELEASE_NOTES.md \
          · 每写约 256 KB 刷新一次 SD 文件，掉电后续传偏移以文件实际大小为准
          · 服务器忽略 Range（返回 200）时从头下载；403/404/410/416 直接失败
       4. 大小 + SHA-256 → 描述符与安装策略
-      5. 写入另一 OTA 槽（同一时间只允许一个安装），写完后读回整个分区计算 SHA-256 比对
-      6. 切换启动槽之前写入试运行记录 → 切换 otadata → 重启
+      5. installFromSd：写入另一 OTA 槽（同一时间只允许一个安装），写完后读回整个分区计算 SHA-256 比对
+      6. 切换启动槽之前写入试运行记录 → 切换 otadata → 重启（刷写失败时保留半截下载以便续传）
 ```
 
 任一步失败都会记入 `firmware_update`（原因如 `download_failed`、`checksum_mismatch`、`VERSION_MISMATCH`、
@@ -125,8 +147,8 @@ python3 scripts/firmware_release.py --build --notes RELEASE_NOTES.md \
 设备端检查更新（2.7.1 起）：`ProjectStickService::checkFirmware()` 不带凭据请求公开目录接口，
 用 `stick_fw::compareVersions()` 在本机比较版本（数字段按数值比较；数字相同时不带后缀的正式版
 高于带后缀的构建），只在目录版本严格更新时提示。未绑定的设备同样可用；这条路径上的任何响应
-都不会改动绑定状态。蓝牙触发的升级由 `ProjectStickHost` 在任意页面受理，升级开始后屏幕自动
-切到进度页（见 project-stick.md "Page-independent host"）。
+都不会改动绑定状态。蓝牙固件传输在任意页面都可进行（`studio_ble::pump()` 在后台任务上运行），
+安装开始后屏幕自动切到进度页（见 project-stick.md "Page-independent host"）。
 
 ## 6. 试运行与自动回滚
 
@@ -170,13 +192,14 @@ PENDING_VERIFY 状态下的**任何**复位都当作失败；若把确认推迟�
   `.crosspoint/epub_*` 等阅读缓存不再使用，可以手动删除。
 - 设备出厂 bootloader 是否启用回滚未经确认；应用层回滚在两种情况下都工作。
 - SD 语言包中的文案若改变了 `printf` 转换说明（如把 `%02u` 换成 `%s`），该条目被忽略并显示内置文案。
-- BLE 只触发升级、不传输固件（6 MB 级镜像经 BLE 需十余分钟且占用会话）：镜像始终经 Wi‑Fi 下载，
-  因此在线升级需要设备已连上 Wi‑Fi。
+- 2.7.4 起固件经蓝牙传输（每块独立压缩，约 3.4 MB 的镜像传输量明显更小；可断点续传）。旧固件（`ota` < 4）
+  仍由小程序发协议 3 的 `ota`，设备自己经 Wi‑Fi 下载；设备端「检查更新」始终经 Wi‑Fi。
 
 ## 9. 真机验证清单（每次发布）
 
 1. SD 卡安装新版本：试运行日志出现 `Trial boot`，联网后出现 `confirmed (API reachable)`。
-2. 小程序经蓝牙发起升级：设备显示下载/校验/安装进度，重启后蓝牙 STATUS 的 `fw` 为新版本。
+2. 小程序经蓝牙传输固件（`fw4`）：设备显示接收进度、校验/安装进度，重启后蓝牙 STATUS 的 `fw` 为新版本；
+   传输中途断开蓝牙再连上，从块边界续传（日志 `Receiving firmware … resume at N`，N > 0），最终 SHA 校验通过。
 3. 下载中断电/断网：再次上线后日志出现 `Resuming firmware download at`，最终 SHA 校验通过。
 4. 目录中已删除的镜像下载失败（404）；电量低于 30% 时拒绝升级。
 5. 故意安装会在启动后崩溃的测试构建：三次 panic 后自动回到旧版本，下次注册后服务端收到 `firmware_rolled_back` 事件。

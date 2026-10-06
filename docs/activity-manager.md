@@ -436,6 +436,24 @@ Child calls: setResult(MyResult{...}); finish();
   └── requestUpdate()   // automatic re-render for parent
 ```
 
+### The framebuffer is not always there (2.7.4)
+
+While a Studio card is on screen the framebuffer is freed: the card page
+streams the card from the SD card to the panel strip by strip
+(`StudioFrame::stream`) and calls `renderer.releaseFrameBuffer()`. The manager
+gets it back before it calls `onEnter()` and before every `render()` of a page
+that does not override `ownsFrameBuffer()` (`ActivityManager::acquireFrameBuffer`):
+
+- It comes back white; a page always draws its whole screen anyway.
+- If the heap has no 52 KB block, the render is skipped and retried on the
+  next loop; after `FRAMEBUFFER_WAIT_MS` (5 s) with no live work
+  (`PROJECT_STICK_HOST.busy()`), the device reboots to Home.
+- A page that overrides `ownsFrameBuffer()` (ProjectStick, Sleep) calls
+  `activityManager.acquireFrameBuffer()` or `renderer.ensureFrameBuffer()`
+  itself before it draws into the framebuffer.
+- Without a framebuffer every drawing and display call is a no-op rather than
+  a crash, so a missing ensure shows up as a screen that does not change.
+
 ### Common Pitfalls
 
 **Calling `finish()` and continuing to access `this`**: `finish()` sets `pendingAction = Pop` but does not immediately destroy the activity. The activity is destroyed on the next `ActivityManager::loop()` iteration. It's safe to access member variables after `finish()` within the same function, but don't rely on the activity surviving past the current `loop()` call.

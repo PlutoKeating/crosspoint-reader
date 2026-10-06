@@ -101,6 +101,10 @@ One request needs no binding and no credential, only Wi-Fi (2.7.1):
 Since 2.4.2 the register body also carries `metrics` (`heap_free`, `heap_min`,
 `heap_max_alloc`, `uptime_ms`, `wifi_rssi`, `battery_percent`), so field heap and
 radio problems are visible server-side (the server stores the names it knows).
+2.7.4 adds `heap_largest_min` (the smallest largest-free-block seen since boot,
+sampled every 5 s: how fragmented the heap got; `heap_min` is already the
+minimum ever) and `stack_min` (the least stack headroom, in bytes, of the loop
+task, the sync worker and the NimBLE host).
 
 One backoff gate covers every request. Transport failures, 429 and 5xx block all
 cloud requests for 30 s, 60 s, 120 s … up to 10 min (reset by any other answer);
@@ -122,8 +126,6 @@ Worker, heap and time limits (2.4.2, tightened in 2.4.3; see docs/memory-budget.
   costs at most 30 s instead of ~40 s. A firmware check that has not answered within 60 s ends on the
   screen as 「检查失败：网络请求超时」; other failures are shown specifically
   (no clock, unreachable server, low memory, server busy, HTTP error code).
-  A BLE `ota` request the worker has not accepted within 60 s fails with
-  `device_busy` in `STATUS.ota`.
 - NimBLE (host and controller) holds heap a TLS session needs. Before each
   request the worker logs `heap`/`max`; below 56 KB free or a 24 KB largest
   block it deinitialises NimBLE for the rest of that cloud operation, and a
@@ -154,7 +156,7 @@ pinned because Cloudflare may issue from Google Trust Services. Another deployme
 maintain its actual trust chain; never disable verification to transmit authorization
 material.
 
-### Cloud jobs and a linked phone (2.7.3)
+### Cloud jobs and a linked phone (2.7.3, 2.7.4)
 
 On the C3 a TLS session does not fit next to a connected NimBLE stack (the
 2.6.5 device measured 13 KB free with Wi-Fi up and a phone linked). Before
@@ -167,18 +169,21 @@ the next check say 「云端繁忙」.
 Now a cloud job that needs TLS makes the phone yield
 (`project_stick::phoneLinkAction`, host-tested):
 
-- User-initiated jobs (Settings > Firmware update check/install, a BLE `ota`)
-  disconnect the phone at once.
-- Background jobs (register heartbeat, alert poll, event flush) wait while the
-  phone is active (a read/write within 30 s): never during a content transfer,
-  otherwise for at most 2 min of continuous link. An idle phone yields at once.
+- User-initiated jobs (Settings > Firmware update check/install) disconnect
+  the phone at once.
+- Background jobs (register heartbeat, alert poll, event flush) wait for as
+  long as a phone is linked (2.7.4; 2.7.3 forced an active phone off after
+  2 min). The phone relays what the heartbeat would carry and delivers
+  firmware itself (`fw4`), so nothing is lost by waiting.
+- Wi-Fi follows the same rule (`project_stick::wifiWanted`, host-tested): while
+  a phone is linked the radio is off and its ~50 KB released; only a BLE Wi-Fi
+  join/scan, the Wi-Fi and firmware pages and an on-device firmware job bring
+  it up. A content or firmware transfer always keeps it off.
 - Yielding: bound STATUS shows `net_busy` (`firmware_check`,
   `firmware_install`, `sync`, `alerts`) for ~0.4 s, then the device
   disconnects the phone and deinitialises NimBLE. Nothing advertises until
   the job ends and the stack is restored, so the phone's reconnects fail for
-  the length of the job (an OTA ends with the restart). A phone that sees the
-  link drop after `ota` should wait before reconnecting; STATUS `ota` and `fw`
-  after the reconnect tell the outcome.
+  the length of the job (an install ends with the restart).
 
 Errors are reported honestly:
 
@@ -260,7 +265,8 @@ is `header = 0`, `size = 52272`, `hash` = its digest, and only that record.
   2 offset_mismatch, 3 device_busy, 4 storage_or_cipher_error,
   5 frame_validation_failed, 6 frame_mismatch, 7 too_many_frames,
   8 transfer_timeout, 9 insufficient_storage, 10 authorization_failed,
-  11 insufficient_memory (2.7.2: no heap for the transfer buffers; retryable).
+  11 insufficient_memory (2.7.2: no heap for the transfer buffers; retryable),
+  12 checksum_mismatch, 13 low_battery, 14 trial_active (2.7.4, `fw4`).
 
 Measured with the official 17-frame plan (892,146 bytes): the full stream is
 41,919 bytes; with one changed card it is 6,054 bytes (the other 16 frames are
@@ -273,6 +279,51 @@ The simulator has no radio; `/.crosspoint/studio/import.v4` +
 `import.v4.json` (`{task, hash, size, header[, stop_at]}`) feed a decrypted
 stream through the same StudioReceiver/StudioFrame path at boot (test hook;
 `stop_at` interrupts and resumes).
+
+## Firmware over BLE (op `fw4`, since 2.7.4)
+
+Defined in Project.StockStick `docs/product/BLE-TRANSFER-V4.md` 「固件经蓝牙传输」.
+STATE `capabilities.ota` is 4; the op `ota` (device downloads the image itself)
+is gone. The mini program downloads the catalogue `.bin`, checks its SHA-256
+and size, and streams it on the protocol 4 session:
+
+```
+{"op":"fw4","version","size","sha256","time","proof"}
+proof = mac(K, "fw4|device_id|N|epoch|version|sha256|size|time")
+stream (CTR key mac(K,"enc|N"), counter N, seeked to the resume offset):
+  repeat: uint32LE raw_offset | uint32LE comp_len | raw deflate of one block
+  blocks of 32,768 raw bytes (last shorter), windowBits 10
+```
+
+- **Refusals** (STATUS `error`, PROGRESS state 6): `invalid_target` (version
+  not newer than the running one by `stick_fw::compareVersions`, size outside
+  100,000–6,553,600, malformed sha), `device_busy` (a transfer runs),
+  `trial_active` (14), `low_battery` (13; below 30 % without external power),
+  `insufficient_storage`, `insufficient_memory` (queue).
+- **Accept** (on the sync worker, `pump()`): Wi-Fi is stopped (up to 10 s for
+  the driver to go down), the chunk queue is allocated, and
+  `FirmwareReceiver` opens `/.crosspoint/studio/firmware.tmp`. A partial of the
+  same sha256 resumes at its last block boundary: `firmware.meta` holds
+  `"<sha> <size> <rawDone> <streamOffset>"`, the prefix is rehashed and the
+  file reopened at `rawDone`. PROGRESS state 1 reports `received` = the stream
+  offset to continue from.
+- **Receive** (`lib/ProjectStick/FirmwareTransfer`, host-tested with the mini
+  program's vector `test/project_stick_core/fixtures/ble-fw4-vector.json`):
+  each record must start at the raw bytes written so far; it is staged in
+  `firmware.z`, inflated with uzlib (1 KB dictionary) block by block into
+  `firmware.tmp` with a running SHA-256, and checkpointed in `firmware.meta`.
+  Nothing larger than a record is held in RAM.
+- **Install:** at `size` bytes the SHA-256 is compared (`checksum_mismatch`
+  deletes the partial). PROGRESS state 3 (committing) is notified while the
+  link is still up; then STATUS `ota` reports `verifying`, NimBLE is released
+  and the shared SD install routine (`firmware_install::installFromSd`: trial
+  guard, descriptor check, flash, trial arm) runs; `restarting` precedes the
+  restart. A failure restores the radio and reports the reason.
+- The Wi-Fi path (Settings 「检查更新」) and the SD path end in the same routine.
+  The Wi-Fi download writes `firmware.tmp` with `firmware.meta` = `"<sha> <size>"`
+  and resumes with `Range`; a partial of the other kind is restarted.
+- Simulator: `/.crosspoint/studio/import.fw4` (the decrypted record stream) +
+  `import.fw4.json` (`{sha256, size[, stop_at]}`) runs the receiver at boot.
 
 ## Phone-relayed sync (since 2.6.0, BLE-first)
 
@@ -314,7 +365,7 @@ with an epoch mismatch, which is not a successful sync, so the heartbeat is not
 suppressed; the user can also close the Wi-Fi screen to force one.
 
 The same service runs BLE setup protocol 3 (since 2.3.0; unbound devices, key from
-the setup QR) and accepts `scan`/`wifi` and (since 2.4.0) `ota` ops in bound mode;
+the setup QR) and accepts `scan`/`wifi` ops in bound mode (`ota` 2.4.0–2.7.3, replaced by `fw4`);
 bound STATUS also carries `fw`, `wifi`, `scan`, `networks` and `ota` (since
 2.7.1 `wifi.state` follows the real link on every page: `connected` with the
 SSID whenever Wi-Fi is up, not only after a BLE Wi-Fi push; since 2.7.2
@@ -326,10 +377,11 @@ carries the service UUID and the id characters as manufacturer data). Protocol 3
 
 ## OTA
 
-Triggered over BLE (op `ota`, bound mode, MAC `ota3|N|version|sha256|bytes|url`)
-or from Settings 「检查更新」; either way the device downloads the catalogue image
-itself over Wi-Fi (resumable, `Range`), verifies SHA-256 and the image
-descriptor, flashes, and boots it on trial with automatic rollback. The complete
+Three ways in, one install: the mini program streams the image over BLE (op
+`fw4`, above), Settings 「检查更新」 downloads it over Wi-Fi (NimBLE released
+first, resumable with `Range`), or a `.bin` is picked from the SD card. Each
+lands on the SD card and goes through `firmware_install::installFromSd`
+(SHA-256, image descriptor, flash, trial boot with automatic rollback). The complete
 lifecycle is in [firmware-ota.md](firmware-ota.md). Simulator OTA and BLE adapters
 do not perform hardware work.
 
