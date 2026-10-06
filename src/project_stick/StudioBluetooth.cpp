@@ -6,6 +6,7 @@
 #include <PersistableStore.h>
 
 #include <algorithm>
+#include <cstring>
 #include <atomic>
 #include <memory>
 #include <mutex>
@@ -35,6 +36,11 @@
 #include <freertos/task.h>
 #include <mbedtls/aes.h>
 #include <mbedtls/md.h>
+#include <nvs_flash.h>
+
+// NimBLE host stack high-water mark (nimble_port_freertos.c), 0 when the host
+// task does not exist.
+extern "C" UBaseType_t nimble_port_freertos_get_hs_hwm(void);
 #include <sys/time.h>
 
 namespace studio_ble {
@@ -971,8 +977,11 @@ void failStartLocked(const char* stage, int code) {
   startErrorCode = code;
   ++startFailures;
   changed();
-  LOG_ERR("BLE", "Start failed at %s (code=%d heap=%u max=%u)", stage, code, (unsigned)ESP.getFreeHeap(),
-          (unsigned)ESP.getMaxAllocHeap());
+  // code is an esp_err_t for the nvs/controller stages (named here), the free
+  // KB for low_memory.
+  LOG_ERR("BLE", "Start failed at %s (code=%d 0x%x %s heap=%u max=%u)", stage, code, static_cast<unsigned>(code),
+          code > 0 && strcmp(stage, "low_memory") != 0 ? esp_err_to_name(static_cast<esp_err_t>(code)) : "-",
+          (unsigned)ESP.getFreeHeap(), (unsigned)ESP.getMaxAllocHeap());
 }
 // Advertising packet (31 bytes): flags, the 128-bit service UUID phones filter
 // on, and the device id prefix as manufacturer data, so a passive scan already
@@ -989,6 +998,41 @@ bool configureAdvertisingLocked(const std::string& name) {
     return false;
   advertising->enableScanResponse(true);
   return advertising->setAdvertisementData(packet) && advertising->setScanResponseData(response);
+}
+// NimBLEDevice::init() only returns false. Its first steps are
+// nvs_flash_init(), esp_bt_controller_init() and esp_bt_controller_enable()
+// (NimBLE-Arduino NimBLEDevice.cpp); repeat them to record which one failed
+// and its esp_err_t (2.7.5 logged only "init (code=0)", the controller
+// status). Anything this probe brings up is torn down again, so the next
+// start begins from the same state.
+struct InitFailure {
+  const char* stage;
+  int code;
+};
+InitFailure diagnoseInitFailure() {
+  const esp_err_t nvs = nvs_flash_init();
+  if (nvs != ESP_OK) return {"nvs_flash_init", static_cast<int>(nvs)};
+  switch (esp_bt_controller_get_status()) {
+    case ESP_BT_CONTROLLER_STATUS_IDLE: {
+      esp_bt_controller_config_t cfg = BT_CONTROLLER_INIT_CONFIG_DEFAULT();
+      const esp_err_t init = esp_bt_controller_init(&cfg);
+      if (init != ESP_OK) return {"controller_init", static_cast<int>(init)};
+      const esp_err_t enable = esp_bt_controller_enable(ESP_BT_MODE_BLE);
+      if (enable == ESP_OK) esp_bt_controller_disable();
+      esp_bt_controller_deinit();
+      if (enable != ESP_OK) return {"controller_enable", static_cast<int>(enable)};
+      return {"host_init", 0};  // the controller comes up on its own: NimBLE's host side failed
+    }
+    case ESP_BT_CONTROLLER_STATUS_INITED: {
+      const esp_err_t enable = esp_bt_controller_enable(ESP_BT_MODE_BLE);
+      if (enable == ESP_OK) esp_bt_controller_disable();
+      return {"controller_enable", static_cast<int>(enable)};
+    }
+    case ESP_BT_CONTROLLER_STATUS_ENABLED:
+      return {"host_init", 0};
+    default:
+      return {"controller_status", static_cast<int>(esp_bt_controller_get_status())};
+  }
 }
 // Starts NimBLE for the current identity. Caller holds radioMutex. Returns
 // false when the start failed (recorded for diagnostics; tick() retries).
@@ -1009,7 +1053,8 @@ bool startRadioLocked() {
     return false;
   }
   if (!NimBLEDevice::init(name)) {
-    failStartLocked("init", static_cast<int>(esp_bt_controller_get_status()));
+    const InitFailure why = diagnoseInitFailure();
+    failStartLocked(why.stage, why.code);
     return false;
   }
   NimBLEDevice::setMTU(ATT_MTU);
@@ -1228,7 +1273,7 @@ Diagnostics diagnostics() {
   result.advertisingRestarts = advertisingRestarts;
   // Stack headroom of the NimBLE host task (its overflow was the 2.4.3 crash).
   if (started) {
-    if (TaskHandle_t host = xTaskGetHandle("nimble_host")) result.hostStackFree = uxTaskGetStackHighWaterMark(host);
+    result.hostStackFree = nimble_port_freertos_get_hs_hwm();  // by handle; never xTaskGetHandle()
   }
   const uint32_t now = millis();
   if (everConnected) result.sinceConnect = static_cast<int32_t>((now - lastConnectMs) / 1000);
