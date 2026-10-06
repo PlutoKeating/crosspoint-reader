@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cstdio>
 #include <cstring>
+#include <new>
 
 namespace studio_v4 {
 namespace {
@@ -18,6 +19,7 @@ constexpr const char* ERROR_NAMES[] = {
     "transfer_timeout",
     "insufficient_storage",
     "authorization_failed",
+    "insufficient_memory",
 };
 constexpr size_t ERROR_COUNT = sizeof(ERROR_NAMES) / sizeof(ERROR_NAMES[0]);
 
@@ -111,6 +113,7 @@ bool parseDigest(const char* hex, Digest& out) {
 // ---------------------------------------------------------------------------
 
 void Assembler::reset() {
+  inflater_.reset();
   io_ = nullptr;
   phase_ = Phase::Idle;
   error_ = Error::None;
@@ -242,10 +245,12 @@ bool Assembler::finishRecord() {
 }
 
 bool Assembler::inflateRecord() {
-  // One inflater (uzlib state + 1 KB dictionary, ~2.9 KB) for the receiver:
-  // static, never on a task stack and never on the heap.
-  static FrameInflater inflater;
-  const Error error = inflater.inflate(*io_, digests_[next_]);
+  // The inflater (uzlib state + 1 KB dictionary, ~2.9 KB) lives on the heap
+  // for the frames phase only; the host has switched Wi-Fi off for the linked
+  // phone by now, so this is the easy allocation of the transfer.
+  if (!inflater_) inflater_.reset(new (std::nothrow) FrameInflater());
+  if (!inflater_) return fail(Error::InsufficientMemory);
+  const Error error = inflater_->inflate(*io_, digests_[next_]);
   if (error != Error::None) return fail(error);
   ++next_;
   return advance();

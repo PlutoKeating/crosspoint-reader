@@ -25,6 +25,7 @@
 #include <Logging.h>
 #include <Memory.h>
 #include <ProjectStickApiBackoff.h>
+#include <ProjectStickWifiPolicy.h>
 #include <SecureHttpClient.h>
 #include <StickFirmware.h>
 #include <esp_system.h>
@@ -113,6 +114,7 @@ void describeMetrics(JsonObject metrics) {
   metrics["heap_max_alloc"] = ESP.getMaxAllocHeap();
   metrics["uptime_ms"] = millis();
   metrics["wifi_rssi"] = WiFi.status() == WL_CONNECTED ? WiFi.RSSI() : 0;
+  metrics["wifi_on"] = WiFi.getMode() != WIFI_MODE_NULL ? 1 : 0;  // Wi-Fi is on demand since 2.7.2
   metrics["battery_percent"] = powerManager.getBatteryPercentage();
   // Card usage comes from the worker's idle scan (StudioFrame::refreshStorageUsage);
   // nothing here touches the FAT.
@@ -199,8 +201,7 @@ void ProjectStickService::begin() {
 #endif
   ProjectStickStateLock lock(projectStickStateMutex);
   if (!projectStickStoreInitialized) {
-    PROJECT_STICK_STORE.loadFromFile();
-    if (ensureIdentity()) PROJECT_STICK_STORE.saveToFile();
+    loadStore();
     projectStickStoreInitialized = true;
   }
   localOwner = PROJECT_STICK_STORE.ownerId;
@@ -216,6 +217,66 @@ bool ProjectStickService::ensureIdentity() {
   if (!PROJECT_STICK_STORE.deviceId.empty()) return false;
   PROJECT_STICK_STORE.deviceId = makeUuid();
   LOG_INF("STICK", "Created device identity %s", PROJECT_STICK_STORE.deviceId.c_str());
+  return true;
+}
+
+// Loads project_stick.json once at boot. Caller holds the state lock.
+//
+// Two rules keep the credential: a file that exists but cannot be read right
+// now (SD hiccup, no memory for the parse) is retried and, failing that, left
+// alone (the store refuses to save until a load succeeds), instead of being
+// replaced by defaults with a fresh identity as 2.6.x did. And the BLE
+// authority file is the second copy of who this device is: when the store
+// lost its identity or binding while ble.json still has them (the split a
+// starved-heap save produced in 2.6.x), identity and owner come back from
+// there. Only the cloud token is gone then; the phone restores it with the
+// BLE `token` op.
+void ProjectStickService::loadStore() {
+  using LoadState = PersistableStoreBase::LoadState;
+  auto& s = PROJECT_STICK_STORE;
+  bool loaded = s.loadFromFile();
+  for (int attempt = 0; !loaded && s.lastLoadState() == LoadState::Unavailable && attempt < 3; ++attempt) {
+    delay(100);
+    loaded = s.loadFromFile();
+  }
+  const bool unavailable = s.lastLoadState() == LoadState::Unavailable;
+  if (unavailable) LOG_ERR("STICK", "Device store unreadable; keeping it on the card untouched");
+  bool changed = false;
+  std::string bleIdentity, bleOwner;
+  if (studio_ble::storedAuthority(bleIdentity, bleOwner)) {
+    if (s.deviceId != bleIdentity) {
+      LOG_ERR("STICK", "Store identity %s differs from the BLE authority %s; adopting the authority",
+              s.deviceId.empty() ? "(none)" : s.deviceId.c_str(), bleIdentity.c_str());
+      s.deviceId = bleIdentity;
+      changed = true;
+    }
+    if (!s.bound || s.ownerId != bleOwner) {
+      LOG_ERR("STICK", "Store lost the binding the BLE authority holds (owner %s); restoring it", bleOwner.c_str());
+      s.bound = true;
+      s.ownerId = bleOwner;
+      changed = true;
+    }
+  }
+  if (!unavailable && (ensureIdentity() || changed)) s.saveToFile();
+  if (!s.deviceToken.empty() && !s.bound) {
+    // Not a state the code writes; a token without a binding is useless.
+    s.deviceToken.clear();
+  }
+}
+
+// Wi-Fi is on demand (ProjectStickHost brings it up for a queued cloud job):
+// a job waits for the link before its first request.
+bool ProjectStickService::awaitWifi(const char* what) {
+  const uint32_t startedMs = millis();
+  while (WiFi.status() != WL_CONNECTED) {
+    if (millis() - startedMs >= project_stick::WIFI_JOB_WAIT_MS) {
+      LOG_ERR("STICK", "%s: Wi-Fi did not come up in %u s", what, (unsigned)(project_stick::WIFI_JOB_WAIT_MS / 1000));
+      lastFailure = project_stick::NetFailure::Network;
+      lastFailureStatus = 0;
+      return false;
+    }
+    delay(200);
+  }
   return true;
 }
 
@@ -286,6 +347,10 @@ ProjectStickService::SyncReport ProjectStickService::sync() {
   inactive = false;
   if (!hasCredential()) {
     report.result = SyncResult::Unbound;
+    return report;
+  }
+  if (!awaitWifi("sync")) {
+    report.result = SyncResult::Failed;
     return report;
   }
   report.registerAttempted = true;
@@ -392,7 +457,8 @@ bool ProjectStickService::inAlertWindow() const {
 }
 
 bool ProjectStickService::pollAlerts() {
-  if (!inAlertWindow()) return false;
+  if (!inAlertWindow() || !hasCredential()) return false;
+  if (!awaitWifi("alerts")) return false;
   std::string deviceId;
   {
     ProjectStickStateLock lock(projectStickStateMutex);
@@ -816,6 +882,20 @@ std::string ProjectStickService::deviceId() const {
   return PROJECT_STICK_STORE.deviceId;
 }
 
+// The store half of a BLE bind failed to stick on the BLE side: back out, so
+// the device is not bound in the cloud while unreachable over BLE.
+void ProjectStickService::undoBleBinding() {
+  ProjectStickStateLock lock(projectStickStateMutex);
+  bleBindingGeneration.fetch_add(1);
+  auto& s = PROJECT_STICK_STORE;
+  s.bound = false;
+  s.deviceToken.clear();
+  s.ownerId.clear();
+  s.saveToFile();
+  refreshOwnership();
+  LOG_ERR("STICK", "BLE bind rolled back: the BLE credential could not be written");
+}
+
 bool ProjectStickService::applyBleBinding(const std::string& deviceToken, const std::string& owner) {
   ProjectStickStateLock lock(projectStickStateMutex);
   bleBindingGeneration.fetch_add(1);
@@ -901,6 +981,9 @@ void ProjectStickService::installFirmware(const FirmwareTarget& target) {
   HalPowerManager::Lock powerLock;
   firmware_update::begin(target.version.c_str(), target.bytes);
   auto fail = [](const char* error) { firmware_update::fail(error); };
+  // Wi-Fi is on demand: the host brings it up for this job; the image is
+  // downloaded by the device itself.
+  if (!awaitWifi("install")) return fail("download_failed");
   if (downloadFirmware(target) != DownloadResult::Complete) return fail("download_failed");
 
   firmware_update::setPhase(firmware_update::Phase::Verifying);
@@ -1021,6 +1104,10 @@ ProjectStickService::DownloadResult ProjectStickService::downloadFirmware(const 
 // binding, whatever the server answers.
 ProjectStickService::FirmwareOffer ProjectStickService::checkFirmware() {
   FirmwareOffer offer;
+  if (!awaitWifi("firmware check")) {
+    offer.failure = project_stick::NetFailure::Network;
+    return offer;
+  }
   if (baseUrl.empty()) {  // builds without a cloud (the website simulator) never ask
     offer.failure = project_stick::NetFailure::Network;
     return offer;
@@ -1198,6 +1285,7 @@ std::string ProjectStickService::phoneStateJson() {
     ProjectStickStateLock lock(projectStickStateMutex);
     const auto& s = PROJECT_STICK_STORE;
     doc["bound"] = s.bound;
+    doc["cred"] = s.deviceToken.empty() ? 0 : 1;  // 2.7.2: a bound device may lack its cloud token
     doc["trading"] = s.tradingDay;
     doc["synced"] = s.lastPhoneSyncUtc;
     doc["pending"] = s.pendingEvents.size();

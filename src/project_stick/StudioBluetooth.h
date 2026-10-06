@@ -5,6 +5,9 @@
 #include <string>
 #include <vector>
 
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
+
 // Studio BLE service, the only content channel (Project.StockStick
 // docs/product/BLE-ONLY-DELIVERY.md). Bound devices use the secret delivered
 // at bind time: protocol 4 frame/program transfers (docs/product/BLE-TRANSFER-V4.md),
@@ -29,12 +32,17 @@ bool adoptAuthority(const std::string& deviceId, const std::string& secret, uint
 bool releaseRadio();
 void restoreRadio();
 void begin();
-// Starts the transfer writer task (static stack); call once from setup().
-void startWriter();
-// Unused stack of the writer task in bytes (0 when not running).
-uint32_t writerStackFree();
+// The task that applies queued transfer work (pump()): the background sync
+// worker, which is idle while a phone is connected. Set once at boot.
+void setPumpTask(TaskHandle_t task);
+// Applies queued transfer work (start, chunks, commit, abort) on the pump
+// task; cheap when nothing is queued.
+void pump();
 void tick();
 bool connected();
+// A content transfer is receiving or being installed (ProjectStickHost keeps
+// Wi-Fi off meanwhile so the heap goes to the transfer).
+bool transferActive();
 
 // Radio state as the user sees it (Settings > Bluetooth, status tags).
 enum class Radio : uint8_t {
@@ -89,9 +97,21 @@ struct Binding {
   uint32_t epoch = 0;
 };
 bool takeBinding(Binding& out);
-// Persists the BLE credential on success; the current setup session keeps its
-// key until the phone disconnects.
-void finishBinding(bool ok, const Binding& binding);
+// Persists the BLE credential on success (atomically); the current setup
+// session keeps its key until the phone disconnects. Returns false when the
+// credential could not be written: the caller must undo the store binding.
+bool finishBinding(bool ok, const Binding& binding);
+// The persisted BLE authority (identity and owner), loading it if needed.
+// False when the device holds none (setup mode).
+bool storedAuthority(std::string& deviceId, std::string& owner);
+// Op `token` (bound mode, 2.7.2): the owner's phone hands a bound device
+// that lost its cloud token a fresh one; applied by the host, which reports
+// the outcome back.
+struct TokenRequest {
+  std::string owner, token;
+};
+bool takeTokenRequest(TokenRequest& out);
+void finishToken(bool ok);
 
 struct WifiRequest {
   std::string ssid, password;
@@ -127,4 +147,6 @@ bool takeUnbindRequest();
 enum class WifiState { Idle, Connecting, Connected, Failed };
 void reportWifi(WifiState state, const std::string& ssid, const char* error = "");
 void reportScan(bool scanning, std::vector<ble_setup::Network> networks = {});
+// STATUS `wifi.saved`: the device has at least one saved network to join on demand.
+void setWifiSaved(bool saved);
 }  // namespace studio_ble

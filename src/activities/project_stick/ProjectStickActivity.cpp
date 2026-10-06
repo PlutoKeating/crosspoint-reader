@@ -343,9 +343,13 @@ void ProjectStickActivity::renderStatusScreen() {
   renderer.clearScreen();
   const Rect headerBounds{0, metrics.topPadding, width, metrics.headerHeight};
   GUI.drawHeader(renderer, headerBounds, tr(STR_PROJECT_STICK));
+  // Wi-Fi is on demand (2.7.2): a saved network with the radio idle is the
+  // normal state, not a fault.
+  const char* wifiLabel = online                                 ? tr(STR_PROJECT_STICK_STATUS_ONLINE)
+                          : PROJECT_STICK_HOST.wifiNetworkSaved() ? tr(STR_PROJECT_STICK_STATUS_STANDBY)
+                                                                  : tr(STR_PROJECT_STICK_STATUS_OFFLINE);
   const int bluetoothInset =
-      drawStatusTag(renderer, headerBounds, metrics.contentSidePadding,
-                    online ? tr(STR_PROJECT_STICK_STATUS_ONLINE) : tr(STR_PROJECT_STICK_STATUS_OFFLINE), online);
+      drawStatusTag(renderer, headerBounds, metrics.contentSidePadding, wifiLabel, online);
   const auto radio = studio_ble::link().radio;
   drawStatusTag(renderer, headerBounds, bluetoothInset, bluetoothTagLabel(radio),
                 radio == studio_ble::Radio::Connected || radio == studio_ble::Radio::Advertising);

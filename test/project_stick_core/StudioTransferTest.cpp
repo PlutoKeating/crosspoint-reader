@@ -185,6 +185,8 @@ TEST(StudioTransfer, ProgressAndNeedEncoding) {
   EXPECT_FALSE(parseNeedHex("07", 9, parsed));     // wrong length
   EXPECT_STREQ(errorName(Error::FrameMismatch), "frame_mismatch");
   EXPECT_EQ(errorFromName("insufficient_storage"), Error::InsufficientStorage);
+  EXPECT_STREQ(errorName(Error::InsufficientMemory), "insufficient_memory");
+  EXPECT_EQ(errorFromName("insufficient_memory"), Error::InsufficientMemory);
   EXPECT_EQ(errorFromName("unknown"), Error::None);
 }
 

@@ -17,6 +17,7 @@
 #include "project_stick/ProjectStickBackgroundSync.h"
 #include "project_stick/StudioBluetooth.h"
 #include "project_stick/StudioFrame.h"
+#include "network/OtaTrial.h"
 
 ProjectStickHost& ProjectStickHost::getInstance() {
   static ProjectStickHost instance;
@@ -31,7 +32,21 @@ void ProjectStickHost::begin() {
   studio_ble::begin();
   backgroundResultSequence_ = PROJECT_STICK_BACKGROUND_SYNC.latestSequence();
   firmware_update::setExternalPower(gpio.isUsbConnected());
+  WIFI_STORE.loadFromFile();
+  refreshWifiSaved();
   begun_ = true;
+}
+
+void ProjectStickHost::holdWifi(const bool hold) {
+  wifiPageHold_ = hold;
+  if (hold) wifiAutoConnect_.retrySoon();
+}
+
+void ProjectStickHost::refreshWifiSaved() {
+  const bool saved = !WIFI_STORE.getCredentials().empty();
+  if (saved == wifiSaved_ && lastWifiSavedCheckMs_ != 0) return;
+  wifiSaved_ = saved;
+  studio_ble::setWifiSaved(saved);
 }
 
 bool ProjectStickHost::busy() const {
@@ -52,9 +67,12 @@ void ProjectStickHost::suspendWifiAutoConnect(const bool suspended) {
 // `sync`), so the heartbeat only runs when no phone has synced within the
 // heartbeat interval.
 bool ProjectStickHost::requestCloudSync(const bool manual) {
-  if (!begun_ || WiFi.status() != WL_CONNECTED || ProjectStickService::apiBlocked() || !service_.hasCredential())
+  // No "connected" check: the radio is on demand and comes up for the queued
+  // job, provided there is a network to join.
+  if (!begun_ || ProjectStickService::apiBlocked() || !service_.hasCredential()) return false;
+  if (!wifiSaved_ && WiFi.status() != WL_CONNECTED) return false;
+  if (!manual && (service_.phoneSyncFresh() || !project_stick::registrationDue(millis(), lastRegisterMs_)))
     return false;
-  if (!manual && service_.phoneSyncFresh()) return false;
   const bool queued = PROJECT_STICK_BACKGROUND_SYNC.requestSync();
   if (queued) lastSyncAttemptMs_ = millis();
   return queued;
@@ -107,8 +125,13 @@ void ProjectStickHost::tickBle(const uint32_t nowMs) {
   studio_ble::Binding binding;
   if (studio_ble::takeBinding(binding)) {
     RenderLock lock;
-    const bool ok = service_.applyBleBinding(binding.token, binding.owner);
-    studio_ble::finishBinding(ok, binding);
+    bool ok = service_.applyBleBinding(binding.token, binding.owner);
+    // All or nothing: a store that says bound while the BLE credential is
+    // missing would be unreachable over BLE after a reboot.
+    if (!studio_ble::finishBinding(ok, binding) && ok) {
+      service_.undoBleBinding();
+      ok = false;
+    }
     if (ok) {
       inactive_ = false;
       // Register with the new token once the phone lets go of the link.
@@ -116,6 +139,24 @@ void ProjectStickHost::tickBle(const uint32_t nowMs) {
       setupPayload_.clear();
     }
     lock.unlock();
+    touch();
+  }
+
+  studio_ble::TokenRequest tokenRequest;
+  if (studio_ble::takeTokenRequest(tokenRequest)) {
+    // A bound device that lost its cloud token (2.6.x) gets a fresh one from
+    // the owner's phone; the BLE authority is untouched.
+    bool ok = false;
+    {
+      RenderLock lock;
+      ok = service_.applyBleBinding(tokenRequest.token, tokenRequest.owner);
+    }
+    studio_ble::finishToken(ok);
+    if (ok) {
+      inactive_ = false;
+      syncAfterBle_ = true;
+    }
+    refreshBleState(0);
     touch();
   }
 
@@ -184,6 +225,7 @@ void ProjectStickHost::startBleWifi(const std::string& ssid, const std::string& 
     }
     WIFI_STORE.setLastConnectedSsid(ssid);
   }
+  refreshWifiSaved();
   wifiAutoConnect_.holdOff(millis(), BLE_WIFI_TIMEOUT_MS + 5000);
   WiFi.persistent(false);
   WiFi.mode(WIFI_STA);
@@ -217,6 +259,9 @@ void ProjectStickHost::pollBleWifi() {
     bleWifiActive_ = false;
     studio_ble::reportWifi(studio_ble::WifiState::Connected, bleWifiSsid_);
     wifiReportedUp_ = true;
+    // The phone polls STATUS for `connected`; keep the link up long enough.
+    wifiJoinHoldUntilMs_ = millis() + project_stick::WIFI_JOIN_HOLD_MS;
+    if (wifiJoinHoldUntilMs_ == 0) wifiJoinHoldUntilMs_ = 1;
     post(Event::WifiConnected);
     return;
   }
@@ -274,14 +319,66 @@ void ProjectStickHost::refreshBleState(uint32_t nowMs) {
   studio_ble::setState(service_.phoneStateJson());
 }
 
-// Wi-Fi comes back by itself on every page, and the cloud link follows it:
-// the register heartbeat and, in trading hours, the alert poll.
+project_stick::WifiNeeds ProjectStickHost::wifiNeeds(const uint32_t nowMs) const {
+  project_stick::WifiNeeds needs;
+  needs.phoneLinked = studio_ble::connected();
+  needs.transferActive = studio_ble::transferActive() || StudioFrame::instance().busy();
+  needs.bleJoinActive = bleWifiActive_ || bleScanActive_ || bleScanPending_;
+  needs.joinHold = wifiJoinHoldUntilMs_ != 0 && static_cast<int32_t>(wifiJoinHoldUntilMs_ - nowMs) > 0;
+  needs.pageHold = wifiPageHold_ || wifiSuspended_;
+  needs.cloudJob = PROJECT_STICK_BACKGROUND_SYNC.busy() || firmware_update::snapshot().busy();
+  needs.otaRequested = otaPending_;
+  // Cloud needs only count when there is a network to join.
+  const bool canJoin = wifiSaved_ || WiFi.status() == WL_CONNECTED;
+  needs.heartbeatDue = canJoin && service_.hasCredential() && !inactive_ && !service_.phoneSyncFresh() &&
+                       project_stick::registrationDue(nowMs, lastRegisterMs_);
+  needs.alertWindow = canJoin && service_.hasCredential() && !inactive_ && service_.inAlertWindow();
+  needs.trialPending = canJoin && (ota_trial::active() || ota_trial::hasPendingOutcome());
+  return needs;
+}
+
+// Stops the Wi-Fi driver (esp_wifi_stop + deinit: its ~50 KB of heap come
+// back), remembering that the auto-connect helper must start from scratch.
+void ProjectStickHost::powerOffWifi(const uint32_t nowMs) {
+  if (WiFi.getMode() == WIFI_MODE_NULL) return;
+  LOG_INF("WIFI", "Wi-Fi off (on demand; heap=%u)", (unsigned)ESP.getFreeHeap());
+  WiFi.disconnect(true);
+  WiFi.mode(WIFI_OFF);
+  wifiAutoConnect_.holdOff(nowMs, 0);
+  wifiReportedUp_ = false;
+  studio_ble::reportWifi(studio_ble::WifiState::Idle, "");
+  touch();
+}
+
+// Wi-Fi is on demand (BLE-first, 2.7.2): the radio comes up for cloud jobs,
+// trading-hours alerts, a trial boot, the pages that need it and a BLE Wi-Fi
+// job, and is powered down otherwise: on the C3 its driver does not fit next
+// to NimBLE and a content transfer. The cloud link follows it: the register
+// heartbeat and, in trading hours, the alert poll.
 void ProjectStickHost::tickOnline(const uint32_t nowMs) {
   const bool updating = firmware_update::snapshot().busy();
-  if (!updating && !wifiSuspended_ && wifiAutoConnect_.tick(nowMs) && !inactive_) {
-    // Came online on its own (boot, wake, OTA restart, a recovered link or a
-    // BLE Wi-Fi push). Cloud requests wait while a phone is connected over
-    // BLE: a setup session may be binding the device right now.
+  if (nowMs - lastWifiSavedCheckMs_ >= 5000 || lastWifiSavedCheckMs_ == 0) {
+    lastWifiSavedCheckMs_ = nowMs ? nowMs : 1;
+    refreshWifiSaved();
+  }
+  const auto needs = wifiNeeds(nowMs);
+  const bool wanted = project_stick::wifiWanted(needs);
+  if (wanted != wifiWantedLogged_) {
+    // Rare (state changes only); tells the serial log why the radio is up or down.
+    wifiWantedLogged_ = wanted;
+    LOG_INF("WIFI", "Wi-Fi %s (phone=%u transfer=%u join=%u hold=%u page=%u job=%u ota=%u heartbeat=%u alerts=%u trial=%u)",
+            wanted ? "wanted" : "not wanted", needs.phoneLinked, needs.transferActive, needs.bleJoinActive,
+            needs.joinHold, needs.pageHold, needs.cloudJob, needs.otaRequested, needs.heartbeatDue, needs.alertWindow,
+            needs.trialPending);
+  }
+  if (wanted) lastWifiWantedMs_ = nowMs;
+  if (!wanted) {
+    if (!wifiSuspended_ && project_stick::wifiShouldPowerOff(needs, nowMs, lastWifiWantedMs_)) powerOffWifi(nowMs);
+  } else if (!updating && !wifiSuspended_ && !bleWifiActive_ && !bleScanActive_ && wifiAutoConnect_.tick(nowMs) &&
+             !inactive_) {
+    // Came online (boot, wake, OTA restart, a recovered link or a BLE Wi-Fi
+    // push). Cloud requests wait while a phone is connected over BLE: a setup
+    // session may be binding the device right now.
     if (studio_ble::connected())
       syncAfterBle_ = true;
     else
@@ -290,7 +387,7 @@ void ProjectStickHost::tickOnline(const uint32_t nowMs) {
   }
   if (syncAfterBle_ && !studio_ble::connected()) {
     syncAfterBle_ = false;
-    if (WiFi.status() == WL_CONNECTED && !inactive_) requestCloudSync();
+    if (!inactive_) requestCloudSync();
     touch();
   }
 #ifdef SIMULATOR
@@ -303,14 +400,15 @@ void ProjectStickHost::tickOnline(const uint32_t nowMs) {
 #endif
   // Register heartbeat every 6 h (binding, owner, trading day, clock), retried
   // no faster than poll_interval_seconds. Nothing goes out while the shared
-  // API backoff holds (429 / 5xx / unreachable) or without a credential.
-  const bool cloudAllowed = !updating && !studio_ble::connected() && !inactive_ && WiFi.status() == WL_CONNECTED &&
-                            !ProjectStickService::apiBlocked() && service_.hasCredential();
+  // API backoff holds (429 / 5xx / unreachable) or without a credential; the
+  // job itself waits for the on-demand link.
+  const bool cloudAllowed =
+      !updating && !studio_ble::connected() && !inactive_ && !ProjectStickService::apiBlocked() && service_.hasCredential();
   if (cloudAllowed && project_stick::registrationDue(nowMs, lastRegisterMs_) &&
       nowMs - lastSyncAttemptMs_ >= service_.pollIntervalSeconds() * 1000UL) {
     requestCloudSync();
   }
-  if (cloudAllowed && service_.inAlertWindow() &&
+  if (cloudAllowed && (wifiSaved_ || WiFi.status() == WL_CONNECTED) && service_.inAlertWindow() &&
       nowMs - lastAlertPollMs_ >= service_.alertPollIntervalSeconds() * 1000UL) {
     if (PROJECT_STICK_BACKGROUND_SYNC.requestAlertPoll()) lastAlertPollMs_ = nowMs;
   }

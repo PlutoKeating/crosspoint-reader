@@ -45,6 +45,11 @@ std::string otaMessage(const std::string& nonce, const std::string& version, con
 std::string syncMessage(const std::string& nonce, int64_t time, int trading, size_t ackCount, bool otaAck);
 // The owner unbound the device in the mini program while standing next to it.
 std::string unbindMessage(const std::string& nonce);
+// Op `token` (2.7.2): a bound device that lost its cloud token receives a
+// fresh one; ct = seal(secret, "token3", n, device_token).
+std::string tokenMessage(const std::string& nonce, const std::string& owner, const std::string& ct);
+// A device bearer as the cloud issues it: 32..96 characters of [A-Za-z0-9_-].
+bool validDeviceToken(const std::string& token);
 
 // stockstick://setup?d=<device_id>&k=<K>; 94 characters (QR version 5-L, byte mode).
 std::string setupQrPayload(const std::string& deviceId, const std::string& keyHex);

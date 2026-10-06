@@ -3,9 +3,11 @@
 #include <ArduinoJson.h>
 #include <HalStorage.h>
 #include <Logging.h>
+#include <PersistableStore.h>
 
 #include <algorithm>
 #include <atomic>
+#include <memory>
 #include <mutex>
 
 #include "FirmwareUpdateState.h"
@@ -82,15 +84,21 @@ struct Chunk {
   uint16_t length;
   uint8_t bytes[MAX_PAYLOAD];
 };
-// 16 slots of one MTU-sized write (~8 KB static), matching the phone's 8 KB
-// window (BLE-TRANSFER-V4 §7). DATA arrives as Write Without Response, so the
-// host task never waits for a slot: a write that finds the queue full is
-// dropped and the phone resends from the last PROGRESS `received`. PROGRESS
-// notifications are held back while the queue is over half full, which is
-// what paces the phone.
-constexpr size_t QUEUE_SLOTS = 16;
-Chunk chunkQueue[QUEUE_SLOTS];
-size_t queueHead = 0, queueCount = 0;       // under `mutex`
+// Up to 16 slots of one MTU-sized write (~8 KB), matching the phone's 8 KB
+// window (BLE-TRANSFER-V4 §7). The slots are allocated when a transfer is
+// accepted (begin4) and freed when it ends, so the heap they take is only
+// taken while a phone sends (2.7.2; 2.7.0 kept them static, which with the
+// writer stack and the inflater cost 15 KB of the ~13 KB a 2.6.5 device had
+// free with Wi-Fi and BLE up). By then ProjectStickHost has switched Wi-Fi off
+// for the linked phone, so ~50 KB are free; fewer slots are accepted when the
+// heap is short. DATA arrives as Write Without Response, so the host task
+// never waits for a slot: a write that finds the queue full is dropped and the
+// phone resends from the last PROGRESS `received`. PROGRESS notifications are
+// held back while the queue is over half full, which is what paces the phone.
+constexpr size_t QUEUE_SLOTS = 16, MIN_QUEUE_SLOTS = 4;
+std::unique_ptr<Chunk> chunkQueue[QUEUE_SLOTS];  // under `mutex`
+size_t queueSlots = 0;                           // allocated slots, 0 outside a transfer
+size_t queueHead = 0, queueCount = 0;            // under `mutex`
 size_t queuedEnd = 0, announcedOffset = 0;  // bytes accepted from the phone; offset promised at `begin4`
 uint32_t sessionId = 0;                     // bumps on every resetSession; pump() drops stale results
 enum class PendingOp : uint8_t { None, Start, Commit };
@@ -120,7 +128,12 @@ bool framesPhase = false;      // header resolved: `need` is known
 std::string needValue;
 uint16_t needCount = 0;
 size_t rebuiltBytes = 0;  // bytes of the rebuilt file on the card (device progress bar)
-TaskHandle_t writerTask = nullptr;
+// The task that runs pump() (the background sync worker, idle while a phone
+// is connected); woken for every queued chunk or op.
+TaskHandle_t pumpTask = nullptr;
+void wakePump() {
+  if (pumpTask) xTaskNotifyGive(pumpTask);
+}
 // Bumped on every radio/session change the UI should repaint for.
 std::atomic<uint32_t> linkGeneration{0};
 void changed() { linkGeneration.fetch_add(1); }
@@ -141,12 +154,14 @@ std::optional<Binding> pendingBinding;
 std::optional<WifiRequest> pendingWifi;
 std::optional<OtaRequest> pendingOta;
 std::optional<SyncRequest> pendingSync;
+std::optional<TokenRequest> pendingToken;
 bool pendingUnbind = false;
 // STATE characteristic value, built on the UI loop (setState) and copied by onRead.
 std::string stateJson = "{}";
 bool scanRequested = false;
 WifiState wifiState = WifiState::Idle;
 std::string wifiSsid, wifiError, scanState = "idle";
+bool wifiSaved = false;  // at least one saved network (STATUS wifi.saved)
 std::vector<ble_setup::Network> networks;
 uint16_t connectionHandle = 0xffff;
 mbedtls_aes_context aes{};
@@ -179,11 +194,30 @@ bool equalProof(const std::string& a, const std::string& b) {
   for (size_t i = 0; i < 64; ++i) diff |= a[i] ^ b[i];
   return diff == 0;
 }
-// Caller holds `mutex`. Returns every queued chunk's slot and forgets queued ops.
+// Caller holds `mutex`. Forgets queued chunks and ops and returns the slots'
+// heap: after a drop the transfer is over or paused, and a resume starts
+// with a new begin4 that allocates again.
 void dropQueueLocked() {
   queueCount = 0;
   queueHead = 0;
   pendingOp = PendingOp::None;
+  for (auto& slot : chunkQueue) slot.reset();
+  queueSlots = 0;
+}
+// Caller holds `mutex`. Allocates the chunk slots for a transfer, as many as
+// the heap allows up to QUEUE_SLOTS; false below MIN_QUEUE_SLOTS.
+bool allocateQueueLocked() {
+  for (auto& slot : chunkQueue) slot.reset();
+  queueSlots = 0;
+  for (auto& slot : chunkQueue) {
+    slot.reset(new (std::nothrow) Chunk);
+    if (!slot) break;
+    ++queueSlots;
+  }
+  if (queueSlots >= MIN_QUEUE_SLOTS) return true;
+  for (auto& slot : chunkQueue) slot.reset();
+  queueSlots = 0;
+  return false;
 }
 // Caller holds `mutex`. pump() closes (or discards) the partial transfer.
 void requestAbortLocked(const bool discard) {
@@ -263,6 +297,7 @@ const char* wifiStateName() {
 void addWifi(JsonDocument& doc) {
   JsonObject wifi = doc["wifi"].to<JsonObject>();
   wifi["state"] = wifiStateName();
+  wifi["saved"] = wifiSaved;
   if (!wifiSsid.empty()) wifi["ssid"] = wifiSsid;
   if (!wifiError.empty()) wifi["error"] = wifiError;
   doc["scan"] = scanState;
@@ -493,6 +528,24 @@ bool handleSetupOp(const std::string& op, JsonDocument& doc) {
     pendingOta = std::move(request);
     return true;
   }
+  if (op == "token") {
+    // A bound device that lost its cloud token (2.6.x store write under a
+    // starved heap) gets a fresh one from the owner's phone; the BLE
+    // authority stays as it is.
+    if (sessionSetup) return reject("invalid_control");
+    const std::string owner = doc["owner"] | "", ct = doc["ct"] | "";
+    if (!equalProof(proof, mac(ble_setup::tokenMessage(nonce, owner, ct)))) return reject("authorization_failed");
+    std::string token;
+    // The token belongs to the owner this authority was issued for; the
+    // cloud only hands a re-claim token to that owner.
+    const bool ownerMatches = authorityOwner.empty() || owner == authorityOwner;
+    if (!validOwner(owner) || !ownerMatches || pendingToken ||
+        !ble_setup::unseal(sessionKey, "token3", nonce, ct, token) || !ble_setup::validDeviceToken(token))
+      return reject("invalid_control");
+    error.clear();
+    pendingToken = TokenRequest{owner, token};
+    return true;
+  }
   if (op == "sync") {
     if (sessionSetup) return reject("invalid_control");
     SyncRequest request;
@@ -610,11 +663,11 @@ class Callbacks final : public NimBLECharacteristicCallbacks {
             gapReported = true;
             notify = true;
           }
-        } else if (queueCount == QUEUE_SLOTS) {
+        } else if (queueCount >= queueSlots) {
           ++droppedWrites;
           progressPending = true;
         } else {
-          Chunk& slot = chunkQueue[(queueHead + queueCount) % QUEUE_SLOTS];
+          Chunk& slot = *chunkQueue[(queueHead + queueCount) % queueSlots];
           slot.offset = offset;
           slot.length = static_cast<uint16_t>(value.size() - 4);
           if (mbedtls_aes_crypt_ctr(&aes, slot.length, &counterOffset, counter, stream, bytes + 4, slot.bytes) !=
@@ -626,7 +679,7 @@ class Callbacks final : public NimBLECharacteristicCallbacks {
             queuedEnd += slot.length;
             ++packetsSinceNotify;
             if (packetsSinceNotify >= 4 || queuedEnd - lastNotified >= 4096) {
-              if (queueCount <= QUEUE_SLOTS / 2)
+              if (queueCount <= queueSlots / 2)
                 notify = true;
               else
                 progressPending = true;  // reported once the writer drains the queue
@@ -635,7 +688,7 @@ class Callbacks final : public NimBLECharacteristicCallbacks {
         }
       }
     }
-    if (writerTask) xTaskNotifyGive(writerTask);
+    wakePump();
     if (notify) notifyProgressUnguarded();
   }
   // begin4 (BLE-TRANSFER-V4 §4.2). Caller holds `mutex`. Returns whether the
@@ -686,6 +739,12 @@ class Callbacks final : public NimBLECharacteristicCallbacks {
     if (!unhex(mac("enc|" + nonce), encryptionKey, sizeof(encryptionKey)) ||
         !unhex(nonce, counter, sizeof(counter))) {
       fail("authorization_failed");
+      return true;
+    }
+    if (!completed && !allocateQueueLocked()) {
+      LOG_ERR("BLE", "No heap for the transfer queue (heap=%u max=%u)", (unsigned)ESP.getFreeHeap(),
+              (unsigned)ESP.getMaxAllocHeap());
+      fail("insufficient_memory", false);
       return true;
     }
     announcedOffset = queuedEnd = lastNotified = completed ? 0 : resume.offset;
@@ -777,7 +836,7 @@ class Callbacks final : public NimBLECharacteristicCallbacks {
       }
       handle = connectionHandle;
     }
-    if (writerTask) xTaskNotifyGive(writerTask);
+    wakePump();
     if (fast) fastLink(handle);
     if (notify) notifyProgressUnguarded();
   }
@@ -785,18 +844,32 @@ class Callbacks final : public NimBLECharacteristicCallbacks {
 ServerCallbacks serverCallbacks;
 Callbacks callbacks;
 
-void writeCredentials() {
-  Storage.mkdir("/.crosspoint/studio", true);
-  HalFile file;
-  if (Storage.openFileForWrite("STUDIO", CREDENTIALS, file)) {
-    JsonDocument doc;
-    doc["owner_id"] = authorityOwner;
-    doc["device_id"] = identity;
-    doc["secret"] = secret;
-    doc["epoch"] = epoch;
-    serializeJson(doc, file);
-    file.close();
+// Caller holds `mutex`. Atomic (tmp, verify, rotate to .bak) like the device
+// store: 2.6.5 truncated the file first and streamed into it, so a write that
+// died halfway (power, SD) left the device without its BLE authority.
+bool writeCredentials() {
+  JsonDocument doc;
+  doc["owner_id"] = authorityOwner;
+  doc["device_id"] = identity;
+  doc["secret"] = secret;
+  doc["epoch"] = epoch;
+  const bool ok = PersistableStoreBase::writeDocToFile(CREDENTIALS, doc);
+  if (!ok) LOG_ERR("BLE", "BLE credential not saved");
+  return ok;
+}
+// Caller holds `mutex`. Loads the stored authority (or its backup) when none
+// is in memory. Returns true when a valid authority is held afterwards.
+bool loadCredentialsLocked() {
+  if (!secret.empty()) return true;
+  JsonDocument doc;
+  if (PersistableStoreBase::readDocFromFile(CREDENTIALS, doc)) {
+    authorityOwner = doc["owner_id"] | "";
+    identity = doc["device_id"] | "";
+    secret = doc["secret"] | "";
+    epoch = doc["epoch"] | 0;
   }
+  uint8_t decoded[32];
+  return identity.size() == 36 && unhex(secret, decoded, 32);
 }
 bool validIdentity() { return identity.size() == 36; }
 bool validSecret() {
@@ -847,20 +920,7 @@ bool startRadioLocked() {
   {
     std::lock_guard<std::recursive_mutex> lock(mutex);
     if (started || released || !userEnabled) return true;
-    if (secret.empty()) {
-      HalFile file;
-      if (Storage.openFileForRead("STUDIO", CREDENTIALS, file)) {
-        JsonDocument doc;
-        const auto parseError = deserializeJson(doc, file);
-        file.close();
-        if (!parseError) {
-          authorityOwner = doc["owner_id"] | "";
-          identity = doc["device_id"] | "";
-          secret = doc["secret"] | "";
-          epoch = doc["epoch"] | 0;
-        }
-      }
-    }
+    loadCredentialsLocked();
     if (!validIdentity() || (!validSecret() && setupKey.empty())) return true;
     if (validSecret()) setupKey.clear();
     name = ble_setup::advertisedName(identity);
@@ -990,7 +1050,12 @@ void revoke() {
     secret.clear();
     epoch = 0;
     bindState = BindState::None;
+    // The atomic writer keeps a .bak; a revoked authority must not come back
+    // from it at the next boot (ProjectStickService::loadStore heals a store
+    // from this file).
     Storage.remove(CREDENTIALS);
+    Storage.remove((std::string(CREDENTIALS) + ".bak").c_str());
+    Storage.remove((std::string(CREDENTIALS) + ".tmp").c_str());
     stopAdvertising = started;
   }
   disconnectLocked(handle);
@@ -1026,24 +1091,10 @@ void begin() {
   std::lock_guard<std::mutex> radio(radioMutex);
   startRadioLocked();
 }
-void writerLoop(void*);
-// Created once from setup() with a static stack and TCB (like the sync
-// worker), so it exists before Wi-Fi and NimBLE allocate and can never fail.
-// 6 KB: the deepest path is a commit (StudioFrame verify with a 512-byte
-// block, program JSON parse, state write); every receiver buffer is static.
-// The high-water mark is logged after each transfer.
-void startWriter() {
-  constexpr uint32_t STACK_BYTES = 6144;
-  static StackType_t stack[STACK_BYTES];
-  static StaticTask_t taskBuffer;
-  if (writerTask) return;
-  // Priority 2: above the UI loop and the render task (1), so an e-paper
-  // refresh never stalls the chunk queue; below the NimBLE host.
-  TaskHandle_t handle = xTaskCreateStatic(&writerLoop, "StudioWriter", STACK_BYTES, nullptr, 2, stack, &taskBuffer);
+void setPumpTask(TaskHandle_t task) {
   std::lock_guard<std::recursive_mutex> lock(mutex);
-  writerTask = handle;
+  pumpTask = task;
 }
-uint32_t writerStackFree() { return writerTask ? uxTaskGetStackHighWaterMark(writerTask) : 0; }
 Link link() {
   std::lock_guard<std::recursive_mutex> lock(mutex);
   Link result;
@@ -1119,14 +1170,34 @@ void restart() {
   stopRadioLocked();
   startRadioLocked();
 }
-// Writer task: applies the transfer work the host callbacks queued, in order
-// (abort, start, chunks, commit), through the protocol 4 receiver. The SD card
-// is never touched with `mutex` held, so the callbacks keep answering the
-// phone meanwhile.
+// Runs on the background sync worker (woken by the callbacks): applies the
+// transfer work they queued, in order (abort, start, chunks, commit), through
+// the protocol 4 receiver. The SD card is never touched with `mutex` held, so
+// the callbacks keep answering the phone meanwhile.
+// While it applies transfer work the worker runs above the UI loop and the
+// render task (priority 1), as 2.7.0's writer task did, so an e-paper refresh
+// does not stall the chunk queue; cloud jobs keep the normal priority.
+class PumpPriority {
+ public:
+  void raise() {
+    if (raised) return;
+    previous = uxTaskPriorityGet(nullptr);
+    if (previous < 2) vTaskPrioritySet(nullptr, 2);
+    raised = true;
+  }
+  ~PumpPriority() {
+    if (raised && previous < 2) vTaskPrioritySet(nullptr, previous);
+  }
+
+ private:
+  UBaseType_t previous = 0;
+  bool raised = false;
+};
 void pump() {
-  static Chunk chunk;  // off the writer task's stack
+  static Chunk chunk;  // off the worker's stack
   auto& receiver = StudioReceiver::instance();
   bool notify = false, relax = false;
+  PumpPriority priority;
   for (size_t guard = 0; guard < QUEUE_SLOTS + 2; ++guard) {
     enum class Job : uint8_t { None, Abort, Start, Chunk, Commit } job = Job::None;
     std::string startTask, startHash;
@@ -1153,8 +1224,8 @@ void pump() {
         pendingOp = PendingOp::None;
       } else if (queueCount) {
         job = Job::Chunk;
-        chunk = chunkQueue[queueHead];
-        queueHead = (queueHead + 1) % QUEUE_SLOTS;
+        chunk = *chunkQueue[queueHead];
+        queueHead = (queueHead + 1) % queueSlots;
         --queueCount;
       } else if (pendingOp == PendingOp::Commit) {
         job = Job::Commit;
@@ -1162,6 +1233,7 @@ void pump() {
       }
     }
     if (job == Job::None) break;
+    priority.raise();
     if (job == Job::Abort) {
       receiver.abort(discard);
       continue;
@@ -1207,7 +1279,7 @@ void pump() {
       }
       rebuiltBytes = receiver.rebuiltBytes();
       publishNeedLocked();
-      if (progressPending && queueCount <= QUEUE_SLOTS / 2) notify = true;
+      if (progressPending && queueCount <= queueSlots / 2) notify = true;
       continue;
     }
     const bool ok = receiver.commit();
@@ -1223,19 +1295,14 @@ void pump() {
     state = "refreshing";
     resumeWaitSinceMs = 0;
     ++completedTransfers;
+    dropQueueLocked();  // the slots' heap goes back until the next begin4
     changed();
-    LOG_INF("BLE", "Transfer installed (%u bytes received, %u writes dropped, writer stack free %u)",
-            (unsigned)queuedEnd, (unsigned)droppedWrites, (unsigned)uxTaskGetStackHighWaterMark(nullptr));
+    LOG_INF("BLE", "Transfer installed (%u bytes received, %u writes dropped, heap=%u, worker stack free %u)",
+            (unsigned)queuedEnd, (unsigned)droppedWrites, (unsigned)ESP.getFreeHeap(),
+            (unsigned)uxTaskGetStackHighWaterMark(nullptr));
   }
   if (notify) notifyProgress();
   if (relax) relaxLink();
-}
-void writerLoop(void*) {
-  for (;;) {
-    // Woken by every queued chunk or op; the timeout only bounds a missed wake-up.
-    ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(200));
-    pump();
-  }
 }
 // Main loop. Applies queued transfer work, starts the radio (retrying a
 // failed start with backoff), keeps it advertising, and drops stalled
@@ -1255,7 +1322,7 @@ void tick() {
         refreshOutcomeLocked();
         notify = relax = state != "refreshing";
       }
-      notify = notify || (isConnected && progressPending && queueCount <= QUEUE_SLOTS / 2);
+      notify = notify || (isConnected && progressPending && queueCount <= queueSlots / 2);
     }
     if (notify) notifyProgress();
     if (relax) relaxLink();
@@ -1358,21 +1425,50 @@ bool takeBinding(Binding& out) {
   pendingBinding.reset();
   return true;
 }
-void finishBinding(bool ok, const Binding& binding) {
+bool finishBinding(bool ok, const Binding& binding) {
   std::lock_guard<std::recursive_mutex> lock(mutex);
   if (!ok) {
     bindState = BindState::Failed;
     error = "bind_failed";
-    return;
+    return false;
   }
   // The live setup session keeps K (sessionKey) until the phone disconnects;
   // the next connection resets into bound mode with this secret.
   authorityOwner = binding.owner;
   secret = binding.secret;
   epoch = binding.epoch;
+  if (!writeCredentials()) {
+    // All or nothing with the device store: without the file the device would
+    // be bound in the cloud and unreachable over BLE after a reboot.
+    authorityOwner.clear();
+    secret.clear();
+    epoch = 0;
+    bindState = BindState::Failed;
+    error = "bind_failed";
+    return false;
+  }
   setupKey.clear();
   bindState = BindState::Done;
-  writeCredentials();
+  return true;
+}
+bool storedAuthority(std::string& deviceId, std::string& owner) {
+  std::lock_guard<std::recursive_mutex> lock(mutex);
+  if (!loadCredentialsLocked()) return false;
+  deviceId = identity;
+  owner = authorityOwner;
+  return true;
+}
+bool takeTokenRequest(TokenRequest& out) {
+  std::lock_guard<std::recursive_mutex> lock(mutex);
+  if (!pendingToken) return false;
+  out = std::move(*pendingToken);
+  pendingToken.reset();
+  return true;
+}
+void finishToken(bool ok) {
+  std::lock_guard<std::recursive_mutex> lock(mutex);
+  if (!ok) error = "bind_failed";
+  changed();
 }
 bool takeWifiRequest(WifiRequest& out) {
   std::lock_guard<std::recursive_mutex> lock(mutex);
@@ -1423,6 +1519,14 @@ void reportScan(bool scanning, std::vector<ble_setup::Network> found) {
   scanState = scanning ? "scanning" : "done";
   if (!scanning) networks = ble_setup::normalizeNetworks(std::move(found));
 }
+void setWifiSaved(bool saved) {
+  std::lock_guard<std::recursive_mutex> lock(mutex);
+  wifiSaved = saved;
+}
+bool transferActive() {
+  std::lock_guard<std::recursive_mutex> lock(mutex);
+  return isConnected && authenticated && (state == "receiving" || state == "refreshing");
+}
 }  // namespace studio_ble
 #else
 #include <Arduino.h>
@@ -1436,8 +1540,8 @@ bool adoptAuthority(const std::string&, const std::string&, uint32_t, const std:
 bool releaseRadio() { return false; }
 void restoreRadio() {}
 void begin() {}
-void startWriter() {}
-uint32_t writerStackFree() { return 0; }
+void setPumpTask(TaskHandle_t) {}
+void pump() {}
 void tick() {}
 namespace {
 bool simEnabled = true;
@@ -1497,7 +1601,12 @@ void setup(const std::string& deviceId) {
 }
 std::string setupPayload() { return simKey.empty() ? "" : ble_setup::setupQrPayload(simIdentity, simKey); }
 bool takeBinding(Binding&) { return false; }
-void finishBinding(bool, const Binding&) {}
+bool finishBinding(bool ok, const Binding&) { return ok; }
+bool storedAuthority(std::string&, std::string&) { return false; }
+bool takeTokenRequest(TokenRequest&) { return false; }
+void finishToken(bool) {}
+void setWifiSaved(bool) {}
+bool transferActive() { return false; }
 bool takeWifiRequest(WifiRequest&) { return false; }
 bool takeScanRequest() { return false; }
 bool takeOtaRequest(OtaRequest&) { return false; }

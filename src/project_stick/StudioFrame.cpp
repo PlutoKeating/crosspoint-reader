@@ -362,12 +362,19 @@ bool StudioFrame::persist() {
   state["card"] = playback.lastCard;
   state["index"] = playback.index;
   state["manual"] = playback.manual;
+  // A document that overflowed its allocator would parse later with members
+  // missing; a short write would not parse at all. Neither replaces the state.
+  if (doc.overflowed()) return false;
+  const size_t expected = measureJson(doc);
   Storage.remove(STATE_TEMP);
   HalFile file;
   if (!Storage.openFileForWrite("STUDIO", STATE_TEMP, file)) return false;
-  const bool written = serializeJson(doc, file) > 0;
+  const bool written = serializeJson(doc, file) == expected;
   file.close();
-  if (!written) return false;
+  if (!written) {
+    Storage.remove(STATE_TEMP);
+    return false;
+  }
   Storage.remove(BACKUP);
   if (Storage.exists(STATE) && !Storage.rename(STATE, BACKUP)) return false;
   if (!Storage.rename(STATE_TEMP, STATE)) {

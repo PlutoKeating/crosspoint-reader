@@ -8,6 +8,7 @@
 
 #include <array>
 #include <cstddef>
+#include <memory>
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -49,6 +50,7 @@ enum class Error : uint8_t {
   TransferTimeout = 8,
   InsufficientStorage = 9,
   Authorization = 10,
+  InsufficientMemory = 11,  // no heap for the transfer buffers (begin4 / first record)
 };
 // STATUS `error` string for a code ("" for None) and the reverse (None for an
 // unknown name, which the PROGRESS value then reports as 0).
@@ -126,6 +128,9 @@ class Assembler {
   bool finishRecord();
   bool inflateRecord();
 
+  // Allocated for the frames phase of a transfer and released with reset():
+  // ~3 KB that only exist while a phone sends (2.7.2).
+  std::unique_ptr<class FrameInflater> inflater_;
   Io* io_ = nullptr;
   Phase phase_ = Phase::Idle;
   Error error_ = Error::None;

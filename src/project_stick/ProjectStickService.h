@@ -93,6 +93,8 @@ class ProjectStickService {
   // device token, owner and bound=true. A registration already in flight
   // with the previous identity state is discarded instead of applied.
   bool applyBleBinding(const std::string& deviceToken, const std::string& owner);
+  // Reverts applyBleBinding when the BLE credential could not be persisted.
+  void undoBleBinding();
   project_stick::ShanghaiTime now() const;
   // Copies trusted time between the system clock and the RTC (UI task only).
   void syncClock();
@@ -112,6 +114,9 @@ class ProjectStickService {
   freeink::SecureHttpClient http;
 
   bool ensureIdentity();
+  void loadStore();
+  // Waits for the on-demand Wi-Fi link before a cloud job's first request.
+  bool awaitWifi(const char* what);
   bool registerDevice(int& status);
   enum class DownloadResult : uint8_t { Complete, Retry, Fatal };
   bool validFirmwareTarget(const FirmwareTarget& target) const;

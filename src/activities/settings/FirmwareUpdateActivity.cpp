@@ -17,6 +17,7 @@
 #include "project_stick/FirmwareInstall.h"
 #include "project_stick/FirmwareUpdateState.h"
 #include "project_stick/ProjectStickBackgroundSync.h"
+#include "project_stick/ProjectStickHost.h"
 
 namespace {
 // The specific reason a check failed, with the HTTP status
@@ -65,6 +66,9 @@ const char* installFailureText(const char* error) {
 
 void FirmwareUpdateActivity::onEnter() {
   Activity::onEnter();
+  // Wi-Fi is on demand: this page brings it up while open (the check and the
+  // download run on the worker, which waits for the link).
+  PROJECT_STICK_HOST.holdWifi(true);
   backgroundSequence = PROJECT_STICK_BACKGROUND_SYNC.latestSequence();
   const auto outcome = ota_trial::pendingOutcome();
   rolledBackNotice = outcome.pending && outcome.rolledBack;
@@ -73,9 +77,16 @@ void FirmwareUpdateActivity::onEnter() {
   requestUpdate();
 }
 
+void FirmwareUpdateActivity::onExit() {
+  PROJECT_STICK_HOST.holdWifi(false);
+  Activity::onExit();
+}
+
 void FirmwareUpdateActivity::startCheck() {
   checkFailedOffline = false;
-  if (WiFi.status() != WL_CONNECTED) {
+  // A saved network is enough: the host joins it for this page and the worker
+  // waits for the link. Only a device with no network at all needs the picker.
+  if (WiFi.status() != WL_CONNECTED && !PROJECT_STICK_HOST.wifiNetworkSaved()) {
     startActivityForResult(std::make_unique<WifiSelectionActivity>(renderer, mappedInput),
                            [this](const ActivityResult& result) {
                              if (result.isCancelled || WiFi.status() != WL_CONNECTED) {

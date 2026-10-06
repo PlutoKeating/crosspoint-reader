@@ -36,6 +36,10 @@ void ProjectStickBackgroundSync::begin() {
   taskENTER_CRITICAL(&stateMux);
   taskHandle = handle;
   taskEXIT_CRITICAL(&stateMux);
+  // BLE transfer work (inflate, SD writes) runs on this task too: it is idle
+  // while a phone is connected, and its 8 KB static stack already carries
+  // TLS. 2.7.0's separate 6 KB writer task is gone (2.7.2, memory).
+  studio_ble::setPumpTask(handle);
 }
 
 bool ProjectStickBackgroundSync::requestSync() { return queue(WorkKind::Sync); }
@@ -99,7 +103,10 @@ void ProjectStickBackgroundSync::taskLoop() {
   constexpr uint32_t FIRST_HOUSEKEEPING_MS = 20UL * 1000UL, HOUSEKEEPING_MS = 10UL * 60UL * 1000UL;
   uint32_t housekeepingWaitMs = FIRST_HOUSEKEEPING_MS;
   while (true) {
-    if (ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(housekeepingWaitMs)) == 0) {
+    const bool woken = ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(housekeepingWaitMs)) != 0;
+    // Queued BLE transfer work first: the phone is waiting for PROGRESS.
+    studio_ble::pump();
+    if (!woken) {
       if (!StudioFrame::instance().busy() && !studio_ble::connected()) {
         StudioFrame::refreshStorageUsage();
         housekeepingWaitMs = HOUSEKEEPING_MS;
@@ -151,5 +158,6 @@ void ProjectStickBackgroundSync::taskLoop() {
     gate.complete();
     activeKind = WorkKind::None;
     taskEXIT_CRITICAL(&stateMux);
+    studio_ble::pump();  // chunks that queued up behind the job
   }
 }

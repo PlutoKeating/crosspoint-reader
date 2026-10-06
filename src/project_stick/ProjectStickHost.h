@@ -1,6 +1,7 @@
 #pragma once
 
 #include <ProjectStickNetPolicy.h>
+#include <ProjectStickWifiPolicy.h>
 
 #include <cstdint>
 #include <string>
@@ -47,11 +48,24 @@ class ProjectStickHost {
   EventMark lastEvent() const { return event_; }
 
   // The cloud heartbeat; skipped while a phone sync is fresh unless `manual`
-  // (the user closed the Wi-Fi screen, which is an explicit "sync now").
+  // (the user closed the Wi-Fi screen, which is an explicit "sync now"). The
+  // job waits for the on-demand Wi-Fi link itself.
   bool requestCloudSync(bool manual = false);
   void wifiRetrySoon() { wifiAutoConnect_.retrySoon(); }
   // The Wi-Fi selection screen drives the radio itself while it is open.
   void suspendWifiAutoConnect(bool suspended);
+  // Wi-Fi is on demand (2.7.2, lib/ProjectStick/ProjectStickWifiPolicy.h):
+  // pages that need the link hold it while they are open.
+  void holdWifi(bool hold);
+  // At least one network is saved: the device can join on demand (the status
+  // tag shows standby rather than offline while the radio is down).
+  bool wifiNetworkSaved() const {
+#ifdef SIMULATOR
+    return true;  // the simulator's fake network needs no credentials
+#else
+    return wifiSaved_;
+#endif
+  }
 
   // True while page-independent work is running that the device must stay
   // awake for: a phone link, a transfer, a Wi-Fi join or scan asked over BLE,
@@ -85,6 +99,9 @@ class ProjectStickHost {
   void mirrorWifiState();
   void startBleWifi(const std::string& ssid, const std::string& password);
   void pollBleWifi();
+  project_stick::WifiNeeds wifiNeeds(uint32_t nowMs) const;
+  void powerOffWifi(uint32_t nowMs);
+  void refreshWifiSaved();
   void startBleScan();
   void pollBleScan();
   // Publishes STATE; `nowMs == 0` forces a refresh.
@@ -106,6 +123,12 @@ class ProjectStickHost {
   bool bleScanActive_ = false;
   bool bleScanPending_ = false;
   bool wifiReportedUp_ = false;
+  bool wifiSaved_ = false;
+  bool wifiPageHold_ = false;
+  uint32_t wifiJoinHoldUntilMs_ = 0;  // keep the link after a BLE join so the phone reads `connected`
+  uint32_t lastWifiWantedMs_ = 0;
+  bool wifiWantedLogged_ = true;
+  uint32_t lastWifiSavedCheckMs_ = 0;
   uint32_t bleWifiStartedMs_ = 0;
   uint32_t bleScanStartedMs_ = 0;
   // A cloud sync owed once the phone lets go of the link (bind, came online).

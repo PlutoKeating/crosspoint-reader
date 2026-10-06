@@ -17,6 +17,12 @@
  * is what makes the abstraction flash-neutral.
  */
 class PersistableStoreBase {
+ public:
+  // What the last load of a file found. Unavailable means the file (or its
+  // backup) exists but could not be read right now (SD error, no memory for
+  // the parse): the data is still on the card, so nothing may overwrite it.
+  enum class LoadState : uint8_t { Unknown, Loaded, Missing, Corrupt, Unavailable };
+
  protected:
   PersistableStoreBase() = default;
   ~PersistableStoreBase() = default;
@@ -40,18 +46,27 @@ class PersistableStoreBase {
   void requestResave() { resaveRequested = true; }
 
   bool resaveRequested = false;
+  LoadState lastLoad = LoadState::Unknown;
 
  public:
   // Public so non-store JSON files (e.g. per-book bookmarks) can reuse them
   // instead of instantiating serializeJson/deserializeJson in their own TU —
   // that per-TU duplication is exactly what this class exists to prevent.
 
-  // Serializes doc and writes it to path (ensures /.crosspoint exists). Logs on failure.
+  // Serializes doc and writes it to path atomically (ensures the parent
+  // directory exists): refuses a document that overflowed its allocator,
+  // streams into path.tmp, verifies the byte count, then rotates
+  // path -> path.bak -> path. A failure leaves the previous file untouched.
+  // On a heap too small for the serialization this returns false instead of
+  // writing a shorter document (2.6.5 wrote `String`-truncated JSON over the
+  // device credential).
   static bool writeDocToFile(const char* path, const JsonDocument& doc);
 
-  // Reads path and parses it into doc. Returns false silently when the file
-  // does not exist (expected on first boot); logs on read/parse failure.
+  // Reads path (or path.bak) and parses it into doc. Returns false silently
+  // when neither exists (expected on first boot); logs on read/parse failure.
   static bool readDocFromFile(const char* path, JsonDocument& doc);
+  // Same, reporting what was found.
+  static LoadState readDocFromFileEx(const char* path, JsonDocument& doc);
 
  protected:
   /**
@@ -98,11 +113,23 @@ class PersistableStore : public PersistableStoreBase {
     return instance;
   }
 
+  // A store whose existing file could not be read (LoadState::Unavailable)
+  // never saves: the in-memory defaults would replace data that is still on
+  // the card. loadFromFile() lifts the block once it succeeds.
   bool saveToFile() const {
     std::lock_guard<std::mutex> lock(storeMutex);
+    if (lastLoad == LoadState::Unavailable) {
+      LOG_ERR("PERSIST", "Not saving %s: the existing file could not be loaded", T::getFilePath());
+      return false;
+    }
     JsonDocument doc;
     static_cast<const T*>(this)->toJson(doc);
     return writeDocToFile(T::getFilePath(), doc);
+  }
+
+  LoadState lastLoadState() const {
+    std::lock_guard<std::mutex> lock(storeMutex);
+    return lastLoad;
   }
 
   bool loadFromFile() {
@@ -112,7 +139,8 @@ class PersistableStore : public PersistableStoreBase {
       std::lock_guard<std::mutex> lock(storeMutex);
       resaveRequested = false;
       JsonDocument doc;
-      if (!readDocFromFile(T::getFilePath(), doc)) {
+      lastLoad = readDocFromFileEx(T::getFilePath(), doc);
+      if (lastLoad != LoadState::Loaded) {
         return false;
       }
       ok = static_cast<T*>(this)->fromJson(doc.as<JsonVariantConst>());

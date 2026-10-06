@@ -16,6 +16,7 @@ class FirmwareUpdateActivity final : public Activity {
       : Activity("FirmwareUpdate", renderer, mappedInput) {}
 
   void onEnter() override;
+  void onExit() override;
   void loop() override;
   void render(RenderLock&&) override;
   bool preventAutoSleep() override { return state == State::Checking || state == State::Installing; }

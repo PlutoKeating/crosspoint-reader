@@ -10,6 +10,15 @@
 void WifiAutoConnect::startAttempt(uint32_t nowMs) {
   const auto& saved = WIFI_STORE.getCredentials();
   if (saved.empty()) {
+#ifdef SIMULATOR
+    // The simulator's fake network needs no credentials; it comes back when
+    // the on-demand policy wants Wi-Fi again.
+    WiFi.mode(WIFI_STA);
+    WiFi.begin("Simulator WiFi (fake)");
+    connecting = true;
+    attemptStartedMs = nowMs;
+    return;
+#endif
     nextAttemptMs = nowMs + MAX_BACKOFF_MS;  // nothing to try until the user adds a network
     return;
   }

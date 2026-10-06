@@ -125,3 +125,26 @@ TEST(BleSetupProtocol, StatusCappedAt512Bytes) {
   const std::string huge = "{\"pad\":\"" + std::string(600, 'p') + "\"}";
   EXPECT_EQ(ble_setup::withNetworks(huge, networks), huge);
 }
+
+// Op `token` (2.7.2): the mini program's vector
+// (Project.StockStick miniprogram/tests/fixtures/ble-token-vector.json).
+TEST(BleSetupProtocol, TokenVector) {
+  const std::string secret = "00112233445566778899aabbccddeeff102132435465768798a9bacbdcedfe0f";
+  const std::string n = "5a5a0f0f1e1e2d2d3c3c4b4b5a5a6969";
+  const std::string owner = "1d0e15e3-3577-4041-bd4e-73686756fdef";
+  const std::string token = "Qm3xk8vJwz2rL0pTa9eHc4nU7bYsDgKfRiOjVlWqEzA";
+  const std::string ct =
+      "5261993bf1adb6ffa42bc300198bb1129781de7767b3484be6d19ac5b8e8591a2ea59b9daff1c81b37fe46";
+  std::string sealed;
+  ASSERT_TRUE(ble_setup::seal(secret, "token3", n, token, sealed));
+  EXPECT_EQ(sealed, ct);
+  std::string plain;
+  ASSERT_TRUE(ble_setup::unseal(secret, "token3", n, ct, plain));
+  EXPECT_EQ(plain, token);
+  EXPECT_TRUE(ble_setup::validDeviceToken(plain));
+  EXPECT_EQ(ble_setup::tokenMessage(n, owner, ct), "token3|" + n + "|" + owner + "|" + ct);
+  EXPECT_EQ(ble_setup::mac(secret, ble_setup::tokenMessage(n, owner, ct)),
+            "2f7e21a8928aa8a97162946a307b41f22957750724a78929a3bb01ab298d378c");
+  EXPECT_FALSE(ble_setup::validDeviceToken("short"));
+  EXPECT_FALSE(ble_setup::validDeviceToken(std::string(40, 'a') + "|x"));
+}

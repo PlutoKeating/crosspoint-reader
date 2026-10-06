@@ -297,7 +297,6 @@ void setup() {
   // The cloud worker (register, alerts, firmware) starts here, before Wi-Fi and
   // NimBLE take their heap; its stack is static so it always exists.
   PROJECT_STICK_BACKGROUND_SYNC.begin();
-  studio_ble::startWriter();
 
   // First serial output only here to avoid timing inconsistencies for power button press duration verification
   LOG_DBG("MAIN", "Starting CrossPoint version " CROSSPOINT_VERSION);

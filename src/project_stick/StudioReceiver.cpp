@@ -107,6 +107,9 @@ bool StudioReceiver::commit() {
   }
   closeStage();
   running = false;
+  // The digests and the inflater are only needed while receiving (2.7.2:
+  // nothing of a transfer stays on the heap once it is installed).
+  assembler.reset();
   if (!StudioFrame::instance().commit()) {
     failure = Error::FrameValidation;
     return false;

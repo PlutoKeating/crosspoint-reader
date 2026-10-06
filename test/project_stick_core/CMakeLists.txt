@@ -33,6 +33,9 @@ target_sources(ProjectStickCoreTest PRIVATE NetPolicyTest.cpp)
 # ProjectStickHost page decisions (header-only).
 target_sources(ProjectStickCoreTest PRIVATE HostPolicyTest.cpp)
 
+# Wi-Fi on demand (header-only).
+target_sources(ProjectStickCoreTest PRIVATE WifiPolicyTest.cpp)
+
 # Hot paths must not allocate (2.2.2 crash: bad_alloc in now()).
 target_sources(ProjectStickCoreTest PRIVATE AllocationFreeTest.cpp)
 

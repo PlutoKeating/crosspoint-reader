@@ -158,17 +158,23 @@ bool validAuthority(const std::string& secretHex, int64_t epoch) {
   return secretHex.size() == 64 && unhex(secretHex, decoded) && epoch > 0 && epoch <= int64_t(UINT32_MAX);
 }
 
+bool validDeviceToken(const std::string& token) {
+  return token.size() >= 32 && token.size() <= 96 &&
+         std::all_of(token.begin(), token.end(),
+                     [](unsigned char c) { return std::isalnum(c) || c == '-' || c == '_'; });
+}
+
+std::string tokenMessage(const std::string& nonce, const std::string& owner, const std::string& ct) {
+  return "token3|" + nonce + "|" + owner + "|" + ct;
+}
+
 bool splitBindPlaintext(const std::string& plaintext, std::string& token, std::string& secret) {
   const size_t bar = plaintext.rfind('|');
   if (bar == std::string::npos) return false;
   token = plaintext.substr(0, bar);
   secret = plaintext.substr(bar + 1);
   std::vector<uint8_t> decoded;
-  const bool tokenOk = token.size() >= 32 && token.size() <= 96 &&
-                       std::all_of(token.begin(), token.end(), [](unsigned char c) {
-                         return std::isalnum(c) || c == '-' || c == '_';
-                       });
-  return tokenOk && secret.size() == 64 && unhex(secret, decoded);
+  return validDeviceToken(token) && secret.size() == 64 && unhex(secret, decoded);
 }
 
 }  // namespace ble_setup
