@@ -1,4 +1,5 @@
 #include "ProjectStickBackgroundSync.h"
+#include "FrameStore.h"
 #include "StudioFrame.h"
 #include "StudioBluetooth.h"
 
@@ -115,6 +116,9 @@ void ProjectStickBackgroundSync::taskLoop() {
     studio_ble::pump();
     if (!woken) {
       if (!StudioFrame::instance().busy() && !studio_ble::connected()) {
+        // The transfer areas are created once, here (2.7.10): seconds of
+        // cluster scanning that must not run while a phone sends.
+        frame_store::prepare();
         StudioFrame::refreshStorageUsage();
         housekeepingWaitMs = HOUSEKEEPING_MS;
       } else {

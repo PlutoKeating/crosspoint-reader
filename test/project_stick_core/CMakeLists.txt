@@ -56,3 +56,5 @@ target_compile_definitions(ProjectStickCoreTest PRIVATE
 target_sources(ProjectStickCoreTest PRIVATE CardStripTest.cpp)
 # Connection-parameter tuning (2.7.10)
 target_sources(ProjectStickCoreTest PRIVATE LinkTuningTest.cpp)
+# Frame slots: index, eviction and record formats (2.7.10)
+target_sources(ProjectStickCoreTest PRIVATE ${REPO_ROOT}/lib/ProjectStick/FrameSlots.cpp FrameSlotsTest.cpp)

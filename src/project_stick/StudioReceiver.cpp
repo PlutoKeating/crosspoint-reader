@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <cstring>
 
+#include "FrameStore.h"
 #include "StudioFrame.h"
 #ifndef SIMULATOR
 #include <Arduino.h>
@@ -136,11 +137,11 @@ bool StudioReceiver::write(const uint8_t* data, size_t length) {
 
 // SSP1 header -> per-frame digests (`frames[].sha256`), filtered so only the
 // digests are kept in the JSON document.
-bool StudioReceiver::readDigests(const std::string& path, size_t fileSize, std::vector<Digest>& out,
+bool StudioReceiver::readDigests(const std::string& path, size_t start, size_t bound, std::vector<Digest>& out,
                                  size_t& headerBytes, Error& error) {
   error = Error::FrameValidation;
   HalFile file;
-  if (!Storage.openFileForRead("STUDIO", path, file)) {
+  if (!Storage.openFileForRead("STUDIO", path, file) || !file.seek(start)) {
     error = Error::StorageFailure;
     return false;
   }
@@ -148,7 +149,7 @@ bool StudioReceiver::readDigests(const std::string& path, size_t fileSize, std::
   if (file.read(prefix, 8) != 8 || memcmp(prefix, "SSP1", 4) != 0) return false;
   const size_t length =
       size_t(prefix[4]) | size_t(prefix[5]) << 8 | size_t(prefix[6]) << 16 | size_t(prefix[7]) << 24;
-  if (length == 0 || length > MAX_HEADER_JSON || 8 + length > fileSize) return false;
+  if (length == 0 || length > MAX_HEADER_JSON || 8 + length > bound) return false;
   if (!heapAllows(length)) {
     error = Error::DeviceBusy;
     return false;
@@ -190,19 +191,20 @@ bool StudioReceiver::readDigests(const std::string& path, size_t fileSize, std::
 
 bool StudioReceiver::resolve(std::vector<Digest>& frames, std::vector<bool>& have, Error& error) {
   std::vector<Digest> local;
+  auto& frame = StudioFrame::instance();
   if (header == 0) {
     Digest single{};
     studio_v4::parseDigest(hash.c_str(), single);
     local.assign(1, single);
     frames.clear();
   } else {
-    auto& frame = StudioFrame::instance();
-    if (!frame.flushOutput()) {
+    std::string path;
+    size_t start = 0, headerBytes = 0;
+    if (!frame.incomingHeader(path, start)) {
       error = Error::StorageFailure;
       return false;
     }
-    size_t headerBytes = 0;
-    if (!readDigests(TEMP, size, local, headerBytes, error)) return false;
+    if (!readDigests(path, start, size, local, headerBytes, error)) return false;
     if (headerBytes != header) {
       error = Error::FrameValidation;
       return false;
@@ -212,9 +214,22 @@ bool StudioReceiver::resolve(std::vector<Digest>& frames, std::vector<bool>& hav
   have.assign(local.size(), false);
   sources.assign(local.size(), Source{});
   sourcePaths.clear();
-  // Look the digests up in every kept file; the first holder wins.
-  for (const auto& kept : StudioFrame::instance().keptFiles()) {
-    const std::string path = StudioFrame::fileFor(kept.hash);
+  // Frames already in a slot (2.7.10): the new program references them.
+  size_t inSlots = 0;
+  if (frame.slotsActive()) {
+    for (size_t i = 0; i < local.size(); ++i) {
+      const uint16_t slot = frame.findSlot(local[i]);
+      if (slot == frame_slots::NO_SLOT) continue;
+      have[i] = true;
+      sources[i].slot = slot;
+      ++inSlots;
+    }
+  }
+  // Then every kept program or frame: a 2.7.9 whole file (copied once into a
+  // slot, or into incoming.bin), or a record whose frames a whole-file
+  // transfer copies from the slot area. The first holder wins.
+  for (const auto& kept : frame.keptFiles()) {
+    if (std::find(have.begin(), have.end(), false) == have.end()) break;
     std::vector<Digest> held;
     size_t keptHeader = 0;
     if (kept.size == FRAME_BYTES) {
@@ -222,31 +237,42 @@ bool StudioReceiver::resolve(std::vector<Digest>& frames, std::vector<bool>& hav
       if (!studio_v4::parseDigest(kept.hash.c_str(), d)) continue;
       held.assign(1, d);
     } else {
+      std::string path;
+      size_t start = 0;
       Error ignored = Error::None;
-      if (!readDigests(path, kept.size, held, keptHeader, ignored) ||
+      if (!frame_store::headerOf(kept.hash, kept.size, path, start) ||
+          !readDigests(path, start, kept.size, held, keptHeader, ignored) ||
           keptHeader + held.size() * FRAME_BYTES != kept.size)
         continue;
     }
-    bool used = false;
     for (size_t i = 0; i < local.size(); ++i) {
       if (have[i]) continue;
       for (size_t j = 0; j < held.size(); ++j) {
         if (memcmp(held[j].data(), local[i].data(), 32) != 0) continue;
+        std::string path;
+        size_t at = 0;
+        if (!frame_store::locate(kept.hash, kept.size, keptHeader + j * FRAME_BYTES, path, at)) break;
+        auto known = std::find(sourcePaths.begin(), sourcePaths.end(), path);
+        if (known == sourcePaths.end()) {
+          if (sourcePaths.size() >= 255) break;
+          sourcePaths.push_back(path);
+          known = sourcePaths.end() - 1;
+        }
         have[i] = true;
-        sources[i] = {static_cast<uint8_t>(sourcePaths.size()), static_cast<uint32_t>(keptHeader + j * FRAME_BYTES)};
-        used = true;
+        sources[i] = {static_cast<uint8_t>(known - sourcePaths.begin()), static_cast<uint32_t>(at)};
         break;
       }
     }
-    if (used) sourcePaths.push_back(path);
   }
-  LOG_INF("STUDIO", "Resolved %u frames, %u held locally", (unsigned)local.size(),
-          (unsigned)std::count(have.begin(), have.end(), true));
+  LOG_INF("STUDIO", "Resolved %u frames, %u held locally (%u in slots)", (unsigned)local.size(),
+          (unsigned)std::count(have.begin(), have.end(), true), (unsigned)inSlots);
   return true;
 }
 
 bool StudioReceiver::copyFrame(size_t index) {
-  if (index >= sources.size() || sources[index].file >= sourcePaths.size()) return false;
+  if (index >= sources.size()) return false;
+  if (sources[index].slot != frame_slots::NO_SLOT) return StudioFrame::instance().appendSlot(sources[index].slot);
+  if (sources[index].file >= sourcePaths.size()) return false;
   HalFile file;
   if (!Storage.openFileForRead("STUDIO", sourcePaths[sources[index].file], file) ||
       !file.seek(sources[index].offset))

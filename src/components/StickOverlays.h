@@ -72,6 +72,7 @@ enum class Notice : uint8_t {
   WifiConnected,
   WifiFailed,
   WifiScanning,
+  PreparingStorage,  // the transfer areas are being created (once per card)
 };
 constexpr uint32_t NOTICE_FRAME_MS = 1200;
 // True for notices that describe work in progress (and therefore animate).

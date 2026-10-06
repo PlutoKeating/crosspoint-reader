@@ -16,6 +16,7 @@
 #include "components/UITheme.h"
 #include "fontIds.h"
 #include "project_stick/FirmwareUpdateState.h"
+#include "project_stick/FrameStore.h"
 #include "project_stick/ProjectStickBackgroundSync.h"
 #include "project_stick/StudioBluetooth.h"
 #include "project_stick/StudioFrame.h"
@@ -197,6 +198,8 @@ void ProjectStickActivity::updateNotice(const uint32_t nowMs) {
     next = Notice::Refreshing;
   } else if (link.resuming) {
     next = Notice::Resuming;
+  } else if (frame_store::preparing()) {
+    next = Notice::PreparingStorage;
   } else if (PROJECT_STICK_HOST.wifiJoinActive()) {
     next = Notice::WifiConnecting;
   } else if (PROJECT_STICK_HOST.wifiScanActive()) {

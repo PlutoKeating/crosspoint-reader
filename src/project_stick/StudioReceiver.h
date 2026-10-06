@@ -58,7 +58,9 @@ class StudioReceiver final : public studio_v4::Io {
 
  private:
   StudioReceiver() = default;
-  bool readDigests(const std::string& path, size_t fileSize, std::vector<studio_v4::Digest>& out,
+  // The frame digests of the SSP1 header at `start` of `path`; `bound`: the
+  // content size the header must fit in.
+  bool readDigests(const std::string& path, size_t start, size_t bound, std::vector<studio_v4::Digest>& out,
                    size_t& headerBytes, studio_v4::Error& error);
   void closeStage();
 
@@ -67,10 +69,12 @@ class StudioReceiver final : public studio_v4::Io {
   bool running = false;
   std::string hash;
   size_t header = 0, size = 0;
-  // Where each held frame of the incoming program lives.
+  // Where each held frame of the incoming program lives: a frame slot the new
+  // program references (2.7.10), or a file range to copy from.
   struct Source {
     uint8_t file = 0;
     uint32_t offset = 0;
+    uint16_t slot = 0xffff;
   };
   std::vector<std::string> sourcePaths;
   std::vector<Source> sources;

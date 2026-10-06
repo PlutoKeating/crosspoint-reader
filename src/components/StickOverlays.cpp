@@ -239,6 +239,7 @@ bool noticeBusy(const Notice notice) {
     case Notice::Syncing:
     case Notice::WifiConnecting:
     case Notice::WifiScanning:
+    case Notice::PreparingStorage:
       return true;
     default:
       return false;
@@ -289,6 +290,9 @@ void drawNotice(const GfxRenderer& renderer, const Notice notice, const int perc
       break;
     case Notice::WifiScanning:
       text = tr(STR_LINK_WIFI_SCANNING);
+      break;
+    case Notice::PreparingStorage:
+      text = tr(STR_LINK_PREPARING_STORAGE);
       break;
     case Notice::None:
       return;

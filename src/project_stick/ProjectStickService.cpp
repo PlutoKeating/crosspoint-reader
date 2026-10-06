@@ -5,6 +5,7 @@
 #include "FirmwareInstall.h"
 #include "FirmwareReceiver.h"
 #include "FirmwareUpdateState.h"
+#include "FrameStore.h"
 #include "StudioBluetooth.h"
 #include "StudioFrame.h"
 #include "StudioReceiver.h"
@@ -279,9 +280,21 @@ void ProjectStickService::begin() {
   localOwner = PROJECT_STICK_STORE.ownerId;
   StudioFrame::instance().load();
 #ifdef SIMULATOR
+  // The device creates its transfer areas at the first idle housekeeping; the
+  // simulator does it before the test imports (STICK_SIM_NO_AREAS: the
+  // whole-file path a card without room for the areas takes).
+  if (!std::getenv("STICK_SIM_NO_AREAS")) frame_store::prepare();
+  const SimIoStats before = simIoStats();
   importSimulatorProgram();
   importSimulatorStream();
   importSimulatorFirmware();
+  const SimIoStats after = simIoStats();
+  LOG_INF("STICK", "SD ops for the imports: open %lu read %lu (%llu B) write %lu (%llu B, %llu sectors) seek %lu "
+          "rename %lu remove %lu list %lu",
+          after.opens - before.opens, after.reads - before.reads, after.readBytes - before.readBytes,
+          after.writes - before.writes, after.writeBytes - before.writeBytes, after.writeSectors - before.writeSectors,
+          after.seeks - before.seeks, after.renames - before.renames, after.removes - before.removes,
+          after.lists - before.lists);
 #endif
   currentDisplay.alertUntil = PROJECT_STICK_STORE.alertUntil;
 }

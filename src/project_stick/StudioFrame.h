@@ -4,12 +4,17 @@
 #include <StudioProgram.h>
 #include <mbedtls/sha256.h>
 
+#include <array>
 #include <atomic>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <vector>
 
 class GfxRenderer;
+namespace frame_store {
+class Incoming;
+}
 
 // A bounded stream of a frame or SSP1 program delivered over BLE (the only
 // content channel). Rendering never reflows the content.
@@ -63,9 +68,15 @@ class StudioFrame {
   static bool storageUsage(uint64_t& total, uint64_t& used);
   static void refreshStorageUsage();
   size_t received() const;
-  // Makes appended bytes readable through a second handle (the receiver reads
-  // the SSP1 header back to resolve its frames).
-  bool flushOutput();
+  // Where the received SSP1 header can be read back (the receiver resolves
+  // its frames from it); flushes the writes first.
+  bool incomingHeader(std::string& path, size_t& start);
+  // Frame slots (2.7.10), while a transfer writes to them: the slot holding a
+  // frame with this digest (0xffff: none), and referencing that slot as the
+  // next frame instead of receiving or copying it.
+  bool slotsActive() const;
+  uint16_t findSlot(const std::array<uint8_t, 32>& digest) const;
+  bool appendSlot(uint16_t slot);
   // Program and frame files the device keeps (active, saved program, last
   // visual and the backup state's): the protocol 4 receiver copies frames it
   // already holds from these instead of receiving them again.
@@ -97,8 +108,12 @@ class StudioFrame {
   bool alertDisplayed = false;
   bool readProgram(const Snapshot& snapshot, studio::Program& result, size_t& start);
   // The file and offset of the frame render()/stream() show; false: none.
-  bool visualSource(std::string& path, size_t& size, size_t& start) const;
-  HalFile output;
+  bool visualSource(std::string& path, size_t& start) const;
+  HalFile output;  // incoming.bin (whole-file transfers)
+  std::unique_ptr<frame_store::Incoming> slotsIn;  // a transfer into frame slots
+  void closeIncomingLocked();
+  // Content the card must keep (and whose frame slots stay pinned).
+  std::vector<std::string> keepListLocked() const;
   mbedtls_sha256_context sha{};
   size_t offset = 0;
   // The partial transfer on the card (incoming.json + incoming.bin), mirrored
