@@ -89,6 +89,20 @@ void HalDisplay::deepSleep() { einkDisplay.deepSleep(); }
 
 uint8_t* HalDisplay::getFrameBuffer() const { return einkDisplay.getFrameBuffer(); }
 
+void HalDisplay::releaseFrameBuffer() { einkDisplay.releaseBuffers(); }
+
+bool HalDisplay::reallocFrameBuffer() { return einkDisplay.reallocBuffers(); }
+
+bool HalDisplay::supportsStripDisplay() const { return einkDisplay.supportsStripDisplay(); }
+
+bool HalDisplay::displayStrips(StripFill fill, void* ctx, uint8_t* buffer, uint16_t stripCols, RefreshMode mode) {
+  if (!supportsStripDisplay()) return false;
+  if (gpio.deviceIsX3() && mode == RefreshMode::HALF_REFRESH) {
+    einkDisplay.requestResync(1);
+  }
+  return einkDisplay.displayStrips(fill, ctx, buffer, stripCols, convertRefreshMode(mode));
+}
+
 uint8_t* HalDisplay::lendFrameBufferStorage(uint32_t* sizeOut) { return einkDisplay.lendBuildStorage(sizeOut); }
 
 void HalDisplay::returnFrameBufferStorage() { einkDisplay.returnBuildStorage(); }

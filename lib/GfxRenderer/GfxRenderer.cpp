@@ -130,6 +130,30 @@ void GfxRenderer::begin() {
   bwBufferChunks.assign((frameBufferSize + BW_BUFFER_CHUNK_SIZE - 1) / BW_BUFFER_CHUNK_SIZE, nullptr);
 }
 
+void GfxRenderer::releaseFrameBuffer() {
+  if (!frameBuffer) return;
+  freeBwBufferChunks();
+  display.releaseFrameBuffer();
+  frameBuffer = nullptr;
+}
+
+bool GfxRenderer::ensureFrameBuffer() {
+  if (frameBuffer) return true;
+  if (!display.reallocFrameBuffer()) {
+    LOG_ERR("GFX", "No %lu B block for the framebuffer", static_cast<unsigned long>(frameBufferSize));
+    return false;
+  }
+  frameBuffer = display.getFrameBuffer();
+  return frameBuffer != nullptr;
+}
+
+bool GfxRenderer::displayStrips(HalDisplay::StripFill fill, void* ctx, uint8_t* buffer, uint16_t stripCols,
+                                HalDisplay::RefreshMode mode) const {
+  return display.displayStrips(fill, ctx, buffer, stripCols, mode);
+}
+
+bool GfxRenderer::supportsStripDisplay() const { return display.supportsStripDisplay(); }
+
 void GfxRenderer::releaseFrameBufferForBuild() {
   // Lend the framebuffer's bytes IN PLACE: the allocation is never freed, so
   // it cannot move and repeated loans cannot fragment the heap (the previous
@@ -505,16 +529,21 @@ void GfxRenderer::drawPixel(const int x, const int y, const bool state) const {
   // current band. Single predictable branch on the hot per-pixel path.
   uint8_t* target = frameBuffer;
   uint32_t rowY = static_cast<uint32_t>(phyY);
+  uint32_t stride = panelWidthBytes;
+  int col = phyX;
   if (_stripActive) {
-    if (phyY < _stripY0 || phyY >= _stripY0 + _stripRows) {
-      return;  // pixel outside the band currently being rendered
+    if (phyY < _stripY0 || phyY >= _stripY0 + _stripRows || phyX < _stripX0 || phyX >= _stripX0 + _stripCols) {
+      return;  // pixel outside the strip currently being rendered
     }
     target = _stripBuf;
     rowY = static_cast<uint32_t>(phyY - _stripY0);
+    stride = _stripStride;
+    col = phyX - _stripX0;
   }
+  if (!target) return;  // framebuffer released while a streamed frame is shown
 
-  // Calculate byte position and bit position
-  const uint32_t byteIndex = rowY * panelWidthBytes + (phyX / 8);
+  // Calculate byte position and bit position (strip origins are byte-aligned)
+  const uint32_t byteIndex = rowY * stride + (col / 8);
   const uint8_t bitPosition = 7 - (phyX % 8);  // MSB first
 
   if (state) {
@@ -911,18 +940,25 @@ void GfxRenderer::fillRectImpl(const int x, const int y, const int width, const 
   rotateCoordinates(orientation, lx0, ly0, &paX, &paY, panelWidth, panelHeight);
   rotateCoordinates(orientation, lx1 - 1, ly1 - 1, &pbX, &pbY, panelWidth, panelHeight);
 
-  const int phyX0 = std::min(paX, pbX);
-  const int phyX1 = std::max(paX, pbX);  // inclusive
+  int phyX0 = std::min(paX, pbX);
+  int phyX1 = std::max(paX, pbX);  // inclusive
   int phyY0 = std::min(paY, pbY);
   int phyY1 = std::max(paY, pbY);
 
-  // Strip mode: clip Y range to the active band and redirect writes.
+  // Strip mode: clip to the active strip and redirect writes.
   uint8_t* target = getWriteTarget();
+  if (!target) return;  // framebuffer released while a streamed frame is shown
   const int originY = getWriteOriginY();
   const int writeRows = getWriteRows();
+  const int originX = _stripActive ? _stripX0 : 0;
+  const int writeCols = _stripActive ? _stripCols : panelWidth;
   phyY0 = std::max(phyY0, originY);
   phyY1 = std::min(phyY1, originY + writeRows - 1);
-  if (phyY0 > phyY1) return;
+  phyX0 = std::max(phyX0, originX);
+  phyX1 = std::min(phyX1, originX + writeCols - 1);
+  if (phyY0 > phyY1 || phyX0 > phyX1) return;
+  // Row pointers below index absolute byte columns; shift them to the strip.
+  target -= originX >> 3;
 
   // Bit/byte layout: MSB-first within a byte, so phyX → bit (7 - (phyX & 7)).
   // Head and tail masks cover only the in-rect bits of the first/last byte.
@@ -930,7 +966,7 @@ void GfxRenderer::fillRectImpl(const int x, const int y, const int width, const 
   const int byteEnd = phyX1 >> 3;  // inclusive
   const uint8_t headMask = static_cast<uint8_t>(0xFFu >> (phyX0 & 7));
   const uint8_t tailMask = static_cast<uint8_t>(0xFFu << (7 - (phyX1 & 7)));
-  const int32_t panelStride = static_cast<int32_t>(panelWidthBytes);
+  const int32_t panelStride = static_cast<int32_t>(_stripActive ? _stripStride : panelWidthBytes);
 
   if constexpr (C == Color::Black || C == Color::White) {
     // Solid fill. Framebuffer: 0 = black, 1 = white.
@@ -1226,6 +1262,7 @@ void GfxRenderer::drawImage(const uint8_t bitmap[], const int x, const int y, co
       break;
   }
   // TODO: Rotate bits
+  if (!frameBuffer) return;
   display.drawImage(bitmap, rotatedX, rotatedY, width, height);
 }
 
@@ -1316,9 +1353,10 @@ void GfxRenderer::clearScreen(const uint8_t color) const {
   start_ms = millis();
   if (_stripActive) {
     // Clear only the active band's scratch, not the shared framebuffer.
-    memset(_stripBuf, color, static_cast<size_t>(panelWidthBytes) * _stripRows);
+    memset(_stripBuf, color, static_cast<size_t>(_stripStride) * _stripRows);
     return;
   }
+  if (!frameBuffer) return;
   display.clearScreen(color);
 }
 
@@ -1330,6 +1368,21 @@ void GfxRenderer::beginStripTarget(uint8_t* scratch, int stripY0, int stripRows)
   _stripBuf = scratch;
   _stripY0 = stripY0;
   _stripRows = stripRows;
+  _stripX0 = 0;
+  _stripCols = panelWidth;
+  _stripStride = panelWidthBytes;
+  _stripActive = true;
+}
+
+void GfxRenderer::beginColumnStripTarget(uint8_t* scratch, int stripX0, int stripCols) const {
+  assert(scratch != nullptr && stripCols > 0 && (stripX0 & 7) == 0 && (stripCols & 7) == 0 &&
+         stripX0 <= static_cast<int>(panelWidth) - stripCols);
+  _stripBuf = scratch;
+  _stripY0 = 0;
+  _stripRows = panelHeight;
+  _stripX0 = stripX0;
+  _stripCols = stripCols;
+  _stripStride = static_cast<uint16_t>(stripCols / 8);
   _stripActive = true;
 }
 
@@ -1338,6 +1391,9 @@ void GfxRenderer::endStripTarget() const {
   _stripBuf = nullptr;
   _stripY0 = 0;
   _stripRows = 0;
+  _stripX0 = 0;
+  _stripCols = 0;
+  _stripStride = 0;
 }
 
 bool GfxRenderer::glyphIntersectsStrip(int x0, int y0, int x1, int y1) const {
@@ -1352,10 +1408,13 @@ bool GfxRenderer::glyphIntersectsStrip(int x0, int y0, int x1, int y1) const {
   rotateCoordinates(orientation, x1, y1, &bx, &by, panelWidth, panelHeight);
   const int minY = ay < by ? ay : by;
   const int maxY = ay > by ? ay : by;
-  return !(maxY < _stripY0 || minY >= _stripY0 + _stripRows);
+  const int minX = ax < bx ? ax : bx;
+  const int maxX = ax > bx ? ax : bx;
+  return !(maxY < _stripY0 || minY >= _stripY0 + _stripRows || maxX < _stripX0 || minX >= _stripX0 + _stripCols);
 }
 
 void GfxRenderer::invertScreen() const {
+  if (!frameBuffer) return;
   for (uint32_t i = 0; i < frameBufferSize; i++) {
     frameBuffer[i] = ~frameBuffer[i];
   }
@@ -1367,6 +1426,7 @@ void GfxRenderer::displayBuffer(const HalDisplay::RefreshMode refreshMode) const
     deferredRefreshMode_ = refreshMode;
     return;
   }
+  if (!frameBuffer) return;  // a streamed frame is on the panel; nothing to show
   auto elapsed = millis() - start_ms;
   LOG_DBG("GFX", "Time = %lu ms from clearScreen to displayBuffer", elapsed);
   display.displayBuffer(refreshMode);
@@ -1378,6 +1438,7 @@ void GfxRenderer::displayBufferAsync(const HalDisplay::RefreshMode refreshMode) 
     deferredRefreshMode_ = refreshMode;
     return;
   }
+  if (!frameBuffer) return;
   display.displayBufferAsync(refreshMode);
 }
 
@@ -1386,7 +1447,7 @@ void GfxRenderer::waitRefreshComplete() const { display.waitRefreshComplete(); }
 bool GfxRenderer::supportsAsyncRefresh() const { return display.supportsAsyncRefresh(); }
 
 size_t GfxRenderer::readFramebufferRegion(int x, int y, int w, int h, uint8_t* dst, size_t dstCapacity) const {
-  if (dst == nullptr || w <= 0 || h <= 0) return 0;
+  if (dst == nullptr || frameBuffer == nullptr || w <= 0 || h <= 0) return 0;
 
   const AlignedMemRect mem = screenRectToAlignedMemRect(orientation, x, y, w, h, panelWidth, panelHeight);
   if (!mem.valid) return 0;
@@ -1404,7 +1465,7 @@ size_t GfxRenderer::readFramebufferRegion(int x, int y, int w, int h, uint8_t* d
 }
 
 void GfxRenderer::writeFramebufferRegion(int x, int y, int w, int h, const uint8_t* src) {
-  if (src == nullptr || w <= 0 || h <= 0) return;
+  if (src == nullptr || frameBuffer == nullptr || w <= 0 || h <= 0) return;
 
   const AlignedMemRect mem = screenRectToAlignedMemRect(orientation, x, y, w, h, panelWidth, panelHeight);
   if (!mem.valid) return;
@@ -1918,6 +1979,7 @@ size_t GfxRenderer::getBufferSize() const { return frameBufferSize; }
 // void GfxRenderer::grayscaleRevert() const { display.grayscaleRevert(); }
 
 void GfxRenderer::displayGrayscaleBase(HalDisplay::RefreshMode fallback) const {
+  if (!frameBuffer) return;
   display.displayGrayscaleBase(fallback);
 }
 
@@ -1971,6 +2033,7 @@ void GfxRenderer::freeBwBufferChunks() {
  * Returns true if buffer was stored successfully, false if allocation failed.
  */
 bool GfxRenderer::storeBwBuffer() {
+  if (!frameBuffer) return false;
   // Allocate and copy each chunk
   for (size_t i = 0; i < bwBufferChunks.size(); i++) {
     // Check if any chunks are already allocated

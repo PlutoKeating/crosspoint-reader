@@ -73,6 +73,12 @@ class GfxRenderer {
   mutable int _stripY0 = 0;
   mutable int _stripRows = 0;
   mutable bool _stripActive = false;
+  // Column strips (beginColumnStripTarget) also clip X: the strip holds
+  // physical columns [_stripX0, _stripX0 + _stripCols) of every row, _stripStride
+  // bytes per row. Row bands use the full width.
+  mutable int _stripX0 = 0;
+  mutable int _stripCols = 0;
+  mutable uint16_t _stripStride = 0;
   // See deferDisplay().
   mutable bool displayDeferred_ = false;
   mutable bool deferredDisplayRequested_ = false;
@@ -210,6 +216,10 @@ class GfxRenderer {
   // after the orientation rotate, so it is orientation-agnostic. Used to render
   // grayscale planes band-by-band without a full second buffer.
   void beginStripTarget(uint8_t* scratch, int stripY0, int stripRows) const;
+  // Same, for a strip of physical columns [stripX0, stripX0 + stripCols)
+  // across every panel row (both multiples of 8; stripCols / 8 bytes per row):
+  // the unit displayStrips() streams.
+  void beginColumnStripTarget(uint8_t* scratch, int stripX0, int stripCols) const;
   void endStripTarget() const;
 
   // Band culling for tiled grayscale. Takes a glyph bounding box in logical
@@ -334,6 +344,15 @@ class GfxRenderer {
   void releaseFrameBufferForBuild();
   bool restoreFrameBufferAfterBuild();
   bool hasFrameBuffer() const { return frameBuffer != nullptr; }
+  // While the panel shows a streamed frame (displayStrips) the framebuffer is
+  // freed (~52 KB on X3). Drawing calls are no-ops without one;
+  // ensureFrameBuffer() brings it back white and returns false when the heap
+  // has no block that large.
+  void releaseFrameBuffer();
+  bool ensureFrameBuffer();
+  bool supportsStripDisplay() const;
+  bool displayStrips(HalDisplay::StripFill fill, void* ctx, uint8_t* buffer, uint16_t stripCols,
+                     HalDisplay::RefreshMode mode = HalDisplay::FAST_REFRESH) const;
 
   // RAII form of the loan above, for blocking build regions with early-return
   // error paths: restores on scope exit (or explicitly via end()). Display the

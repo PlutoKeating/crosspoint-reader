@@ -58,6 +58,21 @@ class HalDisplay {
   // Access to frame buffer
   uint8_t* getFrameBuffer() const;
 
+  // Frees the framebuffer while the panel shows a streamed frame (see
+  // displayStrips); reallocFrameBuffer() brings it back white. Returns false
+  // when the heap has no block that large.
+  void releaseFrameBuffer();
+  bool reallocFrameBuffer();
+
+  // Framebuffer-free refresh: `fill` produces the frame one strip of physical
+  // columns at a time (see StripSource in the FreeInk SDK). Same refresh-mode
+  // handling as displayBuffer(). False without drawing when the panel cannot
+  // stream; false after drawing when a strip failed.
+  using StripFill = bool (*)(uint8_t* strip, uint16_t x0, uint16_t cols, void* ctx);
+  bool supportsStripDisplay() const;
+  bool displayStrips(StripFill fill, void* ctx, uint8_t* buffer, uint16_t stripCols,
+                     RefreshMode mode = RefreshMode::FAST_REFRESH);
+
   // Lend the framebuffer's ~48 KB STORAGE to a memory-hungry phase (chapter
   // builds) without freeing it: the allocation never moves, so repeated loans
   // cannot fragment the heap (free+realloc measurably did). No display calls
