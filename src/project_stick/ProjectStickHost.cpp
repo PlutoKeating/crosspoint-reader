@@ -319,6 +319,15 @@ void ProjectStickHost::refreshBleState(uint32_t nowMs) {
   studio_ble::setState(service_.phoneStateJson());
 }
 
+bool ProjectStickHost::backgroundJobDeferred() const {
+  project_stick::PhoneLinkInputs in;
+  in.phoneLinked = studio_ble::connected();
+  in.transferActive = studio_ble::transferActive() || StudioFrame::instance().busy();
+  in.linkedForMs = studio_ble::linkedForMs();
+  in.idleForMs = studio_ble::idleForMs();
+  return project_stick::phoneLinkAction(in) == project_stick::PhoneLinkAction::Defer;
+}
+
 project_stick::WifiNeeds ProjectStickHost::wifiNeeds(const uint32_t nowMs) const {
   project_stick::WifiNeeds needs;
   needs.phoneLinked = studio_ble::connected();
@@ -379,13 +388,13 @@ void ProjectStickHost::tickOnline(const uint32_t nowMs) {
     // Came online (boot, wake, OTA restart, a recovered link or a BLE Wi-Fi
     // push). Cloud requests wait while a phone is connected over BLE: a setup
     // session may be binding the device right now.
-    if (studio_ble::connected())
+    if (backgroundJobDeferred())
       syncAfterBle_ = true;
     else
       requestCloudSync();
     touch();
   }
-  if (syncAfterBle_ && !studio_ble::connected()) {
+  if (syncAfterBle_ && !backgroundJobDeferred()) {
     syncAfterBle_ = false;
     if (!inactive_) requestCloudSync();
     touch();
@@ -402,8 +411,13 @@ void ProjectStickHost::tickOnline(const uint32_t nowMs) {
   // no faster than poll_interval_seconds. Nothing goes out while the shared
   // API backoff holds (429 / 5xx / unreachable) or without a credential; the
   // job itself waits for the on-demand link.
+  // A linked phone defers background jobs while it is active (never during a
+  // content transfer, at most PHONE_DEFER_MAX_MS otherwise); the queued job
+  // then disconnects it (2.7.3: a phone that kept reconnecting used to block
+  // the heartbeat and alerts for good).
+  const bool phoneDefers = backgroundJobDeferred();
   const bool cloudAllowed =
-      !updating && !studio_ble::connected() && !inactive_ && !ProjectStickService::apiBlocked() && service_.hasCredential();
+      !updating && !phoneDefers && !inactive_ && !ProjectStickService::apiBlocked() && service_.hasCredential();
   if (cloudAllowed && project_stick::registrationDue(nowMs, lastRegisterMs_) &&
       nowMs - lastSyncAttemptMs_ >= service_.pollIntervalSeconds() * 1000UL) {
     requestCloudSync();

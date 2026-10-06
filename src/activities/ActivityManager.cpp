@@ -211,8 +211,8 @@ void ActivityManager::goToProjectStick() {
 
 void ActivityManager::goToSettings() { replaceActivity(std::make_unique<SettingsActivity>(renderer, mappedInput)); }
 
-void ActivityManager::goToSleep(bool fromTimeout) {
-  replaceActivity(std::make_unique<SleepActivity>(renderer, mappedInput, fromTimeout));
+void ActivityManager::goToSleep() {
+  replaceActivity(std::make_unique<SleepActivity>(renderer, mappedInput));
   loop();  // Important: sleep screen must be rendered immediately, the caller will go to sleep right after this returns
 }
 
@@ -261,11 +261,8 @@ StickTakeover ActivityManager::stickTakeover() const {
 
 bool ActivityManager::handlesKeyguard() const { return currentActivity && currentActivity->handlesKeyguard(); }
 
-bool ActivityManager::allowIdlePowerSaving() const {
-  return currentActivity && currentActivity->allowIdlePowerSaving();
-}
+bool ActivityManager::needsFullPower() const { return currentActivity && currentActivity->needsFullPower(); }
 
-bool ActivityManager::preventAutoSleep() const { return currentActivity && currentActivity->preventAutoSleep(); }
 
 bool ActivityManager::handleForcedRefresh() { return currentActivity && currentActivity->handleForcedRefresh(); }
 

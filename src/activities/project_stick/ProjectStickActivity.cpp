@@ -450,7 +450,9 @@ void ProjectStickActivity::render(RenderLock&&) {
 }
 
 
-bool ProjectStickActivity::allowIdlePowerSaving() {
-  return StudioFrame::instance().portable() && !studio_ble::connected() && !StudioFrame::instance().busy();
+// Full speed while a phone is linked, a program is being installed, or the
+// installed content is not a portable (self-contained) program yet.
+bool ProjectStickActivity::needsFullPower() {
+  return !StudioFrame::instance().portable() || studio_ble::connected() || StudioFrame::instance().busy();
 }
-bool ProjectStickActivity::skipLoopDelay() { return !allowIdlePowerSaving(); }
+bool ProjectStickActivity::skipLoopDelay() { return needsFullPower(); }

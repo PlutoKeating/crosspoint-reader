@@ -32,10 +32,6 @@ struct PercentResult {
   int percent = 0;
 };
 
-struct IntervalResult {
-  uint32_t value = 0;
-};
-
 struct PageResult {
   uint32_t page = 0;
 };
@@ -64,8 +60,8 @@ struct FilePathResult {
 };
 
 using ResultVariant =
-    std::variant<std::monostate, WifiResult, KeyboardResult, MenuResult, ChapterResult, PercentResult, IntervalResult,
-                 PageResult, ProgressChangeResult, NetworkModeResult, FootnoteResult, FilePathResult>;
+    std::variant<std::monostate, WifiResult, KeyboardResult, MenuResult, ChapterResult, PercentResult, PageResult,
+                 ProgressChangeResult, NetworkModeResult, FootnoteResult, FilePathResult>;
 
 struct ActivityResult {
   bool isCancelled = false;

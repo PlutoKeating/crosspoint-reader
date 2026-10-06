@@ -27,9 +27,13 @@ bool adoptAuthority(const std::string& deviceId, const std::string& secret, uint
                     const std::string& owner);
 // Deinitialises NimBLE (host and controller) so a TLS request or the flash
 // writer can use its heap; on the C3, Wi-Fi + NimBLE + a TLS session may not
-// fit together. Returns false (nothing to do) when NimBLE is not running or a phone is
-// connected. restoreRadio() brings it back with the same identity and key.
-bool releaseRadio();
+// fit together. Returns false (nothing to do) when NimBLE is not running.
+// A connected phone blocks the release unless `forJob` names the cloud job:
+// then STATUS shows `net_busy` = forJob briefly, the phone is disconnected and
+// nothing advertises until restoreRadio() brings the stack back with the same
+// identity and key (2.7.3: a phone that keeps reconnecting used to block
+// every TLS job).
+bool releaseRadio(const char* forJob = nullptr);
 void restoreRadio();
 void begin();
 // The task that applies queued transfer work (pump()): the background sync
@@ -40,6 +44,10 @@ void setPumpTask(TaskHandle_t task);
 void pump();
 void tick();
 bool connected();
+// Age of the current phone link and time since its last read or write (0
+// without a link): inputs to project_stick::phoneLinkAction.
+uint32_t linkedForMs();
+uint32_t idleForMs();
 // A content transfer is receiving or being installed (ProjectStickHost keeps
 // Wi-Fi off meanwhile so the heap goes to the transfer).
 bool transferActive();

@@ -92,6 +92,8 @@ python3 scripts/firmware_release.py --build --notes RELEASE_NOTES.md \
 
 2.7.2 起 Wi‑Fi 按需开启：固件更新页打开期间、收到蓝牙 `ota` 请求或排队了下载任务时，设备自行连接已保存的网络，任务最多等待 20 秒。有已保存网络时，检查更新不再弹出 Wi‑Fi 选择页。
 
+2.7.3 起，检查更新和安装（包括蓝牙 `ota`）开始时，如果手机正通过蓝牙连着设备，设备会先在 STATUS 里给出 `net_busy`，约 0.4 秒后主动断开手机，并释放蓝牙协议栈。任务结束前设备不再广播，手机这段时间无法重连；升级时一直持续到重启。以前手机连着时蓝牙无法释放，内存不够建立 HTTPS 连接，检查会报「设备内存不足」，下一次又被设备自己的退避误报成「云端繁忙」。现在只有服务器真的返回 429 时才显示「云端繁忙」（附剩余秒数），手动检查不受设备自身退避的限制；内存不足的提示会给出当时的可用 KB 数。
+
 ## 5. 设备端执行流程
 
 设备注册时上报 `firmware_version`、`firmware_build` 与能力 `ble: 3`、`ota: 3`、`panel: xteink_x3|xteink_x4`。
@@ -103,7 +105,8 @@ python3 scripts/firmware_release.py --build --notes RELEASE_NOTES.md \
       1. 目标校验：URL 必须在 <API 基址>/firmware/ 下、SHA-256 格式、大小在 100 KB~分区上限；
          电量 ≥ 30%，或正在外接电源充电（2.7.1 起）；Studio 正在接收内容时最多等待 30 秒
          （仍未结束则 device_busy）。不需要绑定，也不需要设备令牌（2.7.1 起）
-      2. 暂停 BLE（TLS 与刷写需要 NimBLE 占用的内存），持有电源锁，屏幕切换为升级进度页
+      2. 断开已连接的手机（2.7.3 起，STATUS 先给出 net_busy），释放 BLE（TLS 与刷写需要 NimBLE
+         占用的内存），持有电源锁，屏幕切换为升级进度页
       3. 下载到 /.crosspoint/studio/firmware.tmp
          · firmware.meta 记录 "<sha> <字节>"；同一镜像的半截文件以 Range 续传（206）
          · 每写约 256 KB 刷新一次 SD 文件，掉电后续传偏移以文件实际大小为准

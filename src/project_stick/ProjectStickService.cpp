@@ -92,6 +92,12 @@ bool apiBlockedNow() {
   return apiBackoff.blocked(millis());
 }
 
+// The heap right before the last TLS attempt and the last request failure
+// (2.7.3), relayed by the phone in STATE metrics so a field failure can be
+// read server-side. Shared by the UI-side and worker service instances.
+std::atomic<uint32_t> lastTlsHeap{0}, lastTlsMaxAlloc{0};
+std::atomic<uint8_t> lastNetFailureCode{0};
+
 // Firmware identity and capabilities sent with registration.
 void describeFirmware(JsonDocument& request) {
   request["firmware_version"] = CROSSPOINT_VERSION;
@@ -116,6 +122,11 @@ void describeMetrics(JsonObject metrics) {
   metrics["wifi_rssi"] = WiFi.status() == WL_CONNECTED ? WiFi.RSSI() : 0;
   metrics["wifi_on"] = WiFi.getMode() != WIFI_MODE_NULL ? 1 : 0;  // Wi-Fi is on demand since 2.7.2
   metrics["battery_percent"] = powerManager.getBatteryPercentage();
+  if (const uint32_t tlsHeap = lastTlsHeap.load()) {
+    metrics["tls_heap"] = tlsHeap;
+    metrics["tls_max"] = lastTlsMaxAlloc.load();
+  }
+  if (const uint8_t net = lastNetFailureCode.load()) metrics["net"] = net;
   // Card usage comes from the worker's idle scan (StudioFrame::refreshStorageUsage);
   // nothing here touches the FAT.
   uint64_t total = 0, used = 0;
@@ -294,49 +305,127 @@ ProjectStickService::RadioLease::~RadioLease() {
   }
 }
 
+void ProjectStickService::beginJob(const char* label, const bool userInitiated) {
+  jobLabel = label;
+  userJob = userInitiated;
+  retrying = false;
+  lastFailure = project_stick::NetFailure::None;
+  lastFailureStatus = 0;
+  lastFailureHeap = 0;
+  lastRateLimitSeconds = 0;
+}
+
+// Start of a cloud job (worker task, inside its RadioLease): a phone holding
+// the BLE link must yield, since TLS and a connected NimBLE stack do not fit
+// in the C3's heap together (2.7.3). User-initiated jobs disconnect it at
+// once; a background job leaves an active phone alone and is skipped (the host
+// queues it again later, and forces it after PHONE_DEFER_MAX_MS). The phone
+// cannot reconnect until the job's lease restores the stack. Returns false
+// when the job must not run now.
+bool ProjectStickService::yieldPhoneLink() {
+  if (radioLent || !studio_ble::connected()) return true;
+  project_stick::PhoneLinkInputs in;
+  in.phoneLinked = true;
+  in.userInitiated = userJob;
+  in.transferActive = studio_ble::transferActive() || StudioFrame::instance().busy();
+  in.linkedForMs = studio_ble::linkedForMs();
+  in.idleForMs = studio_ble::idleForMs();
+  if (project_stick::phoneLinkAction(in) == project_stick::PhoneLinkAction::Defer) {
+    LOG_INF("STICK", "%s deferred: the phone is active (linked %us)", jobLabel, (unsigned)(in.linkedForMs / 1000));
+    lastFailure = project_stick::NetFailure::Backoff;
+    return false;
+  }
+  if (studio_ble::releaseRadio(jobLabel)) radioLent = true;
+  return true;
+}
+
 // Before a TLS connection: if the heap cannot afford the handshake, lend
 // NimBLE's heap for the rest of the cloud operation. Returns false when even
 // then the heap is below the hard floor: the caller skips the request.
 bool ProjectStickService::lendRadioIfLow(const char* what) {
 #ifndef SIMULATOR
+  if (!yieldPhoneLink()) return false;
   uint32_t freeHeap = ESP.getFreeHeap(), maxAlloc = ESP.getMaxAllocHeap();
   LOG_INF("STICK", "%s: heap=%u max=%u min=%u%s", what, (unsigned)freeHeap, (unsigned)maxAlloc,
           (unsigned)ESP.getMinFreeHeap(), radioLent ? " (BLE released)" : "");
-  if (!radioLent && !project_stick::tlsHeapSufficient(freeHeap, maxAlloc) && studio_ble::releaseRadio()) {
+  if (!radioLent && !project_stick::tlsHeapSufficient(freeHeap, maxAlloc) && studio_ble::releaseRadio(jobLabel)) {
     radioLent = true;
     freeHeap = ESP.getFreeHeap();
     maxAlloc = ESP.getMaxAllocHeap();
     LOG_INF("STICK", "%s: heap below TLS needs; BLE released (heap=%u max=%u)", what, (unsigned)freeHeap,
             (unsigned)maxAlloc);
   }
+  lastTlsHeap.store(freeHeap);
+  lastTlsMaxAlloc.store(maxAlloc);
   if (project_stick::tlsHeapAffordable(freeHeap, maxAlloc)) return true;
-  LOG_ERR("STICK", "%s skipped: low memory (heap=%u max=%u)", what, (unsigned)freeHeap, (unsigned)maxAlloc);
+  // Only now is it a memory failure: the stack is released (or not running)
+  // and the heap is still below the floor.
+  LOG_ERR("STICK", "%s skipped: low memory (heap=%u max=%u, BLE %s)", what, (unsigned)freeHeap, (unsigned)maxAlloc,
+          radioLent ? "released" : "not running");
   lastFailure = project_stick::NetFailure::Memory;
   lastFailureStatus = 0;
+  lastFailureHeap = freeHeap;
+  lastNetFailureCode.store(static_cast<uint8_t>(lastFailure));
   return false;
 #else
   (void)what;
-  return true;
+  return yieldPhoneLink();
 #endif
 }
 
 // After a transport failure: retry with NimBLE released, since an allocation
 // failure inside the handshake looks like any other transport failure.
 bool ProjectStickService::lendRadioAfterFailure(const char* what) {
-  if (radioLent || !studio_ble::releaseRadio()) return false;
+  if (radioLent || !studio_ble::releaseRadio(jobLabel)) return false;
   radioLent = true;
   LOG_INF("STICK", "%s: transport failed; retrying with BLE released", what);
   return true;
 }
 
+// Whether a request may go out now under the shared backoff. A server rate
+// limit (429 / Retry-After) holds every request and is reported with the
+// seconds left; the device's own error backoff (after a transport failure,
+// 5xx, a memory skip) holds background requests only and is never reported as
+// "busy": a user-initiated job, and the single in-job retry after a transport
+// failure, go out anyway.
+bool ProjectStickService::requestAllowed() {
+  uint32_t rateLimitSeconds = 0;
+  bool blocked = false;
+  {
+    std::lock_guard<std::mutex> lock(apiBackoffMutex);
+    const uint32_t now = millis();
+    rateLimitSeconds = apiBackoff.rateLimitRemainingSeconds(now);
+    blocked = apiBackoff.blocked(now);
+  }
+  if (rateLimitSeconds > 0) {
+    lastFailure = project_stick::NetFailure::RateLimited;
+    lastFailureStatus = 429;
+    lastRateLimitSeconds = rateLimitSeconds;
+    lastNetFailureCode.store(static_cast<uint8_t>(lastFailure));
+    return false;
+  }
+  if (blocked && !userJob && !retrying) {
+    lastFailure = project_stick::NetFailure::Backoff;
+    lastFailureStatus = 0;
+    return false;
+  }
+  return true;
+}
+
 void ProjectStickService::recordOutcome(const bool clockReady, const int status) {
 #ifndef SIMULATOR
-  const bool heapLow = !project_stick::tlsHeapSufficient(ESP.getFreeHeap(), ESP.getMaxAllocHeap());
+  const uint32_t freeHeap = ESP.getFreeHeap();
+  // A memory failure only once the stack has been lent: before that the
+  // caller retries with NimBLE released, which is the real test.
+  const bool heapLow = radioLent && !project_stick::tlsHeapSufficient(freeHeap, ESP.getMaxAllocHeap());
 #else
+  const uint32_t freeHeap = 0;
   const bool heapLow = false;
 #endif
   lastFailure = project_stick::classifyRequest(clockReady, status, heapLow);
   lastFailureStatus = status;
+  if (lastFailure == project_stick::NetFailure::Memory) lastFailureHeap = freeHeap;
+  lastNetFailureCode.store(static_cast<uint8_t>(lastFailure));
 }
 
 ProjectStickService::SyncReport ProjectStickService::sync() {
@@ -347,6 +436,12 @@ ProjectStickService::SyncReport ProjectStickService::sync() {
   inactive = false;
   if (!hasCredential()) {
     report.result = SyncResult::Unbound;
+    return report;
+  }
+  // The phone yields before the link comes up (or the job waits for it to
+  // leave: the attempt is not counted).
+  if (!yieldPhoneLink()) {
+    report.result = SyncResult::Failed;
     return report;
   }
   if (!awaitWifi("sync")) {
@@ -458,14 +553,14 @@ bool ProjectStickService::inAlertWindow() const {
 
 bool ProjectStickService::pollAlerts() {
   if (!inAlertWindow() || !hasCredential()) return false;
-  if (!awaitWifi("alerts")) return false;
+  RadioLease lease(*this);
+  if (!yieldPhoneLink() || !awaitWifi("alerts")) return false;
   std::string deviceId;
   {
     ProjectStickStateLock lock(projectStickStateMutex);
     deviceId = PROJECT_STICK_STORE.deviceId;
   }
 
-  RadioLease lease(*this);
   HttpBurst burst(http);
   std::string response;
   const std::string url = baseUrl + "/api/v2/device/alerts?device_id=" + deviceId;
@@ -564,9 +659,10 @@ bool ProjectStickService::requestPost(const std::string& path, const std::string
     return false;
   }
 #endif
-  if (apiBlockedNow()) {
-    LOG_INF("STICK", "POST %s skipped: API backoff active", path.c_str());
-    recordOutcome(true, 429);
+  if (!requestAllowed()) {
+    LOG_INF("STICK", "POST %s skipped: %s", path.c_str(),
+            lastFailure == project_stick::NetFailure::RateLimited ? "server rate limit" : "error backoff");
+    status = 0;
     return false;
   }
   if (!lendRadioIfLow(path.c_str())) {
@@ -635,8 +731,11 @@ bool ProjectStickService::fetchJson(const std::string& url, std::string& respons
       response.append(reinterpret_cast<const char*>(data), length);
       return true;
     };
-    if (fetch(url, collect, withCredential)) return true;
-    if (lastFetchStatus > 0 || lastFailure == project_stick::NetFailure::Clock || memorySkipped) break;
+    retrying = attempt > 0;  // the one retry is not held by the backoff its own failure set
+    const bool fetched = fetch(url, collect, withCredential);
+    retrying = false;
+    if (fetched) return true;
+    if (lastFetchStatus > 0 || lastFailure == project_stick::NetFailure::Clock || requestSkipped) break;
     if (attempt == 0 && !lendRadioAfterFailure("GET")) delay(500);
   }
   response.clear();
@@ -661,14 +760,15 @@ bool ProjectStickService::fetch(const std::string& url, const std::function<bool
     recordOutcome(false, 0);
     return false;
   }
-  if (apiBlockedNow()) {
-    lastFetchStatus = 429;  // not a transport failure: do not retry
-    recordOutcome(true, 429);
+  requestSkipped = false;
+  if (!requestAllowed()) {
+    // Not a transport failure: the caller must not retry.
+    lastFetchStatus = lastFailure == project_stick::NetFailure::RateLimited ? 429 : 0;
+    requestSkipped = true;
     return false;
   }
-  memorySkipped = false;
   if (!lendRadioIfLow("GET")) {
-    memorySkipped = true;
+    requestSkipped = true;
     return false;
   }
   if (!http.begin(url)) return false;
@@ -976,8 +1076,10 @@ void ProjectStickService::installFirmware(const FirmwareTarget& target) {
   }
   // TLS and the flash writer need the heap NimBLE holds: release it for the
   // whole install (a success restarts; a failure restores it with the lease).
+  // A phone that sent `ota` (or just sits connected) is disconnected and the
+  // stack stays released, no advertising, until the restart or the failure.
   RadioLease lease(*this);
-  if (!radioLent && studio_ble::releaseRadio()) radioLent = true;
+  if (!radioLent && studio_ble::releaseRadio(jobLabel)) radioLent = true;
   HalPowerManager::Lock powerLock;
   firmware_update::begin(target.version.c_str(), target.bytes);
   auto fail = [](const char* error) { firmware_update::fail(error); };
@@ -1104,15 +1206,18 @@ ProjectStickService::DownloadResult ProjectStickService::downloadFirmware(const 
 // binding, whatever the server answers.
 ProjectStickService::FirmwareOffer ProjectStickService::checkFirmware() {
   FirmwareOffer offer;
-  if (!awaitWifi("firmware check")) {
-    offer.failure = project_stick::NetFailure::Network;
-    return offer;
-  }
   if (baseUrl.empty()) {  // builds without a cloud (the website simulator) never ask
     offer.failure = project_stick::NetFailure::Network;
     return offer;
   }
+  // A connected phone is disconnected first (user-initiated), so the Wi-Fi
+  // link and the handshake get NimBLE's heap.
   RadioLease lease(*this);
+  yieldPhoneLink();
+  if (!awaitWifi("firmware check")) {
+    offer.failure = project_stick::NetFailure::Network;
+    return offer;
+  }
   HttpBurst burst(http);
   std::string response;
   if (!fetchJson(baseUrl + "/api/v1/public/firmware/latest?channel=stable", response, 6144, false)) {
@@ -1120,8 +1225,12 @@ ProjectStickService::FirmwareOffer ProjectStickService::checkFirmware() {
       offer.status = FirmwareOffer::Status::UpToDate;
       return offer;
     }
-    offer.failure = lastFailure == project_stick::NetFailure::None ? project_stick::NetFailure::Network : lastFailure;
+    offer.failure = lastFailure == project_stick::NetFailure::None || lastFailure == project_stick::NetFailure::Backoff
+                        ? project_stick::NetFailure::Network
+                        : lastFailure;
     offer.httpStatus = lastFailureStatus;
+    offer.freeHeap = lastFailureHeap;
+    offer.retryAfterSeconds = lastRateLimitSeconds;
     return offer;
   }
   JsonDocument doc;

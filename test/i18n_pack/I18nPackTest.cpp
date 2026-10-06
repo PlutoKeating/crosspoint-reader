@@ -78,11 +78,11 @@ TEST_F(I18nPack, IgnoresKeysFromOtherFirmwareVersions) {
 }
 
 TEST_F(I18nPack, DropsEntriesWhoseFormatConversionsDiffer) {
-  const auto synced = static_cast<size_t>(StrId::STR_SLEEP_TIMER_VALUE_FORMAT);  // "%u"
+  const auto synced = static_cast<size_t>(StrId::STR_OTA_FAIL_MEMORY_KB);  // "%u"
   const auto networks = static_cast<size_t>(StrId::STR_NETWORKS_FOUND);        // "%zu"
   ASSERT_TRUE(adopt(makePack("EN", "English",
-                             {{KEY_HASHES[synced], "%s minutes"}, {KEY_HASHES[networks], "%zu networks, 100%% sure"}})));
-  EXPECT_STREQ(tr(STR_SLEEP_TIMER_VALUE_FORMAT), "%u 分钟");  // would read an unsigned as char*
+                             {{KEY_HASHES[synced], "%s KB free"}, {KEY_HASHES[networks], "%zu networks, 100%% sure"}})));
+  EXPECT_STREQ(tr(STR_OTA_FAIL_MEMORY_KB), "检查失败：设备内存不足（可用 %u KB）");  // would read an unsigned as char*
   EXPECT_STREQ(tr(STR_NETWORKS_FOUND), "%zu networks, 100%% sure");
 }
 

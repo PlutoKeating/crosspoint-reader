@@ -89,8 +89,10 @@ in `setup()` after the display, ticked from the main loop right after
 - Cloud: the register heartbeat, trading-hours alert polls, their results
   (clock, activation, alert display), the RTC write-back and ownership changes.
 - Power: publishes "external power is charging" for the install guard, and
-  keeps the device awake (no auto deep sleep on any page) while a phone is
+  keeps the CPU at full speed (no idle power saving) while a phone is
   connected, a transfer, a BLE Wi-Fi job, a cloud job or a firmware update runs.
+  There is no timed power-off at all since 2.7.3 (the card is a continuous
+  low-power display): only a power-key long press puts the device to sleep.
 - Page switches (`StickTakeover`, `project_stick::shouldShowStickPage`,
   host-tested): incoming content and a firmware update are shown by the
   StockStick page, so the host switches to it from ordinary pages. Without

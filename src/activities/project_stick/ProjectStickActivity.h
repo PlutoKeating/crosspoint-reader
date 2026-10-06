@@ -20,8 +20,7 @@ class ProjectStickActivity final : public Activity {
   void onEnter() override;
   void loop() override;
   void render(RenderLock&&) override;
-  bool preventAutoSleep() override { return true; }
-  bool allowIdlePowerSaving() override;
+  bool needsFullPower() override;
   // The device-wide keyguard applies here too; this page draws its overlay so a
   // card change underneath still shows while locked.
   bool composesKeyguardOverlay() const override { return true; }

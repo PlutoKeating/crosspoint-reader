@@ -46,16 +46,6 @@ class CrossPointSettings : public PersistableStore<CrossPointSettings> {
     FRONT_BUTTON_HARDWARE_COUNT
   };
 
-  // Legacy auto-sleep timeout enum, only read when migrating old settings files.
-  enum SLEEP_TIMEOUT {
-    SLEEP_1_MIN = 0,
-    SLEEP_5_MIN = 1,
-    SLEEP_10_MIN = 2,
-    SLEEP_15_MIN = 3,
-    SLEEP_30_MIN = 4,
-    SLEEP_TIMEOUT_COUNT
-  };
-
   // Short power button press actions. PAGE_TURN (2) and FOOTNOTES (4) were
   // reader actions; loading them folds to IGNORE.
   enum SHORT_PWRBTN { IGNORE = 0, SLEEP = 1, PAGE_TURN = 2, FORCE_REFRESH = 3, FOOTNOTES = 4, SHORT_PWRBTN_COUNT };
@@ -64,12 +54,6 @@ class CrossPointSettings : public PersistableStore<CrossPointSettings> {
 
   // LYRA_3_COVERS (2) showed book covers on Home; loading it folds to LYRA.
   enum UI_THEME { CLASSIC = 0, LYRA = 1, LYRA_3_COVERS = 2, ROUNDEDRAFF = 3 };
-
-  enum QUICK_RESUME_SLEEP_SCREEN {
-    QUICK_RESUME_NEVER = 0,
-    QUICK_RESUME_AFTER_TIMEOUT = 1,
-    QUICK_RESUME_SLEEP_SCREEN_COUNT
-  };
 
   // Sleep screen settings
   uint8_t sleepScreen = DARK;
@@ -83,8 +67,6 @@ class CrossPointSettings : public PersistableStore<CrossPointSettings> {
   uint8_t frontButtonConfirm = FRONT_HW_CONFIRM;
   uint8_t frontButtonLeft = FRONT_HW_LEFT;
   uint8_t frontButtonRight = FRONT_HW_RIGHT;
-  // Auto-sleep timeout in minutes; SLEEP_TIMEOUT_NEVER_MINUTES disables it.
-  uint8_t sleepTimeoutMinutes = 10;
   uint8_t hideBatteryPercentage = HIDE_NEVER;
   uint8_t uiTheme = LYRA;
   // Sunlight fading compensation
@@ -95,11 +77,10 @@ class CrossPointSettings : public PersistableStore<CrossPointSettings> {
   // UI language code: the built-in catalogue ("ZH") or an SD-card pack in
   // /.crosspoint/lang/<code>.lang. Persisted as the "language" string.
   char language[8] = "ZH";
-  uint8_t quickResumeSleepScreen = QUICK_RESUME_NEVER;
-
-  static constexpr uint8_t MIN_SLEEP_TIMEOUT_MINUTES = 1;
-  static constexpr uint8_t SLEEP_TIMEOUT_NEVER_MINUTES = 31;
-  static constexpr uint8_t MAX_SLEEP_TIMEOUT_MINUTES = SLEEP_TIMEOUT_NEVER_MINUTES;
+  // The device never powers itself off: the card stays on screen with idle
+  // power saving between loop iterations, and only the power key sleeps it
+  // (2.7.3; stale "sleepTimeout*" / "quickResumeSleepScreen" keys in older
+  // settings files are ignored).
 
   uint16_t getPowerButtonDuration() const {
     return (shortPwrBtn == CrossPointSettings::SHORT_PWRBTN::SLEEP) ? 10 : 400;
@@ -110,8 +91,6 @@ class CrossPointSettings : public PersistableStore<CrossPointSettings> {
   bool fromJson(JsonVariantConst doc);
 
   static void validateFrontButtonMapping(CrossPointSettings& settings);
-  static uint8_t sleepTimeoutEnumToMinutes(uint8_t legacyValue);
-  unsigned long getSleepTimeoutMs() const;
 };
 
 // Helper macro to access settings

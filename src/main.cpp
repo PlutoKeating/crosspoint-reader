@@ -139,13 +139,12 @@ static bool loadSleepFrameBuffer() {
 }
 
 // Enter deep sleep mode
-void enterDeepSleep(bool fromTimeout = false) {
+// Enter deep sleep mode: only on the user's power-key long press (2.7.3: the
+// card is a continuous low-power display, there is no inactivity power-off).
+void enterDeepSleep() {
   HalPowerManager::Lock powerLock;  // Ensure we are at normal CPU frequency for sleep preparation
 
-  const bool isQuickResumeSleep =
-      SETTINGS.sleepScreen == CrossPointSettings::SLEEP_SCREEN_MODE::QUICK_RESUME ||
-      (fromTimeout &&
-       SETTINGS.quickResumeSleepScreen == CrossPointSettings::QUICK_RESUME_SLEEP_SCREEN::QUICK_RESUME_AFTER_TIMEOUT);
+  const bool isQuickResumeSleep = SETTINGS.sleepScreen == CrossPointSettings::SLEEP_SCREEN_MODE::QUICK_RESUME;
   APP_STATE.showBootScreen = !isQuickResumeSleep;
 
   APP_STATE.saveToFile();
@@ -154,7 +153,7 @@ void enterDeepSleep(bool fromTimeout = false) {
   // a WiFi activity would otherwise silentRestart() here and reboot instead.
   deepSleepInProgress = true;
   ota_trial::onCleanShutdown();
-  activityManager.goToSleep(fromTimeout);
+  activityManager.goToSleep();
 
   if (isQuickResumeSleep) {
     saveSleepFrameBuffer();
@@ -441,12 +440,14 @@ void loop() {
     }
   }
 
-  // Check for any user activity (button press or release) or active background work
+  // Input or live work keeps the CPU at full speed; otherwise the loop drops
+  // to idle power saving (lower clock, longer delay) and the e-paper keeps the
+  // card. Nothing here powers the device off: there is no inactivity sleep.
   static unsigned long lastActivityTime = millis();
   if (gpio.wasAnyPressed() || gpio.wasAnyReleased() || gpio.wasTouchActivity() || halTiltSensor.hadActivity() ||
-      (activityManager.preventAutoSleep() && !activityManager.allowIdlePowerSaving()) ||
-      PROJECT_STICK_HOST.busy()) {  // a phone link, a transfer or a firmware update keeps any page awake
-    lastActivityTime = millis();         // Reset inactivity timer
+      activityManager.needsFullPower() ||
+      PROJECT_STICK_HOST.busy()) {  // a phone link, a transfer, a cloud job or a firmware update
+    lastActivityTime = millis();
     powerManager.setPowerSaving(false);  // Restore normal CPU frequency on user activity
   }
 
@@ -472,14 +473,6 @@ void loop() {
     }
     screenshotButtonsReleased = true;
     screenshotComboActive = false;
-  }
-
-  const unsigned long sleepTimeoutMs = SETTINGS.getSleepTimeoutMs();
-  if (sleepTimeoutMs > 0 && millis() - lastActivityTime >= sleepTimeoutMs && !activityManager.preventAutoSleep()) {
-    LOG_DBG("SLP", "Auto-sleep triggered after %lu ms of inactivity", sleepTimeoutMs);
-    enterDeepSleep(true);
-    // This should never be hit as `enterDeepSleep` calls esp_deep_sleep_start
-    return;
   }
 
   if (millis() >= allowSleepAt && gpio.isPressed(HalGPIO::BTN_POWER) &&

@@ -154,6 +154,45 @@ pinned because Cloudflare may issue from Google Trust Services. Another deployme
 maintain its actual trust chain; never disable verification to transmit authorization
 material.
 
+### Cloud jobs and a linked phone (2.7.3)
+
+On the C3 a TLS session does not fit next to a connected NimBLE stack (the
+2.6.5 device measured 13 KB free with Wi-Fi up and a phone linked). Before
+2.7.3 `releaseRadio()` refused while a phone was connected, so a mini program
+that kept reconnecting (state relay, presence, the 60 s parked link, the
+firmware page's follow loop) blocked every request: a manual firmware check
+was skipped as "out of memory", and the self-inflicted error backoff then made
+the next check say 「云端繁忙」.
+
+Now a cloud job that needs TLS makes the phone yield
+(`project_stick::phoneLinkAction`, host-tested):
+
+- User-initiated jobs (Settings > Firmware update check/install, a BLE `ota`)
+  disconnect the phone at once.
+- Background jobs (register heartbeat, alert poll, event flush) wait while the
+  phone is active (a read/write within 30 s): never during a content transfer,
+  otherwise for at most 2 min of continuous link. An idle phone yields at once.
+- Yielding: bound STATUS shows `net_busy` (`firmware_check`,
+  `firmware_install`, `sync`, `alerts`) for ~0.4 s, then the device
+  disconnects the phone and deinitialises NimBLE. Nothing advertises until
+  the job ends and the stack is restored, so the phone's reconnects fail for
+  the length of the job (an OTA ends with the restart). A phone that sees the
+  link drop after `ota` should wait before reconnecting; STATUS `ota` and `fw`
+  after the reconnect tell the outcome.
+
+Errors are reported honestly:
+
+- 「云端繁忙」 only for a real server 429 / `Retry-After`, with the seconds left.
+  The device's own error backoff (after a transport failure, 5xx, a memory
+  skip) holds background requests only; a user-initiated job and the single
+  in-job retry go out anyway. The internal "backoff" reason (`NetFailure::Backoff`)
+  is never shown as busy.
+- 「设备内存不足（可用 X KB）」 only when the heap stays below the TLS floor
+  with NimBLE released (or not running).
+- STATE `metrics` carries `tls_heap` / `tls_max` (the heap right before the
+  last TLS attempt) and `net` (the last failure code: 1 clock, 2 network,
+  3 memory, 4 rate limited, 5 backoff, 6 server, 7 timeout).
+
 ## BLE transfer protocol 4 (since 2.7.0)
 
 Defined in Project.StockStick `docs/product/BLE-TRANSFER-V4.md`; protocol 2's

@@ -5,8 +5,8 @@ class Bitmap;
 
 class SleepActivity final : public Activity {
  public:
-  explicit SleepActivity(GfxRenderer& renderer, MappedInputManager& mappedInput, bool fromTimeout = false)
-      : Activity("Sleep", renderer, mappedInput), fromTimeout(fromTimeout) {}
+  explicit SleepActivity(GfxRenderer& renderer, MappedInputManager& mappedInput)
+      : Activity("Sleep", renderer, mappedInput) {}
   void onEnter() override;
   StickTakeover stickTakeover() const override { return StickTakeover::Never; }
 
@@ -16,6 +16,4 @@ class SleepActivity final : public Activity {
   void renderBitmapSleepScreen(const Bitmap& bitmap) const;
   void renderLastScreenSleepScreen() const;
   void renderBlankSleepScreen() const;
-
-  bool fromTimeout = false;
 };

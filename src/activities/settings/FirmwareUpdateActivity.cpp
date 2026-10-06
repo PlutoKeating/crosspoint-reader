@@ -32,8 +32,17 @@ const char* checkFailureText(const ProjectStickService::FirmwareOffer& offer, ch
     case NetFailure::Network:
       return tr(STR_OTA_FAIL_NETWORK);
     case NetFailure::Memory:
+      if (offer.freeHeap > 0) {
+        snprintf(buffer, size, tr(STR_OTA_FAIL_MEMORY_KB), static_cast<unsigned>(offer.freeHeap / 1024));
+        return buffer;
+      }
       return tr(STR_OTA_FAIL_MEMORY);
     case NetFailure::RateLimited:
+      // Only a real 429 / Retry-After from the server (2.7.3).
+      if (offer.retryAfterSeconds > 0) {
+        snprintf(buffer, size, tr(STR_OTA_FAIL_BUSY_SECONDS), static_cast<unsigned>(offer.retryAfterSeconds));
+        return buffer;
+      }
       return tr(STR_OTA_FAIL_BUSY);
     case NetFailure::Server:
       if (offer.httpStatus > 0) {
@@ -237,8 +246,9 @@ void FirmwareUpdateActivity::render(RenderLock&&) {
         renderer.drawText(UI_10_FONT_ID, side, y, line, true, EpdFontFamily::BOLD);
         y += lineHeight * 2;
         if (!offer.notes.empty()) {
-          UITheme::drawCenteredWrappedText(renderer, Rect{side, y, pageWidth - side * 2, lineHeight * 6}, UI_10_FONT_ID,
-                                           offer.notes.c_str(), 6, true, EpdFontFamily::REGULAR,
+          const int notesPitch = renderer.getTextLineHeight(UI_10_FONT_ID, offer.notes.c_str());
+          UITheme::drawCenteredWrappedText(renderer, Rect{side, y, pageWidth - side * 2, notesPitch * 8}, UI_10_FONT_ID,
+                                           offer.notes.c_str(), 8, true, EpdFontFamily::REGULAR,
                                            UITheme::TextVerticalAlignment::TOP);
         }
         confirmLabel = tr(STR_OTA_INSTALL);
@@ -280,8 +290,9 @@ void FirmwareUpdateActivity::render(RenderLock&&) {
     }
   }
   if (message) {
-    UITheme::drawCenteredWrappedText(renderer, Rect{side, y, pageWidth - side * 2, lineHeight * 2}, UI_10_FONT_ID,
-                                     message, 2, true, EpdFontFamily::BOLD, UITheme::TextVerticalAlignment::TOP);
+    const int messagePitch = renderer.getTextLineHeight(UI_10_FONT_ID, message, EpdFontFamily::BOLD);
+    UITheme::drawCenteredWrappedText(renderer, Rect{side, y, pageWidth - side * 2, messagePitch * 4}, UI_10_FONT_ID,
+                                     message, 4, true, EpdFontFamily::BOLD, UITheme::TextVerticalAlignment::TOP);
   }
 
   const auto labels = mappedInput.mapLabels(tr(STR_BACK), confirmLabel, "", "");

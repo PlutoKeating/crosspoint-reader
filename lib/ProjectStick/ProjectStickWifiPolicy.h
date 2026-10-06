@@ -34,6 +34,41 @@ inline bool wifiWanted(const WifiNeeds& n) {
   return n.heartbeatDue || n.alertWindow || n.trialPending;
 }
 
+// Whether a cloud job may run while a phone holds the BLE link (2.7.3). A job
+// that needs TLS cannot share the heap with a connected NimBLE stack on the
+// C3, so a running job disconnects the phone and keeps the radio released
+// (no advertising) until it ends. User-initiated jobs (the on-device firmware
+// check or install, a BLE `ota` request) go at once. Background jobs (register
+// heartbeat, alert poll, event flush) leave an active phone alone: never during
+// a content transfer, and otherwise for at most PHONE_DEFER_MAX_MS of
+// continuous link; an idle phone (no ops for PHONE_ACTIVE_WINDOW_MS) yields
+// right away. Without this a phone that keeps reconnecting blocked every job.
+enum class PhoneLinkAction : uint8_t {
+  Proceed,     // no phone linked
+  Defer,       // background job: try again later
+  Disconnect,  // run now: disconnect the phone and release NimBLE first
+};
+
+struct PhoneLinkInputs {
+  bool phoneLinked = false;
+  bool userInitiated = false;
+  bool transferActive = false;  // a content transfer is receiving or installing
+  uint32_t linkedForMs = 0;     // since the current link was made
+  uint32_t idleForMs = 0;       // since the phone's last read or write
+};
+
+constexpr uint32_t PHONE_DEFER_MAX_MS = 120000;
+constexpr uint32_t PHONE_ACTIVE_WINDOW_MS = 30000;
+
+inline PhoneLinkAction phoneLinkAction(const PhoneLinkInputs& in) {
+  if (!in.phoneLinked) return PhoneLinkAction::Proceed;
+  if (in.userInitiated) return PhoneLinkAction::Disconnect;
+  if (in.transferActive) return PhoneLinkAction::Defer;
+  const bool active = in.idleForMs < PHONE_ACTIVE_WINDOW_MS;
+  if (active && in.linkedForMs < PHONE_DEFER_MAX_MS) return PhoneLinkAction::Defer;
+  return PhoneLinkAction::Disconnect;
+}
+
 constexpr uint32_t WIFI_IDLE_GRACE_MS = 20000;  // unwanted this long -> power down
 constexpr uint32_t WIFI_JOIN_HOLD_MS = 60000;   // the phone reads `connected` after a BLE join
 constexpr uint32_t WIFI_JOB_WAIT_MS = 20000;    // a worker job waits this long for the link

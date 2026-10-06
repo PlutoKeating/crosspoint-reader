@@ -44,9 +44,6 @@ inline std::vector<SettingInfo> getSettingsList() {
         SettingInfo::Enum(StrId::STR_SLEEP_COVER_FILTER, &CrossPointSettings::sleepScreenCoverFilter,
                           {StrId::STR_NONE_OPT, StrId::STR_FILTER_CONTRAST, StrId::STR_INVERTED},
                           "sleepScreenCoverFilter", StrId::STR_CAT_DISPLAY),
-        SettingInfo::Enum(StrId::STR_QUICK_RESUME_TIMEOUT, &CrossPointSettings::quickResumeSleepScreen,
-                          {StrId::STR_STATE_OFF, StrId::STR_STATE_ON}, "quickResumeSleepScreen",
-                          StrId::STR_CAT_DISPLAY),
         mappedEnumSetting(StrId::STR_HIDE_BATTERY, &CrossPointSettings::hideBatteryPercentage,
                           {CrossPointSettings::HIDE_NEVER, CrossPointSettings::HIDE_ALWAYS},
                           {StrId::STR_NEVER, StrId::STR_ALWAYS}, StrId::STR_CAT_DISPLAY),
@@ -63,10 +60,6 @@ inline std::vector<SettingInfo> getSettingsList() {
                           {StrId::STR_IGNORE, StrId::STR_SLEEP, StrId::STR_FORCE_REFRESH}, StrId::STR_CAT_CONTROLS),
 
         // --- System ---
-        SettingInfo::Value(
-            StrId::STR_TIME_TO_SLEEP, &CrossPointSettings::sleepTimeoutMinutes,
-            {CrossPointSettings::MIN_SLEEP_TIMEOUT_MINUTES, CrossPointSettings::MAX_SLEEP_TIMEOUT_MINUTES, 1},
-            "sleepTimeoutMinutes", StrId::STR_CAT_SYSTEM),
         // Persistence-only flag for the one-time NTP seed on first Wi-Fi connect.
         SettingInfo::Toggle(StrId::STR_CLOCK_SYNCED, &CrossPointSettings::clockHasBeenSynced, "clockHasBeenSynced"),
         // Persistence-only: switched on the Bluetooth screen (Settings > System).

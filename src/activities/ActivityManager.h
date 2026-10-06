@@ -86,7 +86,7 @@ class ActivityManager {
   // goTo... functions are convenient wrapper for replaceActivity()
   void goToProjectStick();
   void goToSettings();
-  void goToSleep(bool fromTimeout = false);
+  void goToSleep();
   void goToBoot();
   void goToFullScreenMessage(std::string message, EpdFontFamily::Style style = EpdFontFamily::REGULAR);
   void goToCrashReport();
@@ -101,8 +101,7 @@ class ActivityManager {
 
   // Role of the current page for ProjectStickHost; Never while a page change is pending.
   StickTakeover stickTakeover() const;
-  bool preventAutoSleep() const;
-  bool allowIdlePowerSaving() const;
+  bool needsFullPower() const;
   bool handlesKeyguard() const;
   bool handleForcedRefresh();
   bool skipLoopDelay() const;

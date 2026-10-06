@@ -74,6 +74,11 @@ class ApiBackoff {
     return true;
   }
   uint8_t failures() const { return failures_; }
+  // Seconds left in a server-imposed (429) window, 0 when none is open.
+  uint32_t rateLimitRemainingSeconds(uint32_t nowMs) const {
+    if (!rateLimited(nowMs)) return 0;
+    return (static_cast<uint32_t>(untilMs_ - nowMs) + 999) / 1000;
+  }
 
  private:
   uint8_t failures_ = 0;

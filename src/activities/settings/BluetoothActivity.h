@@ -15,7 +15,7 @@ class BluetoothActivity final : public Activity {
   void loop() override;
   void render(RenderLock&&) override;
   // The radio is being watched: keep the device awake and the loop responsive.
-  bool preventAutoSleep() override { return true; }
+  bool needsFullPower() override { return true; }  // live radio diagnostics
 
  private:
   uint32_t renderedGeneration = 0;

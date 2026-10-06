@@ -46,12 +46,18 @@ class ProjectStickService {
     // Why a check failed (shown on the firmware screen); httpStatus for Server.
     project_stick::NetFailure failure = project_stick::NetFailure::None;
     int httpStatus = 0;
+    uint32_t freeHeap = 0;           // Memory: free heap with NimBLE released
+    uint32_t retryAfterSeconds = 0;  // RateLimited: seconds left in the server's window
     FirmwareTarget target;
     std::string notes;
   };
   // Asks the public catalogue (no binding, no credential: Wi-Fi is enough)
   // and compares the published version with the running one.
   FirmwareOffer checkFirmware();
+  // Worker task, before each job: its name (STATUS `net_busy` when it drops a
+  // phone) and whether the user started it (on-device check/install, BLE `ota`):
+  // those disconnect a phone at once and skip the device's error backoff.
+  void beginJob(const char* label, bool userInitiated);
   // Downloads (resumable), verifies and flashes `target`, then restarts. Only
   // returns on failure; progress and errors go to firmware_update.
   void installFirmware(const FirmwareTarget& target);
@@ -137,7 +143,15 @@ class ProjectStickService {
   bool radioLent = false;
   bool leaseActive = false;
   bool lendRadioIfLow(const char* what);
-  bool memorySkipped = false;
+  // The request was skipped before going out (backoff, rate limit, memory):
+  // not a transport failure, so it is not retried.
+  bool requestSkipped = false;
+  const char* jobLabel = "network";
+  bool userJob = false;
+  bool retrying = false;
+  uint32_t lastFailureHeap = 0, lastRateLimitSeconds = 0;
+  bool yieldPhoneLink();
+  bool requestAllowed();
   bool lendRadioAfterFailure(const char* what);
   struct RadioLease {
     explicit RadioLease(ProjectStickService& service);

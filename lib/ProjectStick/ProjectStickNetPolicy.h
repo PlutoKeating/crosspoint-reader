@@ -33,14 +33,17 @@ enum class NetFailure : uint8_t {
   None,
   Clock,        // no trusted time (NTP unreachable): certificates cannot be checked
   Network,      // DNS / TCP / TLS / read failed or timed out
-  Memory,       // transport failure while the heap was below the TLS marks
-  RateLimited,  // 429, or the shared backoff is holding requests
+  Memory,       // the heap stayed below the TLS floor with NimBLE released
+  RateLimited,  // the server answered 429 / Retry-After and its window is open
+  Backoff,      // the device's own error backoff held a background request (never shown as "busy")
   Server,       // any other HTTP error status
   Timeout,      // the UI deadline passed before the worker answered
 };
 
 // Classifies one request outcome. `status` is the HTTP status, <= 0 for a
-// transport failure; `heapLow` is the heap state when the transport failed.
+// transport failure; `heapLow` is true only when the transport failed with the
+// heap below the TLS marks although NimBLE had been released (with the stack
+// still up a failure is a network failure: the caller retries without it).
 inline NetFailure classifyRequest(bool clockReady, int status, bool heapLow) {
   if (!clockReady) return NetFailure::Clock;
   if (status <= 0) return heapLow ? NetFailure::Memory : NetFailure::Network;

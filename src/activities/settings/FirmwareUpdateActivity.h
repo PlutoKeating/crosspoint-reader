@@ -19,7 +19,7 @@ class FirmwareUpdateActivity final : public Activity {
   void onExit() override;
   void loop() override;
   void render(RenderLock&&) override;
-  bool preventAutoSleep() override { return state == State::Checking || state == State::Installing; }
+  bool needsFullPower() override { return state == State::Checking || state == State::Installing; }
   // Shows update progress itself; a check, a confirmation or an install is not interrupted.
   StickTakeover stickTakeover() const override {
     return state == State::Idle || state == State::Result ? StickTakeover::FirmwarePage : StickTakeover::Never;

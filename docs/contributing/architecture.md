@@ -40,12 +40,12 @@ flowchart TD
     H --> I
     P --> I
     I --> J[Poll input and run current activity]
-    J --> K{Sleep condition met?}
+    J --> K{Power key held?}
     K -->|No| I
     K -->|Yes| L[Persist state and enter deep sleep]
 ```
 
-In each loop iteration, the firmware updates input, runs the active activity, handles auto-sleep/power behavior, and applies a short delay policy to balance responsiveness and power.
+In each loop iteration, the firmware updates input, runs the active activity, handles the power key, and applies a short delay policy to balance responsiveness and power. There is no inactivity power-off (2.7.3): the card is a continuous low-power display; idle iterations lower the CPU clock and lengthen the delay, and only a power-key long press puts the device into deep sleep.
 
 ## Activity model
 
@@ -54,7 +54,7 @@ Some flows use `src/activities/ActivityWithSubactivity.h` to host nested activit
 
 - `onEnter()` and `onExit()` manage setup/teardown
 - `loop()` handles per-frame behavior
-- `skipLoopDelay()` and `preventAutoSleep()` are used by long-running flows (for example web server mode)
+- `skipLoopDelay()` and `needsFullPower()` are used by long-running flows (a transfer, a firmware update) to keep the loop and CPU at full speed
 
 Top-level activity groups:
 

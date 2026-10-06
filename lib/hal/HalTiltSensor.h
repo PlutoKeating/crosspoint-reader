@@ -65,7 +65,7 @@ class HalTiltSensor {
   bool wasTiltedBack();
 
   // Non-consuming: true if any tilt activity occurred since last call.
-  // Used to reset the auto-sleep inactivity timer.
+  // Counts as input for the idle power saving in the main loop (no auto-sleep since 2.7.3).
   bool hadActivity();
 
   // Discard any pending tilt events (call when leaving reader or disabling tilt).

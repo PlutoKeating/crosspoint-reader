@@ -139,7 +139,18 @@ void UITheme::drawCenteredWrappedText(const GfxRenderer& renderer, Rect bounds, 
                                       TextVerticalAlignment verticalAlignment) {
   if (!text || *text == '\0' || bounds.width <= 0 || bounds.height <= 0 || maxLines <= 0) return;
 
-  const int lineHeight = renderer.getLineHeight(fontId);
+  // Chinese text has no spaces to break at and is drawn with the CJK fallback
+  // face (taller than the Latin UI font): wrap it per character and pitch the
+  // lines by the face that actually draws it. Before 2.7.3 such text came out
+  // as one truncated line ("…已暂停蓝牙重…", release notes cut after a line).
+  bool nonAscii = false;
+  for (const char* c = text; *c; ++c) {
+    if (static_cast<unsigned char>(*c) >= 0x80) {
+      nonAscii = true;
+      break;
+    }
+  }
+  const int lineHeight = nonAscii ? renderer.getTextLineHeight(fontId, text, style) : renderer.getLineHeight(fontId);
   if (lineHeight <= 0) return;
 
   const int lineLimit = std::min(maxLines, bounds.height / lineHeight);
@@ -162,7 +173,8 @@ void UITheme::drawCenteredWrappedText(const GfxRenderer& renderer, Rect bounds, 
     return;
   }
 
-  const auto lines = renderer.wrappedText(fontId, text, bounds.width, lineLimit, style);
+  const auto lines = nonAscii ? renderer.wrappedCjkText(fontId, text, bounds.width, lineLimit, style)
+                              : renderer.wrappedText(fontId, text, bounds.width, lineLimit, style);
   int y = alignedTop(static_cast<int>(lines.size()) * lineHeight);
   for (const auto& line : lines) {
     drawCenteredText(renderer, bounds, fontId, y, line.c_str(), black, style);

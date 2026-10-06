@@ -144,6 +144,10 @@ constexpr uint32_t START_MIN_MAX_ALLOC = 12 * 1024;
 // A phone that holds the link without talking blocks advertising and cloud
 // requests; Wi-Fi setup polls STATUS, so real sessions never sit this long.
 constexpr uint32_t IDLE_LINK_TIMEOUT_MS = 5UL * 60UL * 1000UL;
+// Forced release for a cloud job (2.7.3): how long `net_busy` is readable
+// before the phone is dropped, and how long to wait for the disconnect.
+constexpr uint32_t FORCED_RELEASE_NOTICE_MS = 400;
+constexpr uint32_t FORCED_DISCONNECT_WAIT_MS = 1500;
 // Setup mode (unbound): one-time key K shown in the QR. Each connection pins
 // its key: a setup session keeps K until disconnect even after a bind.
 std::string setupKey, sessionKey;
@@ -162,6 +166,11 @@ bool scanRequested = false;
 WifiState wifiState = WifiState::Idle;
 std::string wifiSsid, wifiError, scanState = "idle";
 bool wifiSaved = false;  // at least one saved network (STATUS wifi.saved)
+// STATUS `net_busy` (2.7.3): the cloud job that is about to disconnect the
+// phone and release the stack ("firmware_check", "ota", "sync", ...); empty
+// otherwise. Set just before a forced release so a phone polling STATUS sees
+// why the link drops.
+std::string netBusy;
 std::vector<ble_setup::Network> networks;
 uint16_t connectionHandle = 0xffff;
 mbedtls_aes_context aes{};
@@ -458,6 +467,7 @@ std::string statusJson() {
                        std::to_string(planBoundary));
   addWifi(doc);
   addOta(doc);
+  if (!netBusy.empty()) doc["net_busy"] = netBusy;
   return finishStatus(doc);
 }
 // Setup ops (protocol 3) never abort a frame transfer; a bad request only
@@ -1004,12 +1014,29 @@ void advertiseIfIdleLocked() {
   if (advertise) NimBLEDevice::startAdvertising();
 }
 }  // namespace
-bool releaseRadio() {
+bool releaseRadio(const char* forJob) {
   std::lock_guard<std::mutex> radio(radioMutex);
+  uint16_t handle = 0xffff;
   {
     std::lock_guard<std::recursive_mutex> lock(mutex);
-    if (!started || released || isConnected) return false;
-    released = true;
+    if (!started || released) return false;
+    if (isConnected) {
+      if (!forJob) return false;
+      // A cloud job wins over the phone (2.7.3): say why, then drop it.
+      netBusy = forJob;
+      handle = connectionHandle;
+      changed();
+    }
+    released = true;  // from here tick() neither restarts nor advertises
+  }
+  if (handle != 0xffff) {
+    LOG_INF("BLE", "Disconnecting the phone for %s", forJob);
+    delay(FORCED_RELEASE_NOTICE_MS);  // a phone polling STATUS reads net_busy
+    disconnectLocked(handle);
+    for (uint32_t waited = 0; waited < FORCED_DISCONNECT_WAIT_MS && connected(); waited += 50) delay(50);
+  }
+  {
+    std::lock_guard<std::recursive_mutex> lock(mutex);
     started = false;
     progressChar = nullptr;
   }
@@ -1023,8 +1050,8 @@ bool releaseRadio() {
     connectionHandle = 0xffff;
     changed();
   }
-  LOG_INF("BLE", "NimBLE released for network/flash (heap %u -> %u, max=%u)", (unsigned)before,
-          (unsigned)ESP.getFreeHeap(), (unsigned)ESP.getMaxAllocHeap());
+  LOG_INF("BLE", "NimBLE released for %s (heap %u -> %u, max=%u)", forJob ? forJob : "network/flash",
+          (unsigned)before, (unsigned)ESP.getFreeHeap(), (unsigned)ESP.getMaxAllocHeap());
   return true;
 }
 void restoreRadio() {
@@ -1033,6 +1060,7 @@ void restoreRadio() {
     std::lock_guard<std::recursive_mutex> lock(mutex);
     if (!released) return;
     released = false;
+    netBusy.clear();
     changed();
   }
   startRadioLocked();
@@ -1394,6 +1422,14 @@ bool connected() {
   std::lock_guard<std::recursive_mutex> lock(mutex);
   return isConnected;
 }
+uint32_t linkedForMs() {
+  std::lock_guard<std::recursive_mutex> lock(mutex);
+  return isConnected ? millis() - lastConnectMs : 0;
+}
+uint32_t idleForMs() {
+  std::lock_guard<std::recursive_mutex> lock(mutex);
+  return isConnected ? millis() - lastActivity : 0;
+}
 void setup(const std::string& deviceId) {
   std::lock_guard<std::mutex> radio(radioMutex);
   bool needStart = false;
@@ -1537,7 +1573,9 @@ bool transferActive() {
 namespace studio_ble {
 void revoke() {}
 bool adoptAuthority(const std::string&, const std::string&, uint32_t, const std::string&) { return false; }
-bool releaseRadio() { return false; }
+bool releaseRadio(const char*) { return false; }
+uint32_t linkedForMs() { return 0; }
+uint32_t idleForMs() { return 0; }
 void restoreRadio() {}
 void begin() {}
 void setPumpTask(TaskHandle_t) {}

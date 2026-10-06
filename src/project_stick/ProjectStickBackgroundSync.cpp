@@ -130,16 +130,22 @@ void ProjectStickBackgroundSync::taskLoop() {
 
     Result completed;
     completed.kind = kind;
+    // User-started jobs (Settings > Firmware update, a BLE `ota`) disconnect a
+    // phone at once and are not held by the device's own error backoff.
     if (kind == WorkKind::Sync) {
+      service.beginJob("sync", false);
       completed.syncReport = service.sync();
     } else if (kind == WorkKind::FirmwareCheck) {
+      service.beginJob("firmware_check", true);
       completed.firmware = service.checkFirmware();
     } else if (kind == WorkKind::FirmwareInstall) {
+      service.beginJob("firmware_install", true);
       // Returns only when the install stopped (a success restarts).
       service.installFirmware(target);
       completed.firmware.status = ProjectStickService::FirmwareOffer::Status::InstallFailed;
       completed.firmware.target = std::move(target);
     } else {
+      service.beginJob("alerts", false);
       completed.alertReceived = service.pollAlerts();
       if (completed.alertReceived) completed.alertDisplay = service.displaySnapshot();
     }

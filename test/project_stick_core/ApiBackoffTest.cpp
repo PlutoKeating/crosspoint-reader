@@ -48,3 +48,14 @@ TEST(ApiBackoff, RateLimitHonoursRetryAfterAndBlocksManualSync) {
   EXPECT_TRUE(errors.clearForManual(1000));
   EXPECT_FALSE(errors.blocked(1000));
 }
+
+TEST(ApiBackoff, RateLimitWindowReportsSecondsLeftAndErrorsDoNot) {
+  project_stick::ApiBackoff backoff;
+  backoff.failure(1000, -1);  // a transport failure: the device's own backoff
+  EXPECT_TRUE(backoff.blocked(2000));
+  EXPECT_EQ(backoff.rateLimitRemainingSeconds(2000), 0u);
+  backoff.failure(2000, 429, 90);
+  EXPECT_EQ(backoff.rateLimitRemainingSeconds(2000), 90u);
+  EXPECT_EQ(backoff.rateLimitRemainingSeconds(2000 + 89500), 1u);
+  EXPECT_EQ(backoff.rateLimitRemainingSeconds(2000 + 90000), 0u);
+}

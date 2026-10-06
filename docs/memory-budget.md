@@ -180,6 +180,25 @@ linked (Wi-Fi off) and `metrics.wifi_on`; the serial line
 `Wi-Fi wanted/not wanted (…)` explains every radio change, and
 `Transfer installed (…, heap=N, worker stack free M)` after a push.
 
+## 2.7.3: a linked phone no longer starves cloud jobs
+
+Field report on 2.7.2: with the mini program connected, Settings > Firmware
+update failed once with 「设备内存不足…」 and once with 「云端繁忙」, and no
+request reached Cloudflare. Cause: `studio_ble::releaseRadio()` refused while a
+phone was connected, so the TLS heap stayed at the 2.6.5 level (13 KB free,
+10.7 KB largest block with both radios up and a phone linked): below the hard
+floor, the request was skipped as Memory. The in-job retry then hit the error
+backoff its own failure had set, which was reported as RateLimited.
+
+2.7.3: a cloud job disconnects the phone and releases NimBLE before it brings
+Wi-Fi up (user jobs at once, background jobs after an active phone has had up
+to 2 min; see studio-protocol.md "Cloud jobs and a linked phone"); the stack
+stays down, not advertising, for the whole job. Static RAM is unchanged
+(`.dram0.data` + `.dram0.bss` 67,212 B vs 67,153 B in 2.7.2: +59 B).
+STATE metrics now carry `tls_heap`/`tls_max` (heap right before the last TLS
+attempt) and `net` (last failure code) so the next field failure is readable
+server-side.
+
 ## Where the RAM goes
 
 Static, from `riscv32-esp-elf-size -A` on the release ELF (2.4.2 → 2.4.3):

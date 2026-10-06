@@ -67,9 +67,9 @@ class ProjectStickHost {
 #endif
   }
 
-  // True while page-independent work is running that the device must stay
-  // awake for: a phone link, a transfer, a Wi-Fi join or scan asked over BLE,
-  // a cloud job, a firmware update.
+  // True while page-independent work is running that needs the CPU at full
+  // speed (no idle power saving): a phone link, a transfer, a Wi-Fi join or
+  // scan asked over BLE, a cloud job, a firmware update.
   bool busy() const;
 
  private:
@@ -99,6 +99,8 @@ class ProjectStickHost {
   void mirrorWifiState();
   void startBleWifi(const std::string& ssid, const std::string& password);
   void pollBleWifi();
+  // A linked, active phone holds background cloud jobs back (project_stick::phoneLinkAction).
+  bool backgroundJobDeferred() const;
   project_stick::WifiNeeds wifiNeeds(uint32_t nowMs) const;
   void powerOffWifi(uint32_t nowMs);
   void refreshWifiSaved();
