@@ -179,6 +179,13 @@ int64_t pendingExpires = 0;
 size_t pendingSize = 0, pendingHeader = 0;
 StudioReceiver::Resume pendingResume;
 bool pendingAbort = false, pendingDiscard = false;
+// A `commit` the phone sent before its link dropped (2.7.10). Every chunk had
+// reached the queue (ATT keeps writes in order), so the writer still drains it
+// and installs under the old session instead of aborting: the field report had
+// a complete incoming.bin and an unchanged state.json. The phone's next begin4
+// for the same task waits for that install (state 3, then 4/5).
+bool detachedCommit = false;
+std::string detachedTask, detachedHash;
 // Firmware over BLE (op fw4, 2.7.4): the session streams an image instead of
 // content. FirmwareReceiver writes it to firmware.tmp; once complete the
 // pump installs it like an SD-card update and restarts.
@@ -314,9 +321,16 @@ void requestAbortLocked(const bool discard) {
   wakePump();
 }
 void resetSession() {
-  if (authenticated && state == "receiving") awaitResume();  // the phone left mid-transfer; it reconnects and resumes
-  if (authenticated) requestAbortLocked(false);              // keep the partial for a resume
-  dropQueueLocked();
+  if (authenticated && !firmwareTransfer && pendingOp == PendingOp::Commit) {
+    detachedCommit = true;  // the queue and the commit stay with the writer
+    detachedTask = task;
+    detachedHash = hash;
+    wakePump();
+  } else {
+    if (authenticated && state == "receiving") awaitResume();  // the phone left mid-transfer; it reconnects and resumes
+    if (authenticated) requestAbortLocked(false);              // keep the partial for a resume
+    dropQueueLocked();
+  }
   queuedEnd = announcedOffset = lastNotified = 0;
   packetsSinceNotify = 0;
   progressPending = framesPhase = gapReported = outcomeRead = false;
@@ -460,6 +474,8 @@ studio_v4::State progressStateLocked() {
   if (state == "paused") return studio_v4::State::Paused;
   if (!authenticated) return studio_v4::State::Idle;
   // A firmware transfer reports state 1 for its whole stream (no `need`).
+  // `commit` accepted: state 3 at once, while the writer drains and installs.
+  if (state == "receiving" && pendingOp == PendingOp::Commit) return studio_v4::State::Committing;
   if (state == "receiving")
     return framesPhase && !firmwareTransfer ? studio_v4::State::ReceivingFrames : studio_v4::State::ReceivingHeader;
   if (state == "refreshing") return studio_v4::State::Committing;
@@ -856,7 +872,10 @@ class Callbacks final : public NimBLECharacteristicCallbacks {
       settimeofday(&tv, nullptr);
     }
     const auto active = StudioFrame::instance().snapshot();
-    const bool completed = active.task == incomingTask && active.hash == incomingHash;
+    // A commit left by the dropped link is still installing this very task:
+    // answer like a completed one (state 3, then 4/5 once it is shown).
+    const bool installing = detachedCommit && detachedTask == incomingTask && detachedHash == incomingHash;
+    const bool completed = installing || (active.task == incomingTask && active.hash == incomingHash);
     StudioReceiver::Resume resume;
     if (!completed) {
       // A pending abort of the previous session is not "busy": pump() applies
@@ -904,7 +923,7 @@ class Callbacks final : public NimBLECharacteristicCallbacks {
     needValue.clear();
     needCount = 0;
     packetsSinceNotify = 0;
-    state = completed ? (active.displayed ? "displayed" : "refreshing") : "receiving";
+    state = completed ? (active.displayed && !installing ? "displayed" : "refreshing") : "receiving";
     if (state == "displayed") {
       outcomeAtMs = millis() ? millis() : 1;
       outcomeRead = false;
@@ -1017,6 +1036,7 @@ class Callbacks final : public NimBLECharacteristicCallbacks {
         // The writer task checks, once every queued chunk is applied, that the
         // stream delivered every needed frame; STATUS stays "receiving" until then.
         pendingOp = PendingOp::Commit;
+        notify = true;  // state 3: the phone knows the commit arrived
       } else {
         fail("unexpected_control");
         notify = true;
@@ -1661,6 +1681,20 @@ void pump() {
     const bool ok = receiver.commit();
     if (ok) StudioFrame::instance().tick(time(nullptr));
     std::lock_guard<std::recursive_mutex> lock(mutex);
+    if (detachedCommit) {
+      if (!ok) receiver.abort(false);  // the partial stays for the phone's retry
+      detachedCommit = false;
+      dropQueueLocked();  // the old session's slots; no begin4 allocated new ones meanwhile
+      noteTransferLocked("commit", ok ? "ok_after_link_loss" : "failed_after_link_loss");
+      LOG_INF("BLE", "Commit after the link loss %s", ok ? "installed" : "failed");
+      if (ok) ++completedTransfers;
+      // A phone that reconnected for this task waits in state 3.
+      if (!ok && authenticated && task == detachedTask && state == "refreshing") {
+        fail("storage_or_cipher_error", false);
+        notify = true;
+      }
+      continue;
+    }
     if (session != sessionId) continue;
     notify = true;
     if (!ok) {

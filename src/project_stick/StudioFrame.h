@@ -81,7 +81,12 @@ class StudioFrame {
   uint32_t generation() const { return revision.load(); }
 
  private:
+  // `mutex` guards the state below and is held across card access (start,
+  // append, persist). BLE host callbacks read only the published copies
+  // (snapshot, busy, received, resumeOffset, nextBoundary), so a slow SD write
+  // never stalls the NimBLE host task (2.7.10).
   mutable std::recursive_mutex mutex;
+  class Writer;  // holds `mutex` and publishes the copies when released
   Snapshot active, incoming, savedProgram, lastVisual;
   size_t lastVisualOffset = 0;
   studio::Program program;
@@ -104,6 +109,14 @@ class StudioFrame {
   } partial;
   bool receiving = false, loaded = false;
   std::atomic<uint32_t> revision{0};
+  mutable std::mutex viewMutex;  // never held across card access or `mutex`
+  Snapshot activeView;
+  std::string partialTaskView, partialHashView;
+  size_t partialSizeView = 0;
+  std::atomic<size_t> partialBytesView{0}, offsetView{0};
+  std::atomic<bool> receivingView{false}, hasContentView{false};
+  mutable std::atomic<int64_t> boundaryView{-1};
+  void publishLocked();
   bool persist();
   void collectGarbage();
 };

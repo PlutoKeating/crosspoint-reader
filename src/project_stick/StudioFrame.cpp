@@ -60,8 +60,28 @@ StudioFrame& StudioFrame::instance() {
   static StudioFrame frame;
   return frame;
 }
+class StudioFrame::Writer {
+ public:
+  explicit Writer(StudioFrame& frame) : frame_(frame), lock_(frame.mutex) {}
+  ~Writer() { frame_.publishLocked(); }  // runs before lock_ is released
+
+ private:
+  StudioFrame& frame_;
+  std::lock_guard<std::recursive_mutex> lock_;
+};
+void StudioFrame::publishLocked() {
+  std::lock_guard<std::mutex> view(viewMutex);
+  activeView = active;
+  partialTaskView = partial.task;
+  partialHashView = partial.hash;
+  partialSizeView = partial.size;
+  partialBytesView.store(partial.bytes);
+  offsetView.store(offset);
+  receivingView.store(receiving);
+  hasContentView.store(!active.hash.empty());
+}
 void StudioFrame::load() {
-  std::lock_guard<std::recursive_mutex> lock(mutex);
+  Writer lock(*this);
   if (loaded) return;
   loaded = true;
   Storage.mkdir(ROOT, true);
@@ -154,7 +174,7 @@ void StudioFrame::refreshStorageUsage() {
 }
 bool StudioFrame::start(const std::string& task, const std::string& hash, int64_t expires, size_t size,
                         size_t resumeLimit) {
-  std::lock_guard<std::recursive_mutex> lock(mutex);
+  Writer lock(*this);
   if (receiving || task.size() != 36 || !validHash(hash) || size < BYTES || size > MAX_BYTES) return false;
   Storage.mkdir(ROOT, true);
   incoming = {task, hash, expires, false, size, ""};
@@ -232,9 +252,9 @@ bool StudioFrame::start(const std::string& task, const std::string& hash, int64_
   return true;
 }
 size_t StudioFrame::resumeOffset(const std::string& task, const std::string& hash, const size_t size) const {
-  std::lock_guard<std::recursive_mutex> lock(mutex);
-  return partial.task == task && partial.hash == hash && partial.size == size && partial.bytes <= size ? partial.bytes
-                                                                                                        : 0;
+  std::lock_guard<std::mutex> view(viewMutex);
+  const size_t bytes = partialBytesView.load();
+  return partialTaskView == task && partialHashView == hash && partialSizeView == size && bytes <= size ? bytes : 0;
 }
 bool StudioFrame::append(size_t expectedOffset, const uint8_t* data, size_t length) {
   std::lock_guard<std::recursive_mutex> lock(mutex);
@@ -246,31 +266,40 @@ bool StudioFrame::append(size_t expectedOffset, const uint8_t* data, size_t leng
   mbedtls_sha256_update(&sha, data, length);
   offset += length;
   partial.bytes = offset;
+  offsetView.store(offset);
+  partialBytesView.store(offset);
   return true;
 }
 bool StudioFrame::commit() {
-  std::lock_guard<std::recursive_mutex> lock(mutex);
-  if (!receiving || offset != incoming.size) {
-    abort();
-    return false;
-  }
-  uint8_t bytes[32];
-  mbedtls_sha256_finish(&sha, bytes);
-  mbedtls_sha256_free(&sha);
-  receiving = false;
-  output.close();
-  partial = {};
-  char digest[65];
-  for (size_t i = 0; i < 32; ++i) snprintf(digest + i * 2, 3, "%02x", bytes[i]);
-  if (incoming.hash != digest) {
-    Storage.remove(TEMP);
-    Storage.remove(PARTIAL);
-    return false;
+  // Three steps; the card work between them runs without the lock, so the UI
+  // loop and the BLE callbacks reading the published state never wait for a
+  // rename, a header parse or the garbage collection (2.7.10).
+  Snapshot next;
+  {
+    Writer lock(*this);
+    if (!receiving || offset != incoming.size) {
+      abort();
+      return false;
+    }
+    uint8_t bytes[32];
+    mbedtls_sha256_finish(&sha, bytes);
+    mbedtls_sha256_free(&sha);
+    receiving = false;
+    output.close();
+    partial = {};
+    char digest[65];
+    for (size_t i = 0; i < 32; ++i) snprintf(digest + i * 2, 3, "%02x", bytes[i]);
+    if (incoming.hash != digest) {
+      Storage.remove(TEMP);
+      Storage.remove(PARTIAL);
+      return false;
+    }
+    next = incoming;
   }
   Storage.remove(PARTIAL);
   Storage.remove(RECORD_STAGE);
-  const std::string path = fileFor(incoming.hash);
-  if (Storage.exists(path.c_str()) && verifyFile(path, incoming.hash))
+  const std::string path = fileFor(next.hash);
+  if (Storage.exists(path.c_str()) && verifyFile(path, next.hash))
     Storage.remove(TEMP);
   else {
     Storage.remove(path.c_str());
@@ -278,55 +307,58 @@ bool StudioFrame::commit() {
   }
   studio::Program nextProgram;
   size_t nextHeader = 0;
-  if (incoming.size > BYTES && !readProgram(incoming, nextProgram, nextHeader)) {
+  if (next.size > BYTES && !readProgram(next, nextProgram, nextHeader)) {
     Storage.remove(path.c_str());
     return false;
   }
-  const Snapshot old = active, oldSaved = savedProgram, oldVisual = lastVisual;
-  const auto oldVisualOffset = lastVisualOffset;
-  const int oldSelected = selectedFrame, oldAlert = alertFrame;
-  const bool oldAlertDisplayed = alertDisplayed;
-  const auto oldProgram = program;
-  const auto oldPlayback = playback;
-  const size_t oldOffset = pixelOffset, oldHeader = headerOffset;
-  if (!active.hash.empty() && (active.size == BYTES || selectedFrame >= 0)) {
-    lastVisual = active;
-    lastVisualOffset = pixelOffset;
-  }
-  active = incoming;
-  alertFrame = -1;
-  alertDisplayed = false;
-  pixelOffset = 0;
-  if (incoming.size > BYTES) {
-    savedProgram = incoming;
-    program = std::move(nextProgram);
-    headerOffset = nextHeader;
-    playback = {};
-    lastTickNow = 0;
-    selectedFrame = -1;
-    pixelOffset = headerOffset;
-  }
-  if (!persist()) {
-    active = old;
-    savedProgram = oldSaved;
-    program = oldProgram;
-    playback = oldPlayback;
-    lastTickNow = 0;
-    pixelOffset = oldOffset;
-    headerOffset = oldHeader;
-    lastVisual = oldVisual;
-    lastVisualOffset = oldVisualOffset;
-    selectedFrame = oldSelected;
-    alertFrame = oldAlert;
-    alertDisplayed = oldAlertDisplayed;
-    return false;
+  {
+    Writer lock(*this);
+    const Snapshot old = active, oldSaved = savedProgram, oldVisual = lastVisual;
+    const auto oldVisualOffset = lastVisualOffset;
+    const int oldSelected = selectedFrame, oldAlert = alertFrame;
+    const bool oldAlertDisplayed = alertDisplayed;
+    const auto oldProgram = program;
+    const auto oldPlayback = playback;
+    const size_t oldOffset = pixelOffset, oldHeader = headerOffset;
+    if (!active.hash.empty() && (active.size == BYTES || selectedFrame >= 0)) {
+      lastVisual = active;
+      lastVisualOffset = pixelOffset;
+    }
+    active = next;
+    alertFrame = -1;
+    alertDisplayed = false;
+    pixelOffset = 0;
+    if (next.size > BYTES) {
+      savedProgram = next;
+      program = std::move(nextProgram);
+      headerOffset = nextHeader;
+      playback = {};
+      lastTickNow = 0;
+      selectedFrame = -1;
+      pixelOffset = headerOffset;
+    }
+    if (!persist()) {
+      active = old;
+      savedProgram = oldSaved;
+      program = oldProgram;
+      playback = oldPlayback;
+      lastTickNow = 0;
+      pixelOffset = oldOffset;
+      headerOffset = oldHeader;
+      lastVisual = oldVisual;
+      lastVisualOffset = oldVisualOffset;
+      selectedFrame = oldSelected;
+      alertFrame = oldAlert;
+      alertDisplayed = oldAlertDisplayed;
+      return false;
+    }
+    ++revision;
   }
   collectGarbage();
-  ++revision;
   return true;
 }
 void StudioFrame::abort(bool discard) {
-  std::lock_guard<std::recursive_mutex> lock(mutex);
+  Writer lock(*this);
   if (receiving) {
     output.close();
     mbedtls_sha256_free(&sha);
@@ -494,7 +526,7 @@ StudioFrame::StreamResult StudioFrame::stream(const GfxRenderer& renderer, const
   return ok ? StreamResult::Shown : StreamResult::Failed;
 }
 void StudioFrame::displayed() {
-  std::lock_guard<std::recursive_mutex> lock(mutex);
+  Writer lock(*this);
   if (alertFrame >= 0) {
     alertDisplayed = true;
     return;
@@ -502,7 +534,7 @@ void StudioFrame::displayed() {
   if (active.size == BYTES || selectedFrame >= 0) active.displayed = true;
 }
 void StudioFrame::clear() {
-  std::lock_guard<std::recursive_mutex> lock(mutex);
+  Writer lock(*this);
   abort(true);
   active = {};
   alertFrame = -1;
@@ -526,13 +558,10 @@ void StudioFrame::clear() {
   }
   ++revision;
 }
-bool StudioFrame::hasContent() const {
-  std::lock_guard<std::recursive_mutex> lock(mutex);
-  return !active.hash.empty();
-}
+bool StudioFrame::hasContent() const { return hasContentView.load(); }
 StudioFrame::Snapshot StudioFrame::snapshot() const {
-  std::lock_guard<std::recursive_mutex> lock(mutex);
-  return active;
+  std::lock_guard<std::mutex> view(viewMutex);
+  return activeView;
 }
 StudioFrame::Snapshot StudioFrame::displaySnapshot() const {
   std::lock_guard<std::recursive_mutex> lock(mutex);
@@ -542,14 +571,8 @@ StudioFrame::Snapshot StudioFrame::displaySnapshot() const {
   visual.displayed = alertDisplayed;
   return visual;
 }
-bool StudioFrame::busy() const {
-  std::lock_guard<std::recursive_mutex> lock(mutex);
-  return receiving;
-}
-size_t StudioFrame::received() const {
-  std::lock_guard<std::recursive_mutex> lock(mutex);
-  return offset;
-}
+bool StudioFrame::busy() const { return receivingView.load(); }
+size_t StudioFrame::received() const { return offsetView.load(); }
 bool StudioFrame::flushOutput() {
   std::lock_guard<std::recursive_mutex> lock(mutex);
   if (!receiving) return false;
@@ -660,7 +683,7 @@ bool StudioFrame::readProgram(const Snapshot& source, studio::Program& result, s
   return true;
 }
 void StudioFrame::restore() {
-  std::lock_guard<std::recursive_mutex> lock(mutex);
+  Writer lock(*this);
   if (active.hash == savedProgram.hash) return;
   lastTickNow = 0;  // re-evaluate the restored program on the next tick
   if (savedProgram.hash.empty()) {
@@ -705,6 +728,7 @@ void StudioFrame::tick(int64_t now, int event, int64_t alertUntil) {
       alertFrame = overlay;
       alertDisplayed = false;
       active.displayed = false;
+      publishLocked();
       ++revision;
     }
     if (!event) return;
@@ -725,6 +749,7 @@ void StudioFrame::tick(int64_t now, int event, int64_t alertUntil) {
     pixelOffset = headerOffset + size_t(index) * BYTES;
     active.card = program.cardIds[index];
     active.displayed = false;
+    publishLocked();
     persist();
     ++revision;
   } else if (event)
@@ -732,8 +757,13 @@ void StudioFrame::tick(int64_t now, int event, int64_t alertUntil) {
 }
 
 int64_t StudioFrame::nextBoundary(int64_t now) const {
-  std::lock_guard<std::recursive_mutex> lock(mutex);
-  return now > 1735689600 && !savedProgram.hash.empty() ? studio::boundary(program, now) : -1;
+  // Asked from BLE host callbacks: while another task holds the lock for card
+  // work, the last computed boundary answers (the plan changes only at commit).
+  std::unique_lock<std::recursive_mutex> lock(mutex, std::try_to_lock);
+  if (!lock.owns_lock()) return boundaryView.load();
+  const int64_t boundary = now > 1735689600 && !savedProgram.hash.empty() ? studio::boundary(program, now) : -1;
+  boundaryView.store(boundary);
+  return boundary;
 }
 
 bool StudioFrame::portable() const {
@@ -741,8 +771,14 @@ bool StudioFrame::portable() const {
   return !savedProgram.hash.empty() && program.mode == "portable";
 }
 
+// Called without the lock: only the keep list is read under it. A file the
+// UI loop starts to show meanwhile is in that list (active, saved, visual).
 void StudioFrame::collectGarbage() {
-  std::vector<std::string> keep{active.hash, savedProgram.hash, lastVisual.hash};
+  std::vector<std::string> keep;
+  {
+    std::lock_guard<std::recursive_mutex> lock(mutex);
+    keep = {active.hash, savedProgram.hash, lastVisual.hash};
+  }
   HalFile backup;
   if (Storage.openFileForRead("STUDIO", BACKUP, backup)) {
     JsonDocument doc;
